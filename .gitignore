@@ -1,24 +1,58 @@
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *$py.class
+
+# ===== Virtualenv =====
+.venv/
+venv/
+env/
+
+# ===== Environment files =====
+.env
+.env.*
+
+# ===== Logs =====
+*.log
+log/
+logs/
+
+# ===== Runtime data =====
+data/message_logs/
+data/*.json
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Editor =====
+.vscode/
+.idea/
+
+# ===== Testing =====
+.coverage
+htmlcov/
+
+# ===== Build =====
+dist/
+build/
+
+
+# --- added locally (generated files) ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+.env
+.env.*
 
 .venv/
 venv/
 env/
 
-.env
-.env.*
+data/message_logs/
+data/*.json
 
 log/
 logs/
 *.log
-
-data/message_logs/
-data/*.json
-
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-dist/
-build/
