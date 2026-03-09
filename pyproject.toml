@@ -7,6 +7,8 @@ requires-python = ">=3.13"
 dependencies = [
     "ddgs>=9.10.0",
     "discord>=2.3.2",
+    "discord-ext-voice-recv>=0.5.2a179",
     "dotenv>=0.9.9",
+    "faster-whisper>=1.1.1",
     "ollama>=0.6.1",
 ]

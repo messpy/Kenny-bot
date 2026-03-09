@@ -6,8 +6,10 @@ from typing import Dict, Tuple, Optional
 
 import discord
 from discord.ext import commands
+from utils.runtime_settings import get_settings
 
 JST = timezone(timedelta(hours=9))
+_settings = get_settings()
 
 
 class VoiceLogger(commands.Cog):
@@ -40,6 +42,54 @@ class VoiceLogger(commands.Cog):
         elif before.channel != after.channel:
             await self._handle_voice_leave(member, before.channel, guild)
             await self._handle_voice_join(member, after.channel, guild)
+
+        # 議事録モード中のVCが無人になったら自動停止
+        await self._maybe_auto_stop_minutes(guild, before.channel, after.channel)
+
+    async def _maybe_auto_stop_minutes(
+        self,
+        guild: discord.Guild,
+        before_channel: Optional[discord.VoiceChannel],
+        after_channel: Optional[discord.VoiceChannel],
+    ):
+        session = self.bot.meeting_minutes.get_session(guild.id)  # type: ignore[attr-defined]
+        if not session:
+            return
+
+        target = guild.get_channel(session.voice_channel_id)
+        if not isinstance(target, discord.VoiceChannel):
+            return
+
+        # 更新対象が議事録VCに関係ないなら無視
+        if before_channel != target and after_channel != target:
+            return
+
+        if not self.bot.meeting_minutes.is_human_empty(target):  # type: ignore[attr-defined]
+            # 参加者がいても最大時間を超えたら自動停止（負荷対策）
+            max_minutes = int(_settings.get("meeting.max_minutes", 90))
+            elapsed = datetime.now(timezone.utc) - session.started_at
+            if max_minutes <= 0 or elapsed < timedelta(minutes=max_minutes):
+                return
+            reason = f"最大録音時間 {max_minutes} 分を超えたため自動停止"
+        else:
+            reason = "VCが無人になったため自動停止"
+
+        result = await self.bot.meeting_minutes.stop_session(  # type: ignore[attr-defined]
+            bot=self.bot,
+            guild=guild,
+            reason=reason,
+            mention_user_id=session.started_by_id,
+        )
+        if not result:
+            return
+
+        out_ch = self.bot.meeting_minutes.resolve_announce_channel(  # type: ignore[attr-defined]
+            guild,
+            session.announce_channel_id,
+        )
+        if out_ch:
+            embed = self.bot.meeting_minutes.build_result_embed(guild, result)  # type: ignore[attr-defined]
+            await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
 
     async def _handle_voice_join(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC入室を記録してロギング"""

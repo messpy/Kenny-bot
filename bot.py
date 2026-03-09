@@ -17,6 +17,10 @@ from cogs.voice_logger import VoiceLogger
 from cogs.member_logger import MemberLogger
 from cogs.message_logger import MessageLogger
 from cogs.mod_panel import ModPanel
+from cogs.slash_commands import SlashCommands
+from cogs.game_commands import GameCommands
+from utils.meeting_minutes import MeetingMinutesManager
+from utils.runtime_settings import get_settings
 
 
 logger = logging.getLogger(__name__)
@@ -26,10 +30,23 @@ class MyBot(commands.Bot):
     """Discord Bot メインクラス"""
 
     def __init__(self, *args, **kwargs):
+        # 既定helpを無効化してカスタムhelpを使用
+        kwargs.setdefault("help_command", None)
         super().__init__(*args, **kwargs)
 
-        # Spam Guard
-        self.spam_guard = SpamGuard(SpamPolicy())
+        # Spam Guard（設定から読み込み）
+        settings = get_settings()
+        self.spam_guard = SpamGuard(
+            SpamPolicy(
+                max_msgs=max(1, int(settings.get("security.spam.max_msgs", 5))),
+                per_seconds=max(1.0, float(settings.get("security.spam.per_seconds", 8.0))),
+                max_ai_calls=max(1, int(settings.get("security.spam.max_ai_calls", 2))),
+                ai_per_seconds=max(1.0, float(settings.get("security.spam.ai_per_seconds", 20.0))),
+                dup_window_seconds=max(1.0, float(settings.get("security.spam.dup_window_seconds", 12.0))),
+                warn_cooldown_seconds=max(1.0, float(settings.get("security.spam.warn_cooldown_seconds", 20.0))),
+            )
+        )
+        self.meeting_minutes = MeetingMinutesManager()
 
         # AI: Ollama（2つの方法を用意）
         # 方法1: subprocess/asyncio ベース（旧）
@@ -63,6 +80,7 @@ class MyBot(commands.Bot):
 
         # Bot 用に設定を保持
         self.ollama_model = OLLAMA_MODEL_DEFAULT
+        self._tree_synced = False
 
         # リモート ollama を使う場合（環境変数 OLLAMA_HOST で指定）
         # self.ollama_client = create_ollama_client(
@@ -80,7 +98,16 @@ class MyBot(commands.Bot):
         await self.add_cog(MemberLogger(self))
         await self.add_cog(MessageLogger(self))
         await self.add_cog(ModPanel(self))
+        await self.add_cog(SlashCommands(self))
+        await self.add_cog(GameCommands(self))
 
     async def on_ready(self):
         """Bot 起動完了"""
+        if not self._tree_synced:
+            try:
+                synced = await self.tree.sync()
+                logger.info("Slash commands synced: %d", len(synced))
+            except Exception:
+                logger.exception("Failed to sync slash commands")
+            self._tree_synced = True
         logger.info("=== Bot Ready as %s ===", self.user)

@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Optional, List
 
 from utils.config import MESSAGE_LOG_DIR
+from utils.runtime_settings import get_settings
 
 logger = logging.getLogger(__name__)
 JST = timezone(timedelta(hours=9))
+_settings = get_settings()
 
 
 class MessageStore:
@@ -46,6 +48,31 @@ class MessageStore:
         except Exception as e:
             logger.error(f"Failed to save messages: {e}")
 
+    def _prune_messages(self, messages: List[dict]) -> List[dict]:
+        """保持期間・件数に基づいてメッセージを間引く"""
+        retention_days = int(_settings.get("chat.history_retention_days", 30))
+        max_messages = int(_settings.get("chat.history_max_messages", 1000))
+
+        # 期限で間引き（0以下なら期限無効）
+        if retention_days > 0:
+            cutoff = datetime.now(JST) - timedelta(days=retention_days)
+            kept: List[dict] = []
+            for m in messages:
+                ts = m.get("timestamp", "")
+                try:
+                    dt = datetime.fromisoformat(ts)
+                except Exception:
+                    dt = None
+                if dt is None or dt >= cutoff:
+                    kept.append(m)
+            messages = kept
+
+        # 件数で間引き
+        if max_messages > 0 and len(messages) > max_messages:
+            messages = messages[-max_messages:]
+
+        return messages
+
     def add_message(self, author_name: str, content: str, message_id: int, author_id: int = 0) -> None:
         """メッセージを履歴に追加
 
@@ -68,9 +95,8 @@ class MessageStore:
             }
             messages.append(new_msg)
 
-            # 古いメッセージを削除（最新1000件を保持）
-            if len(messages) > 1000:
-                messages = messages[-1000:]
+            # 保持設定に基づき古いメッセージを削除
+            messages = self._prune_messages(messages)
 
             self._save_messages(messages)
         except Exception as e:
@@ -86,7 +112,7 @@ class MessageStore:
             フォーマット済みの会話文脈（プロンプト用）
         """
         try:
-            messages = self._load_messages()
+            messages = self._prune_messages(self._load_messages())
 
             # 最新の n 件を取得
             recent = messages[-lines:] if messages else []

@@ -1,0 +1,54 @@
+global:
+  ollama:
+    model_default: gpt-oss:120b-cloud
+    model_chat: gpt-oss:120b-cloud
+    model_summary: gpt-oss:120b-cloud
+    timeout_sec: 180
+  chat:
+    history_lines: 20
+    history_max_messages: 1000
+    history_retention_days: 30
+    max_response_length: 1800
+    max_response_length_prompt: 500
+  summarize_recent_default_messages: 30
+  summarize_recent:
+    history_fetch_limit: 300
+    transcript_lines_limit: 120
+    max_messages: 300
+    max_minutes: 720
+  kenny_chat:
+    cooldown_seconds: 12
+    block_invite_and_mass_mention: true
+  security:
+    ai_max_concurrency: 1
+    ai_channel_cooldown_seconds: 4
+    max_user_message_chars: 1200
+    spam:
+      max_msgs: 5
+      per_seconds: 8.0
+      max_ai_calls: 2
+      ai_per_seconds: 20.0
+      dup_window_seconds: 12.0
+      warn_cooldown_seconds: 20.0
+  meeting:
+    max_minutes: 90
+    audio_max_total_mb: 64
+    audio_max_user_mb: 8
+    whisper_model: tiny
+  keyword_reactions:
+    いいね: 👍
+    ミュ: 🐈️
+    みゅ: 🐈️
+    草: 😂
+    天才: 🧠
+    かわいい: 💕
+    おはよう: ☀
+    おやすみ: 🌙
+    天使: て、て、て、天使の羽👼
+  user_nicknames: {}
+  summarize_recent_default_minutes: 30
+guilds:
+  '664237144600215581':
+    summarize_recent_default_minutes: 720
+  '1317683053027659786':
+    summarize_recent_default_minutes: 600
