@@ -37,12 +37,34 @@ class AiueoBattleState:
     used_chars: set[str]
     revealed_chars: dict[int, set[str]]
     turn_index: int = 0
+    attacks_used_in_turn: int = 0
+
+
+@dataclass
+class WerewolfState:
+    guild_id: int
+    channel_id: int
+    host_user_id: int
+    alive_user_ids: set[int]
+    roles: dict[int, str]
+    wolf_user_ids: set[int]
+    action_message_ids: dict[int, tuple[str, int]]
+    pending_wolf_votes: dict[int, int]
+    pending_guard_target: int | None = None
+    pending_seer_target: int | None = None
+    day_vote_message_id: int | None = None
+    day_vote_candidates: list[int] | None = None
+    day_vote_excluded_voter_ids: set[int] | None = None
+    pending_day_votes: dict[int, int] | None = None
+    day_vote_runoff: bool = False
+    round_no: int = 1
 
 
 class GameCommands(commands.Cog):
     """ミニゲームコマンド"""
 
     JOIN_EMOJI = "🎮"
+    WEREWOLF_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     AIUEO_ROWS = [
         "あいうえお",
         "かきくけこ",
@@ -53,21 +75,14 @@ class GameCommands(commands.Cog):
         "まみむめも",
         "やゆよ",
         "らりるれろ",
-        "わ",
-        "がぎぐげご",
-        "ざじずぜぞ",
-        "だぢづでど",
-        "ばびぶべぼ",
-        "ぱぴぷぺぽ",
-        "ぁぃぅぇぉ",
-        "ゃゅょっ",
-        "ー",
+        "わをん",
     ]
     AIUEO_ALLOWED = set("".join(AIUEO_ROWS))
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._aiueo_states: dict[int, AiueoBattleState] = {}
+        self._werewolf_states: dict[int, WerewolfState] = {}
 
     @app_commands.command(name="game", description="ミニゲームを開始（リアクション参加）")
     @app_commands.checks.cooldown(1, 20.0)
@@ -190,7 +205,7 @@ class GameCommands(commands.Cog):
             results = await self._run_wordwolf(participants, category)
             title = "ワードウルフ配布をDM送信しました"
         else:
-            results = await self._run_werewolf(participants)
+            results = await self._run_werewolf(interaction, participants)
             title = "人狼役職をDM送信しました"
 
         ok = [r.user.mention for r in results if r.success]
@@ -230,62 +245,15 @@ class GameCommands(commands.Cog):
             return
 
         ch = (char or "").strip()
-        if len(ch) != 1:
-            await interaction.response.send_message("1文字だけ指定してください。", ephemeral=True)
-            return
-        if ch not in self.AIUEO_ALLOWED:
-            await interaction.response.send_message("使用できない文字です。", ephemeral=True)
-            return
-        if ch in state.used_chars:
-            await interaction.response.send_message("その文字はすでに使用済みです。", ephemeral=True)
+        error = self._validate_aiueo_attack_char(state, ch)
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
             return
 
-        state.used_chars.add(ch)
-        hit_players: list[int] = []
-        eliminated: list[int] = []
-
-        for uid in list(state.active_user_ids):
-            w = state.secret_words[uid]
-            if ch in w:
-                state.revealed_chars[uid].add(ch)
-                hit_players.append(uid)
-                if set(w) <= state.revealed_chars[uid]:
-                    state.active_user_ids.discard(uid)
-                    eliminated.append(uid)
-
-        # 勝敗判定
-        if len(state.active_user_ids) <= 1:
-            winner_id = next(iter(state.active_user_ids)) if state.active_user_ids else None
-            board = self._render_aiueo_board(state.used_chars)
-            status = self._render_aiueo_status(interaction.guild, state)
-            lines = [
-                f"✅ `{ch}` を宣言しました。",
-                f"ヒット人数: {len(hit_players)}",
-                f"脱落: {', '.join([f'<@{u}>' for u in eliminated]) if eliminated else 'なし'}",
-                "",
-                board,
-                "",
-                status,
-            ]
-            if winner_id:
-                lines.append(f"\n🏆 勝者: <@{winner_id}>")
-            else:
-                lines.append("\n🏁 全員脱落で終了")
-            await interaction.response.send_message("\n".join(lines))
+        text, ended = self._apply_aiueo_attack(interaction.guild, interaction.channel.id, state, interaction.user.id, ch)
+        await interaction.response.send_message(text)
+        if ended:
             self._aiueo_states.pop(interaction.channel.id, None)
-            return
-
-        # 次ターンへ
-        self._advance_turn(state)
-        next_uid = self._current_turn_user_id(state)
-        board = self._render_aiueo_board(state.used_chars)
-        status = self._render_aiueo_status(interaction.guild, state)
-        await interaction.response.send_message(
-            f"✅ `{ch}` を宣言しました。\n"
-            f"ヒット人数: {len(hit_players)}\n"
-            f"脱落: {', '.join([f'<@{u}>' for u in eliminated]) if eliminated else 'なし'}\n"
-            f"次のターン: <@{next_uid}>\n\n{board}\n\n{status}"
-        )
 
     async def _aiueo_status_action(self, interaction: discord.Interaction):
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
@@ -359,12 +327,14 @@ class GameCommands(commands.Cog):
             out.append(await self._safe_dm(m, f"🐺 ワードウルフのお題: **{word}** {note}"))
         return out
 
-    async def _run_werewolf(self, members: list[discord.Member]) -> list[DMResult]:
+    async def _run_werewolf(self, interaction: discord.Interaction, members: list[discord.Member]) -> list[DMResult]:
         roles = self._build_werewolf_roles(len(members))
         random.shuffle(roles)
         out: list[DMResult] = []
+        role_map = {m.id: role for m, role in zip(members, roles)}
         for m, role in zip(members, roles):
             out.append(await self._safe_dm(m, f"🧩 あなたの役職は **{role}** です。"))
+        await self._start_werewolf_state(interaction, members, role_map)
         return out
 
     def _build_werewolf_roles(self, n: int) -> list[str]:
@@ -386,6 +356,454 @@ class GameCommands(commands.Cog):
             return DMResult(member, False, "DM拒否")
         except Exception as e:
             return DMResult(member, False, str(e)[:80])
+
+    async def _start_werewolf_state(
+        self,
+        interaction: discord.Interaction,
+        members: list[discord.Member],
+        role_map: dict[int, str],
+    ) -> None:
+        assert interaction.guild and isinstance(interaction.channel, discord.TextChannel)
+        wolves = {uid for uid, role in role_map.items() if role == "人狼"}
+        if not wolves:
+            return
+        state = WerewolfState(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            host_user_id=interaction.user.id,
+            alive_user_ids={m.id for m in members},
+            roles=role_map,
+            wolf_user_ids=wolves,
+            action_message_ids={},
+            pending_wolf_votes={},
+            pending_guard_target=None,
+            pending_seer_target=None,
+            day_vote_message_id=None,
+            day_vote_candidates=None,
+            day_vote_excluded_voter_ids=None,
+            pending_day_votes=None,
+            day_vote_runoff=False,
+            round_no=1,
+        )
+        self._werewolf_states[interaction.guild.id] = state
+        await interaction.channel.send(
+            "🐺 **人狼ゲーム開始**\n"
+            "夜に人狼は襲撃先、占い師は占い先、騎士は護衛先をDMリアクションで選びます。"
+        )
+        await self._begin_werewolf_round(interaction.guild, state)
+
+    def _living_wolves(self, state: WerewolfState) -> list[int]:
+        return [uid for uid in state.wolf_user_ids if uid in state.alive_user_ids]
+
+    def _living_targets(self, state: WerewolfState) -> list[int]:
+        return [uid for uid in state.alive_user_ids if uid not in state.wolf_user_ids]
+
+    def _living_role_users(self, state: WerewolfState, role: str) -> list[int]:
+        return [uid for uid, user_role in state.roles.items() if user_role == role and uid in state.alive_user_ids]
+
+    def _living_nonwolves(self, state: WerewolfState) -> list[int]:
+        return [uid for uid in state.alive_user_ids if uid not in state.wolf_user_ids]
+
+    async def _begin_werewolf_round(self, guild: discord.Guild, state: WerewolfState) -> None:
+        end_text = self._werewolf_end_text(state)
+        if end_text:
+            await self._announce_werewolf_end(guild, state, end_text)
+            return
+
+        state.action_message_ids.clear()
+        state.pending_wolf_votes.clear()
+        state.pending_guard_target = None
+        state.pending_seer_target = None
+        state.day_vote_message_id = None
+        state.day_vote_candidates = None
+        state.day_vote_excluded_voter_ids = None
+        state.pending_day_votes = None
+        state.day_vote_runoff = False
+
+        channel = guild.get_channel(state.channel_id)
+        if isinstance(channel, discord.TextChannel):
+            await channel.send(f"🌙 **夜 {state.round_no}** 各役職はDMを確認してください。")
+
+        await self._send_werewolf_prompt(guild, state)
+        await self._send_seer_prompt(guild, state)
+        await self._send_knight_prompt(guild, state)
+
+    async def _send_werewolf_prompt(self, guild: discord.Guild, state: WerewolfState) -> None:
+        targets = self._living_nonwolves(state)
+        if len(targets) > len(self.WEREWOLF_EMOJIS):
+            channel = guild.get_channel(state.channel_id)
+            if isinstance(channel, discord.TextChannel):
+                await channel.send("人狼対象人数が多すぎるため、現在のDMリアクションUIでは扱えません。")
+            self._werewolf_states.pop(guild.id, None)
+            return
+
+        lines = [f"🌙 **襲撃対象を選んでください** Round {state.round_no}"]
+        emoji_to_target: dict[str, int] = {}
+        for idx, uid in enumerate(targets):
+            member = guild.get_member(uid)
+            if member is None:
+                continue
+            emoji = self.WEREWOLF_EMOJIS[idx]
+            emoji_to_target[emoji] = uid
+            lines.append(f"{emoji} {member.display_name}")
+        body = "\n".join(lines)
+
+        for wolf_uid in self._living_wolves(state):
+            member = guild.get_member(wolf_uid)
+            if member is None:
+                continue
+            try:
+                dm = member.dm_channel or await member.create_dm()
+                msg = await dm.send(body)
+                for emoji in emoji_to_target:
+                    await msg.add_reaction(emoji)
+                state.action_message_ids[msg.id] = ("wolf", wolf_uid)
+            except Exception:
+                continue
+
+    async def _send_seer_prompt(self, guild: discord.Guild, state: WerewolfState) -> None:
+        seers = self._living_role_users(state, "占い師")
+        if not seers:
+            return
+        targets = [uid for uid in state.alive_user_ids if uid != seers[0]]
+        if not targets or len(targets) > len(self.WEREWOLF_EMOJIS):
+            return
+        lines = [f"🔮 **占う相手を選んでください** Round {state.round_no}"]
+        emoji_to_target: dict[str, int] = {}
+        for idx, uid in enumerate(targets):
+            member = guild.get_member(uid)
+            if member is None:
+                continue
+            emoji = self.WEREWOLF_EMOJIS[idx]
+            emoji_to_target[emoji] = uid
+            lines.append(f"{emoji} {member.display_name}")
+        member = guild.get_member(seers[0])
+        if member is None:
+            return
+        try:
+            dm = member.dm_channel or await member.create_dm()
+            msg = await dm.send("\n".join(lines))
+            for emoji in emoji_to_target:
+                await msg.add_reaction(emoji)
+            state.action_message_ids[msg.id] = ("seer", seers[0])
+        except Exception:
+            return
+
+    async def _send_knight_prompt(self, guild: discord.Guild, state: WerewolfState) -> None:
+        knights = self._living_role_users(state, "騎士")
+        if not knights:
+            return
+        targets = list(state.alive_user_ids)
+        if not targets or len(targets) > len(self.WEREWOLF_EMOJIS):
+            return
+        lines = [f"🛡️ **護衛相手を選んでください** Round {state.round_no}"]
+        emoji_to_target: dict[str, int] = {}
+        for idx, uid in enumerate(targets):
+            member = guild.get_member(uid)
+            if member is None:
+                continue
+            emoji = self.WEREWOLF_EMOJIS[idx]
+            emoji_to_target[emoji] = uid
+            lines.append(f"{emoji} {member.display_name}")
+        member = guild.get_member(knights[0])
+        if member is None:
+            return
+        try:
+            dm = member.dm_channel or await member.create_dm()
+            msg = await dm.send("\n".join(lines))
+            for emoji in emoji_to_target:
+                await msg.add_reaction(emoji)
+            state.action_message_ids[msg.id] = ("knight", knights[0])
+        except Exception:
+            return
+
+    def _werewolf_end_text(self, state: WerewolfState) -> str | None:
+        wolves = len(self._living_wolves(state))
+        nonwolves = len(self._living_nonwolves(state))
+        if wolves <= 0:
+            return "人狼が全滅したため、村人陣営の勝ちです。"
+        if nonwolves <= 0 or wolves >= nonwolves:
+            return "人狼数が村人陣営以上になったため、人狼の勝ちです。"
+        return None
+
+    async def _resolve_werewolf_night(self, guild: discord.Guild, state: WerewolfState) -> None:
+        if not self._living_wolves(state):
+            await self._announce_werewolf_end(guild, state, "人狼が全滅したため、村人陣営の勝ちです。")
+            return
+
+        channel = guild.get_channel(state.channel_id)
+        lines: list[str] = []
+
+        if state.pending_seer_target is not None:
+            seer_uid = next(iter(self._living_role_users(state, "占い師")), None)
+            target_uid = state.pending_seer_target
+            if seer_uid is not None:
+                seer = guild.get_member(seer_uid)
+                target = guild.get_member(target_uid)
+                result = "人狼" if state.roles.get(target_uid) == "人狼" else "人狼ではありません"
+                try:
+                    if seer:
+                        dm = seer.dm_channel or await seer.create_dm()
+                        target_name = target.display_name if target else str(target_uid)
+                        await dm.send(f"🔮 `{target_name}` の占い結果: {result}")
+                except Exception:
+                    pass
+
+        attacked_uid: int | None = None
+        tied = False
+        votes = list(state.pending_wolf_votes.values())
+        if votes:
+            counts = {uid: votes.count(uid) for uid in set(votes)}
+            top_count = max(counts.values())
+            top_targets = [uid for uid, count in counts.items() if count == top_count]
+            tied = len(top_targets) > 1
+            attacked_uid = random.choice(top_targets)
+
+        if attacked_uid is not None:
+            attacked_member = guild.get_member(attacked_uid)
+            attacked_name = attacked_member.mention if attacked_member else f"`{attacked_uid}`"
+            if tied:
+                lines.append("🎲 人狼の投票が同票だったため、対象をランダムに決定しました。")
+            if state.pending_guard_target == attacked_uid:
+                lines.append(f"🛡️ {attacked_name} は騎士に護衛され、襲撃を防ぎました。")
+            else:
+                state.alive_user_ids.discard(attacked_uid)
+                lines.append(f"☠️ {attacked_name} が襲撃されました。")
+        else:
+            lines.append("🌙 今夜は人狼の襲撃が成立しませんでした。")
+
+        end_text = self._werewolf_end_text(state)
+        if isinstance(channel, discord.TextChannel):
+            await channel.send("\n".join(lines))
+        if end_text:
+            await self._announce_werewolf_end(guild, state, end_text)
+            return
+
+        await self._start_werewolf_day_vote(guild, state)
+
+    async def _start_werewolf_day_vote(
+        self,
+        guild: discord.Guild,
+        state: WerewolfState,
+        candidates: list[int] | None = None,
+        excluded_voter_ids: set[int] | None = None,
+        runoff: bool = False,
+    ) -> None:
+        channel = guild.get_channel(state.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+
+        vote_candidates = candidates or sorted(state.alive_user_ids)
+        if not vote_candidates:
+            await self._announce_werewolf_end(guild, state, "投票対象がいないため終了しました。")
+            return
+        if len(vote_candidates) > len(self.WEREWOLF_EMOJIS):
+            await channel.send("投票対象人数が多すぎるため、現在のリアクションUIでは扱えません。")
+            self._werewolf_states.pop(guild.id, None)
+            return
+
+        excluded = excluded_voter_ids or set()
+        eligible_voters = [uid for uid in state.alive_user_ids if uid not in excluded]
+        if not eligible_voters:
+            target_uid = random.choice(vote_candidates)
+            target_member = guild.get_member(target_uid)
+            target_name = target_member.mention if target_member else f"`{target_uid}`"
+            await channel.send(f"🎲 再投票できる人がいないため、ランダムで {target_name} を処刑しました。")
+            state.alive_user_ids.discard(target_uid)
+            end_text = self._werewolf_end_text(state)
+            if end_text:
+                await self._announce_werewolf_end(guild, state, end_text)
+                return
+            state.round_no += 1
+            await self._begin_werewolf_round(guild, state)
+            return
+
+        state.day_vote_candidates = vote_candidates
+        state.day_vote_excluded_voter_ids = set(excluded)
+        state.pending_day_votes = {}
+        state.day_vote_runoff = runoff
+
+        prefix = "🗳️ **再投票**\n" if runoff else f"☀️ **昼 {state.round_no} 投票**\n"
+        if runoff:
+            voter_text = "同票に入った人以外が投票してください。"
+        else:
+            voter_text = "生存者全員が投票してください。"
+        lines = [prefix + voter_text]
+        for idx, uid in enumerate(vote_candidates):
+            member = guild.get_member(uid)
+            if member is None:
+                continue
+            lines.append(f"{member.mention} {self.WEREWOLF_EMOJIS[idx]}")
+        msg = await channel.send("\n".join(lines))
+        for idx in range(len(vote_candidates)):
+            await msg.add_reaction(self.WEREWOLF_EMOJIS[idx])
+        state.day_vote_message_id = msg.id
+
+    async def _resolve_werewolf_day_vote(self, guild: discord.Guild, state: WerewolfState) -> None:
+        assert state.pending_day_votes is not None
+        assert state.day_vote_candidates is not None
+
+        channel = guild.get_channel(state.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+
+        counts = {uid: 0 for uid in state.day_vote_candidates}
+        for target_uid in state.pending_day_votes.values():
+            if target_uid in counts:
+                counts[target_uid] += 1
+
+        top_count = max(counts.values())
+        top_targets = [uid for uid, count in counts.items() if count == top_count]
+
+        if len(top_targets) == 1:
+            target_uid = top_targets[0]
+            target_member = guild.get_member(target_uid)
+            target_name = target_member.mention if target_member else f"`{target_uid}`"
+            await channel.send(f"⚖️ {target_name} が処刑されました。")
+            state.alive_user_ids.discard(target_uid)
+        elif not state.day_vote_runoff:
+            mentions = ", ".join(f"<@{uid}>" for uid in top_targets)
+            await channel.send(
+                f"⚖️ 同票になりました: {mentions}\n同票者以外で再投票します。"
+            )
+            await self._start_werewolf_day_vote(
+                guild,
+                state,
+                candidates=top_targets,
+                excluded_voter_ids=set(top_targets),
+                runoff=True,
+            )
+            return
+        else:
+            target_uid = random.choice(top_targets)
+            target_member = guild.get_member(target_uid)
+            target_name = target_member.mention if target_member else f"`{target_uid}`"
+            await channel.send(f"🎲 再投票も同票だったため、ランダムで {target_name} を処刑しました。")
+            state.alive_user_ids.discard(target_uid)
+
+        state.day_vote_message_id = None
+        state.day_vote_candidates = None
+        state.day_vote_excluded_voter_ids = None
+        state.pending_day_votes = None
+        state.day_vote_runoff = False
+
+        end_text = self._werewolf_end_text(state)
+        if end_text:
+            await self._announce_werewolf_end(guild, state, end_text)
+            return
+
+        state.round_no += 1
+        await self._begin_werewolf_round(guild, state)
+
+    async def _announce_werewolf_end(self, guild: discord.Guild, state: WerewolfState, text: str) -> None:
+        channel = guild.get_channel(state.channel_id)
+        if isinstance(channel, discord.TextChannel):
+            survivors = []
+            for uid in state.alive_user_ids:
+                member = guild.get_member(uid)
+                role = state.roles.get(uid, "不明")
+                if member:
+                    survivors.append(f"{member.display_name}({role})")
+            tail = f"\n生存者: {', '.join(survivors)}" if survivors else ""
+            await channel.send(f"🏁 {text}{tail}")
+        self._werewolf_states.pop(guild.id, None)
+
+    def _werewolf_targets_for_actor(self, state: WerewolfState, role: str, actor_uid: int) -> list[int]:
+        if role == "wolf":
+            return self._living_nonwolves(state)
+        if role == "seer":
+            return [uid for uid in state.alive_user_ids if uid != actor_uid]
+        if role == "knight":
+            return list(state.alive_user_ids)
+        return []
+
+    async def _maybe_resolve_werewolf_night(self, guild: discord.Guild, state: WerewolfState) -> None:
+        living_wolves = self._living_wolves(state)
+        seers = self._living_role_users(state, "占い師")
+        knights = self._living_role_users(state, "騎士")
+        wolves_ready = len(state.pending_wolf_votes) >= len(living_wolves)
+        seer_ready = not seers or state.pending_seer_target is not None
+        knight_ready = not knights or state.pending_guard_target is not None
+        if wolves_ready and seer_ready and knight_ready:
+            await self._resolve_werewolf_night(guild, state)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return
+        emoji = str(payload.emoji)
+        if emoji not in self.WEREWOLF_EMOJIS:
+            return
+
+        for guild_id, state in list(self._werewolf_states.items()):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+
+            if payload.guild_id == guild_id and payload.message_id == state.day_vote_message_id:
+                if (
+                    payload.user_id not in state.alive_user_ids
+                    or state.day_vote_candidates is None
+                    or state.pending_day_votes is None
+                ):
+                    return
+                excluded = state.day_vote_excluded_voter_ids or set()
+                if payload.user_id in excluded:
+                    return
+                target_uid = None
+                for idx, uid in enumerate(state.day_vote_candidates):
+                    if self.WEREWOLF_EMOJIS[idx] == emoji:
+                        target_uid = uid
+                        break
+                if target_uid is None:
+                    return
+                state.pending_day_votes[payload.user_id] = target_uid
+                eligible_voters = [uid for uid in state.alive_user_ids if uid not in excluded]
+                if len(state.pending_day_votes) >= len(eligible_voters):
+                    await self._resolve_werewolf_day_vote(guild, state)
+                return
+
+            action = state.action_message_ids.get(payload.message_id)
+            if action is None:
+                continue
+            role, actor_uid = action
+            if actor_uid != payload.user_id:
+                continue
+            targets = self._werewolf_targets_for_actor(state, role, actor_uid)
+            if len(targets) > len(self.WEREWOLF_EMOJIS):
+                continue
+            target_uid = None
+            for idx, uid in enumerate(targets):
+                if self.WEREWOLF_EMOJIS[idx] == emoji:
+                    target_uid = uid
+                    break
+            if target_uid is None:
+                continue
+
+            if role == "wolf":
+                state.pending_wolf_votes[actor_uid] = target_uid
+                confirm = "襲撃対象"
+            elif role == "seer":
+                state.pending_seer_target = target_uid
+                confirm = "占い対象"
+            elif role == "knight":
+                state.pending_guard_target = target_uid
+                confirm = "護衛対象"
+            else:
+                continue
+
+            member = guild.get_member(actor_uid)
+            try:
+                if member:
+                    dm = member.dm_channel or await member.create_dm()
+                    target_member = guild.get_member(target_uid)
+                    target_name = target_member.display_name if target_member else str(target_uid)
+                    await dm.send(f"✅ {confirm}を `{target_name}` に設定しました。")
+            except Exception:
+                pass
+
+            await self._maybe_resolve_werewolf_night(guild, state)
+            return
 
     async def _generate_words(self, count: int, category: str | None) -> list[str]:
         cat = strip_ansi_and_ctrl((category or "").strip()).replace("@", "＠")[:80]
@@ -428,7 +846,7 @@ class GameCommands(commands.Cog):
 
     async def _ask_ollama(self, prompt: str) -> str:
         try:
-            model_default = str(_settings.get("ollama.model_default", "gpt-oss:120b-cloud"))
+            model_default = str(_settings.get("ollama.model_default", "gpt-oss:120b"))
             text = self.bot.ollama_client.chat_simple(
                 model=model_default,
                 prompt=prompt,
@@ -460,19 +878,24 @@ class GameCommands(commands.Cog):
             "あいうえおバトルを開始します。参加者はDMで7文字以内の単語を送ってください（120秒以内）。",
             ephemeral=True,
         )
+        await interaction.channel.send(
+            "📝 参加者にDMを送りました。120秒以内に単語を送ってください。"
+        )
 
+        submissions = await asyncio.gather(
+            *(self._collect_secret_word(m, timeout_sec=120) for m in participants)
+        )
         words: dict[int, str] = {}
         failed: list[str] = []
-        for m in participants:
-            w = await self._collect_secret_word(m, timeout_sec=120)
-            if not w:
-                failed.append(m.mention)
+        for member, word in zip(participants, submissions):
+            if not word:
+                failed.append(member.mention)
             else:
-                words[m.id] = w
+                words[member.id] = word
 
-        if len(words) < 2:
+        if len(words) < 1:
             await interaction.channel.send(
-                "❌ 有効な単語提出者が2人未満だったため中止しました。\n"
+                "❌ 有効な単語提出者がいなかったため中止しました。\n"
                 f"未提出/無効: {', '.join(failed) if failed else 'なし'}"
             )
             return
@@ -489,6 +912,7 @@ class GameCommands(commands.Cog):
             used_chars=set(),
             revealed_chars={uid: set() for uid in order},
             turn_index=0,
+            attacks_used_in_turn=0,
         )
         self._aiueo_states[interaction.channel.id] = state
 
@@ -497,16 +921,17 @@ class GameCommands(commands.Cog):
         first_uid = self._current_turn_user_id(state)
         await interaction.channel.send(
             "🎯 **あいうえおバトル開始**\n"
-            "コマンド: `/game mode:あいうえおバトル action:文字宣言` で1文字宣言\n"
+            "現在ターンの人がチャンネルで1文字の50音を送ると攻撃になります\n"
+            "ヒットしたら同じターンでもう1回だけ攻撃できます（最大2回）\n"
             "`/game mode:あいうえおバトル action:状況表示` で状況確認\n"
-            f"最初のターン: <@{first_uid}>\n\n{board}\n\n{status}"
+            f"\n{board}\n\n{status}\n\n⚔️ <@{first_uid}> の攻撃です。"
         )
 
     async def _collect_secret_word(self, member: discord.Member, timeout_sec: int = 120) -> Optional[str]:
         try:
             await member.send(
                 "📝 あいうえおバトルの単語を送ってください。\n"
-                "条件: 7文字以内、ひらがな（濁点/小文字/ー可、を/ん不可）"
+                "条件: 7文字以内、ひらがなのみ（50音のみ）"
             )
         except Exception:
             return None
@@ -531,7 +956,7 @@ class GameCommands(commands.Cog):
                     pass
                 return w
             try:
-                await member.send("❌ 条件不一致です。7文字以内・使用可能文字のみで再入力してください。")
+                await member.send("❌ 条件不一致です。7文字以内・50音のみで再入力してください。")
             except Exception:
                 pass
 
@@ -541,8 +966,6 @@ class GameCommands(commands.Cog):
         for ch in word:
             if ch not in self.AIUEO_ALLOWED:
                 return False
-        if "を" in word or "ん" in word:
-            return False
         return True
 
     def _render_aiueo_board(self, used_chars: set[str]) -> str:
@@ -579,11 +1002,98 @@ class GameCommands(commands.Cog):
 
     def _advance_turn(self, state: AiueoBattleState) -> None:
         n = len(state.turn_user_ids)
+        state.attacks_used_in_turn = 0
         for _ in range(max(1, n)):
             state.turn_index = (state.turn_index + 1) % n
             uid = state.turn_user_ids[state.turn_index]
             if uid in state.active_user_ids:
                 return
+
+    def _validate_aiueo_attack_char(self, state: AiueoBattleState, ch: str) -> str | None:
+        if len(ch) != 1:
+            return "1文字だけ指定してください。"
+        if ch not in self.AIUEO_ALLOWED:
+            return "50音の1文字だけ使用できます。"
+        if ch in state.used_chars:
+            return "その文字はすでに使用済みです。"
+        return None
+
+    def _apply_aiueo_attack(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        state: AiueoBattleState,
+        attacker_uid: int,
+        ch: str,
+    ) -> tuple[str, bool]:
+        state.used_chars.add(ch)
+        state.attacks_used_in_turn += 1
+        hit_players: list[int] = []
+        eliminated: list[int] = []
+
+        for uid in list(state.active_user_ids):
+            w = state.secret_words[uid]
+            if ch in w:
+                state.revealed_chars[uid].add(ch)
+                hit_players.append(uid)
+                if set(w) <= state.revealed_chars[uid]:
+                    state.active_user_ids.discard(uid)
+                    eliminated.append(uid)
+
+        board = self._render_aiueo_board(state.used_chars)
+        status = self._render_aiueo_status(guild, state)
+        lines = [
+            f"✅ <@{attacker_uid}> の `{ch}` 攻撃。",
+            f"ヒット人数: {len(hit_players)}",
+            f"脱落: {', '.join([f'<@{u}>' for u in eliminated]) if eliminated else 'なし'}",
+            "",
+            board,
+            "",
+            status,
+        ]
+
+        if len(state.active_user_ids) <= 1:
+            winner_id = next(iter(state.active_user_ids)) if state.active_user_ids else None
+            if winner_id:
+                lines.append(f"\n🏆 勝者: <@{winner_id}>")
+            else:
+                lines.append("\n🏁 全員脱落で終了")
+            return "\n".join(lines), True
+
+        got_extra_attack = bool(hit_players) and state.attacks_used_in_turn < 2
+        if got_extra_attack:
+            lines.append(f"\n⚔️ <@{attacker_uid}> の攻撃です。もう1文字どうぞ。")
+            return "\n".join(lines), False
+
+        self._advance_turn(state)
+        next_uid = self._current_turn_user_id(state)
+        lines.append(f"\n⚔️ <@{next_uid}> の攻撃です。")
+        return "\n".join(lines), False
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild or not isinstance(message.channel, discord.TextChannel):
+            return
+
+        state = self._aiueo_states.get(message.channel.id)
+        if not state or state.guild_id != message.guild.id:
+            return
+        if message.author.id != self._current_turn_user_id(state):
+            return
+
+        ch = (message.content or "").strip()
+        if len(ch) != 1:
+            return
+
+        error = self._validate_aiueo_attack_char(state, ch)
+        if error:
+            await message.channel.send(error)
+            return
+
+        text, ended = self._apply_aiueo_attack(message.guild, message.channel.id, state, message.author.id, ch)
+        await message.channel.send(text)
+        if ended:
+            self._aiueo_states.pop(message.channel.id, None)
 
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         if isinstance(error, app_commands.CommandOnCooldown):

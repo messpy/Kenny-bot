@@ -1,0 +1,28 @@
+services:
+  bot:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VOICEVOX_URL: http://voicevox:50021
+    depends_on:
+      voicevox:
+        condition: service_started
+    volumes:
+      - ./data:/app/data
+      - ./log:/app/log
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-latest
+    restart: unless-stopped
+
+volumes:
+  ollama-data:

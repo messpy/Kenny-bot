@@ -46,6 +46,14 @@ class VoiceLogger(commands.Cog):
         # 議事録モード中のVCが無人になったら自動停止
         await self._maybe_auto_stop_minutes(guild, before.channel, after.channel)
 
+    def _should_log_channel(self, guild: discord.Guild, channel: discord.VoiceChannel) -> bool:
+        if bool(_settings.get("voice.log_private_channels", False, guild_id=guild.id)):
+            return True
+
+        everyone = guild.default_role
+        perms = channel.permissions_for(everyone)
+        return bool(perms.view_channel and perms.connect)
+
     async def _maybe_auto_stop_minutes(
         self,
         guild: discord.Guild,
@@ -86,6 +94,7 @@ class VoiceLogger(commands.Cog):
         out_ch = self.bot.meeting_minutes.resolve_announce_channel(  # type: ignore[attr-defined]
             guild,
             session.announce_channel_id,
+            allow_fallback=False,
         )
         if out_ch:
             embed = self.bot.meeting_minutes.build_result_embed(guild, result)  # type: ignore[attr-defined]
@@ -95,6 +104,9 @@ class VoiceLogger(commands.Cog):
         """VC入室を記録してロギング"""
         # 入室時刻を記録
         self._voice_join_times[(member.id, guild.id)] = datetime.now(JST)
+
+        if not self._should_log_channel(guild, channel):
+            return
 
         # voice-events チャンネルを取得
         log_channel = discord.utils.get(guild.text_channels, name="voice-events")
@@ -119,6 +131,9 @@ class VoiceLogger(commands.Cog):
         # 入室時刻を取得
         join_time = self._voice_join_times.pop((member.id, guild.id), None)
         duration = self._calculate_duration(join_time) if join_time else "不明"
+
+        if not self._should_log_channel(guild, channel):
+            return
 
         # voice-events チャンネルを取得
         log_channel = discord.utils.get(guild.text_channels, name="voice-events")

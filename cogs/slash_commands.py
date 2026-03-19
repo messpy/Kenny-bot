@@ -12,10 +12,12 @@ from discord import app_commands
 from discord.app_commands import checks
 from discord.ext import commands
 
+from utils.build_info import load_build_info
 from utils.runtime_settings import get_settings
 
 JST = timezone(timedelta(hours=9))
 _settings = get_settings()
+ReadableChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
 
 
 @dataclass
@@ -58,16 +60,18 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="既定Ollamaモデル", value="ollama.model_default"),
         app_commands.Choice(name="要約Ollamaモデル", value="ollama.model_summary"),
         app_commands.Choice(name="Ollamaタイムアウト秒", value="ollama.timeout_sec"),
+        app_commands.Choice(name="議事録リアルタイム翻訳", value="meeting.realtime_translation_enabled"),
+        app_commands.Choice(name="議事録文字起こしプロバイダ", value="meeting.transcription_provider"),
+        app_commands.Choice(name="Google STT 言語コード", value="meeting.google_language_code"),
+        app_commands.Choice(name="Google STT 分割秒数", value="meeting.google_chunk_seconds"),
+        app_commands.Choice(name="Google STT タイムアウト秒", value="meeting.google_timeout_sec"),
+        app_commands.Choice(name="Google STT モデル", value="meeting.google_model"),
         app_commands.Choice(name="AI同時実行数", value="security.ai_max_concurrency"),
         app_commands.Choice(name="AIチャンネル間隔秒", value="security.ai_channel_cooldown_seconds"),
         app_commands.Choice(name="AI入力最大文字数", value="security.max_user_message_chars"),
         app_commands.Choice(name="kenny-chat招待URL/全体メンション禁止", value="kenny_chat.block_invite_and_mass_mention"),
         app_commands.Choice(name="スパム許容メッセージ数", value="security.spam.max_msgs"),
         app_commands.Choice(name="スパム判定秒数", value="security.spam.per_seconds"),
-        app_commands.Choice(name="AI呼び出し許容量", value="security.spam.max_ai_calls"),
-        app_commands.Choice(name="AI呼び出し判定秒数", value="security.spam.ai_per_seconds"),
-        app_commands.Choice(name="同文連投判定秒数", value="security.spam.dup_window_seconds"),
-        app_commands.Choice(name="警告クールダウン秒", value="security.spam.warn_cooldown_seconds"),
     ]
 
     _INT_KEYS = {
@@ -82,6 +86,11 @@ class SlashCommands(commands.Cog):
         "summarize_recent.transcript_lines_limit",
         "summarize_recent.max_messages",
         "ollama.timeout_sec",
+        "meeting.max_minutes",
+        "meeting.audio_max_total_mb",
+        "meeting.audio_max_user_mb",
+        "meeting.google_chunk_seconds",
+        "meeting.google_timeout_sec",
         "security.ai_max_concurrency",
         "security.ai_channel_cooldown_seconds",
         "security.max_user_message_chars",
@@ -94,7 +103,12 @@ class SlashCommands(commands.Cog):
     }
     _BOOL_KEYS = {
         "kenny_chat.block_invite_and_mass_mention",
+        "meeting.realtime_translation_enabled",
     }
+
+    @staticmethod
+    def _is_readable_channel(channel: object) -> bool:
+        return isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread))
 
     @app_commands.command(name="help", description="Botで使える機能とコマンドを表示")
     async def slash_help(self, interaction: discord.Interaction):
@@ -107,6 +121,8 @@ class SlashCommands(commands.Cog):
             name="会話機能",
             value=(
                 "- Botへのメンション/返信でAI応答\n"
+                "- DMでもそのままAI会話可能\n"
+                "- 会話時は直近100件の履歴を参照\n"
                 "- キーワード自動リアクション\n"
                 "- スパム検知と自動処罰"
             ),
@@ -117,6 +133,8 @@ class SlashCommands(commands.Cog):
             value=(
                 "- VC参加者が `/minutes_start` で開始\n"
                 "- `/minutes_stop` またはVC無人で停止\n"
+                "- Google Speech-to-Text を優先して文字起こし\n"
+                "- Google失敗時だけ faster-whisper にフォールバック\n"
                 "- 音声を文字起こしし、長文はAI要約して投稿\n"
                 "- 投稿時はコマンド実行者をメンション"
             ),
@@ -152,7 +170,14 @@ class SlashCommands(commands.Cog):
                 "- `/minutes_start`: 議事録開始（VC参加者のみ）\n"
                 "- `/minutes_stop`: 議事録停止して要約\n"
                 "- `/minutes_status`: 議事録状態表示\n"
-                "- `/game`: ミニゲーム（開始/あいうえお操作を分岐）\n"
+                "- `/reaction_role_set`: リアクションロール登録\n"
+                "- `/reaction_role_remove`: リアクションロール解除\n"
+                "- `/reaction_role_list`: リアクションロール一覧\n"
+                "- `/tts_join`: 現在いる通話に入り、このチャンネルをVOICEVOX読み上げ対象に設定\n"
+                "- `/tts_leave`: VOICEVOX読み上げ停止\n"
+                "- `/tts_voice`: 読み上げ話者ID変更\n"
+                "- `/tts_status`: 読み上げ状態表示\n"
+                "- `/game`: ミニゲーム（人狼DM襲撃/あいうえおバトル等）\n"
                 "- `/timer`: タイマー開始\n"
                 "- `/vc_control`: VC参加者のミュート/スピーカーミュート制御"
             ),
@@ -161,6 +186,10 @@ class SlashCommands(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     def _git_short_commit(self) -> str:
+        build_info = load_build_info()
+        build_commit = build_info.get("commit")
+        if build_commit:
+            return build_commit
         try:
             cp = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
@@ -173,6 +202,25 @@ class SlashCommands(commands.Cog):
             return out or "unknown"
         except Exception:
             return "unknown"
+
+    def _git_version(self) -> str:
+        build_info = load_build_info()
+        build_version = build_info.get("version")
+        if build_version:
+            return build_version
+        commit = self._git_short_commit()
+        try:
+            cp = subprocess.run(
+                ["git", "status", "--porcelain"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            dirty = bool((cp.stdout or "").strip())
+            return f"{commit}-dirty" if dirty else commit
+        except Exception:
+            return commit
 
     @app_commands.command(name="vc_control", description="VCミュート操作パネルを作成")
     @app_commands.checks.cooldown(1, 15.0)
@@ -244,6 +292,7 @@ class SlashCommands(commands.Cog):
 
         ping_ms = round(self.bot.latency * 1000, 1)
         commit = self._git_short_commit()
+        version = self._git_version()
 
         embed = discord.Embed(
             title="Kenny Bot 情報",
@@ -255,6 +304,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="稼働時間", value=f"{h}h {m}m {s}s", inline=True)
         embed.add_field(name="参加サーバー", value=str(guild_count), inline=True)
         embed.add_field(name="総メンバー数(概算)", value=str(member_count), inline=True)
+        embed.add_field(name="Version", value=f"`{version}`", inline=True)
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -268,11 +318,11 @@ class SlashCommands(commands.Cog):
         self,
         interaction: discord.Interaction,
         messages: app_commands.Range[int, 1, 300] | None = None,
-        channel: discord.TextChannel | None = None,
+        channel: ReadableChannel | None = None,
     ):
         target = channel or interaction.channel
-        if not isinstance(target, discord.TextChannel):
-            await interaction.response.send_message("テキストチャンネルで実行してください。", ephemeral=True)
+        if not self._is_readable_channel(target):
+            await interaction.response.send_message("このチャンネルでは要約できません。", ephemeral=True)
             return
 
         guild_id = interaction.guild.id if interaction.guild else 0
@@ -335,7 +385,7 @@ class SlashCommands(commands.Cog):
         )
 
         try:
-            model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b-cloud"))
+            model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b"))
             summary = self.bot.ollama_client.chat_simple(
                 model=model_summary,
                 prompt=prompt,
@@ -453,6 +503,128 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="reaction_role_set", description="メッセージのリアクションにロール付与を紐付け")
+    @checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        message_id="対象メッセージID",
+        emoji="対象リアクション",
+        role="付与するロール",
+    )
+    async def reaction_role_set(
+        self,
+        interaction: discord.Interaction,
+        message_id: str,
+        emoji: str,
+        role: discord.Role,
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+            return
+        try:
+            msg_id = str(int(message_id.strip()))
+        except Exception:
+            await interaction.response.send_message("message_id は数値で指定してください。", ephemeral=True)
+            return
+
+        emoji_key = emoji.strip()
+        if not emoji_key:
+            await interaction.response.send_message("emoji を指定してください。", ephemeral=True)
+            return
+
+        me = interaction.guild.me
+        if me is None or not me.guild_permissions.manage_roles:
+            await interaction.response.send_message("Botに『ロールの管理』権限がありません。", ephemeral=True)
+            return
+        if role >= me.top_role:
+            await interaction.response.send_message(
+                "そのロールはBotの最上位ロール以上なので付与できません。",
+                ephemeral=True,
+            )
+            return
+
+        bindings = _settings.get("reaction_roles.bindings", {}, guild_id=interaction.guild.id)
+        if not isinstance(bindings, dict):
+            bindings = {}
+        per_message = bindings.get(msg_id, {})
+        if not isinstance(per_message, dict):
+            per_message = {}
+        per_message[emoji_key] = int(role.id)
+        bindings[msg_id] = per_message
+        _settings.set("reaction_roles.bindings", bindings, guild_id=interaction.guild.id)
+        await interaction.response.send_message(
+            f"登録しました: message_id=`{msg_id}` / emoji=`{emoji_key}` / role={role.mention}\n"
+            "このリアクションを押した管理者本人にロールを付与します。",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="reaction_role_remove", description="メッセージのリアクションロール設定を解除")
+    @checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        message_id="対象メッセージID",
+        emoji="解除するリアクション",
+    )
+    async def reaction_role_remove(
+        self,
+        interaction: discord.Interaction,
+        message_id: str,
+        emoji: str,
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+            return
+        try:
+            msg_id = str(int(message_id.strip()))
+        except Exception:
+            await interaction.response.send_message("message_id は数値で指定してください。", ephemeral=True)
+            return
+
+        emoji_key = emoji.strip()
+        bindings = _settings.get("reaction_roles.bindings", {}, guild_id=interaction.guild.id)
+        if not isinstance(bindings, dict):
+            bindings = {}
+        per_message = bindings.get(msg_id, {})
+        if not isinstance(per_message, dict) or emoji_key not in per_message:
+            await interaction.response.send_message("対象設定が見つかりません。", ephemeral=True)
+            return
+
+        per_message.pop(emoji_key, None)
+        if per_message:
+            bindings[msg_id] = per_message
+        else:
+            bindings.pop(msg_id, None)
+        _settings.set("reaction_roles.bindings", bindings, guild_id=interaction.guild.id)
+        await interaction.response.send_message(
+            f"解除しました: message_id=`{msg_id}` / emoji=`{emoji_key}`",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="reaction_role_list", description="リアクションロール設定を一覧表示")
+    @checks.has_permissions(administrator=True)
+    async def reaction_role_list(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+            return
+
+        bindings = _settings.get("reaction_roles.bindings", {}, guild_id=interaction.guild.id)
+        if not isinstance(bindings, dict) or not bindings:
+            await interaction.response.send_message("リアクションロール設定はありません。", ephemeral=True)
+            return
+
+        lines: List[str] = []
+        for msg_id, per_message in bindings.items():
+            if not isinstance(per_message, dict):
+                continue
+            for emoji_key, role_id in per_message.items():
+                role = interaction.guild.get_role(int(role_id))
+                role_text = role.mention if role else f"`{role_id}`"
+                lines.append(f"message_id=`{msg_id}` / emoji=`{emoji_key}` / role={role_text}")
+
+        if not lines:
+            await interaction.response.send_message("リアクションロール設定はありません。", ephemeral=True)
+            return
+
+        await interaction.response.send_message("\n".join(lines[:30]), ephemeral=True)
+
     @app_commands.command(name="minutes_start", description="議事録モードを開始（VC参加者のみ）")
     @app_commands.checks.cooldown(1, 10.0)
     async def minutes_start(self, interaction: discord.Interaction):
@@ -461,22 +633,41 @@ class SlashCommands(commands.Cog):
             return
 
         voice = interaction.user.voice
-        if not voice or not isinstance(voice.channel, discord.VoiceChannel):
+        if not voice or not isinstance(voice.channel, (discord.VoiceChannel, discord.StageChannel)):
             await interaction.response.send_message("VCに参加してから実行してください。", ephemeral=True)
             return
+        voice_channel = voice.channel
+        voice_channel_name = voice_channel.name
+
+        existing_vc = interaction.guild.voice_client
+        if existing_vc and existing_vc.is_connected():
+            current = getattr(existing_vc, "channel", None)
+            current_name = current.name if isinstance(current, (discord.VoiceChannel, discord.StageChannel)) else "不明"
+            await interaction.response.send_message(
+                f"Bot はすでに VC `{current_name}` に接続中です。"
+                " 先に `/tts_leave` または議事録停止を実行してから再試行してください。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         ok, msg = await self.bot.meeting_minutes.start_session(
             bot=self.bot,
             guild=interaction.guild,
-            voice_channel=voice.channel,
+            voice_channel=voice_channel,
             started_by_id=interaction.user.id,
             announce_channel_id=interaction.channel_id,
         )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
         if ok:
-            out = self.bot.meeting_minutes.resolve_announce_channel(interaction.guild, interaction.channel_id)
+            out = self.bot.meeting_minutes.resolve_announce_channel(
+                interaction.guild,
+                interaction.channel_id,
+                allow_fallback=False,
+            )
             if out:
-                await out.send(f"{interaction.user.mention} 議事録を開始しました。（VC: {voice.channel.name}）")
+                await out.send(f"{interaction.user.mention} 議事録を開始しました。（VC: {voice_channel_name}）")
 
     @app_commands.command(name="minutes_stop", description="議事録モードを停止して要約を作成")
     @app_commands.checks.cooldown(1, 15.0)
@@ -499,7 +690,11 @@ class SlashCommands(commands.Cog):
         embed = self.bot.meeting_minutes.build_result_embed(interaction.guild, result)
         await interaction.followup.send("議事録を停止し、要約を作成しました。", ephemeral=True)
 
-        out_ch = self.bot.meeting_minutes.resolve_announce_channel(interaction.guild, interaction.channel_id)
+        out_ch = self.bot.meeting_minutes.resolve_announce_channel(
+            interaction.guild,
+            interaction.channel_id,
+            allow_fallback=False,
+        )
         if out_ch:
             await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
 
@@ -516,7 +711,7 @@ class SlashCommands(commands.Cog):
 
         vc = interaction.guild.get_channel(session.voice_channel_id)
         started = session.started_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S JST")
-        vc_name = vc.name if isinstance(vc, discord.VoiceChannel) else f"ID:{session.voice_channel_id}"
+        vc_name = vc.name if isinstance(vc, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{session.voice_channel_id}"
         await interaction.response.send_message(
             f"議事録は進行中です。\nVC: {vc_name}\n開始: {started}",
             ephemeral=True,

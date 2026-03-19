@@ -37,7 +37,7 @@ CHANNEL_NAMES = {
 # =========================
 # Ollama モデル設定（統一管理）
 # =========================
-OLLAMA_MODEL_DEFAULT = str(_settings.get("ollama.model_default", "gpt-oss:120b-cloud"))
+OLLAMA_MODEL_DEFAULT = str(_settings.get("ollama.model_default", "gpt-oss:120b"))
 OLLAMA_MODEL_CHAT = str(_settings.get("ollama.model_chat", OLLAMA_MODEL_DEFAULT))
 OLLAMA_MODEL_SUMMARY = str(_settings.get("ollama.model_summary", OLLAMA_MODEL_DEFAULT))
 OLLAMA_TIMEOUT_SEC = int(_settings.get("ollama.timeout_sec", 180))
@@ -46,8 +46,8 @@ OLLAMA_TIMEOUT_SEC = int(_settings.get("ollama.timeout_sec", 180))
 # メッセージ処理設定
 # =========================
 # 会話履歴の参照範囲（何件前までのメッセージを考慮するか）
-# より多いと文脈が豊か、少ないと軽量。推奨: 10-15
-CHAT_HISTORY_LINES = int(_settings.get("chat.history_lines", 10))
+# より多いと文脈が豊か、少ないと軽量。既定は直近100件。
+CHAT_HISTORY_LINES = int(_settings.get("chat.history_lines", 100))
 
 # AI 応答の最大文字数（Discord 文字制限は 2000 文字、メンション部を乗せると急简でいいので 1800 明値に）
 # この長さを超える場合は "...(省略)..." で切る

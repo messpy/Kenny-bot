@@ -17,13 +17,17 @@ from cogs.voice_logger import VoiceLogger
 from cogs.member_logger import MemberLogger
 from cogs.message_logger import MessageLogger
 from cogs.mod_panel import ModPanel
+from cogs.reaction_roles import ReactionRoles
 from cogs.slash_commands import SlashCommands
+from cogs.tts_reader import TTSReader
 from cogs.game_commands import GameCommands
 from utils.meeting_minutes import MeetingMinutesManager
 from utils.runtime_settings import get_settings
+from utils.voice_recv_patch import apply_voice_recv_resilience_patch
 
 
 logger = logging.getLogger(__name__)
+apply_voice_recv_resilience_patch()
 
 
 class MyBot(commands.Bot):
@@ -98,7 +102,9 @@ class MyBot(commands.Bot):
         await self.add_cog(MemberLogger(self))
         await self.add_cog(MessageLogger(self))
         await self.add_cog(ModPanel(self))
+        await self.add_cog(ReactionRoles(self))
         await self.add_cog(SlashCommands(self))
+        await self.add_cog(TTSReader(self))
         await self.add_cog(GameCommands(self))
 
     async def on_ready(self):

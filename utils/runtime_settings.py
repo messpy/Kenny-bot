@@ -12,15 +12,15 @@ import yaml
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "global": {
+        "global": {
         "ollama": {
-            "model_default": "gpt-oss:120b-cloud",
-            "model_chat": "gpt-oss:120b-cloud",
-            "model_summary": "gpt-oss:120b-cloud",
+            "model_default": "gpt-oss:120b",
+            "model_chat": "gpt-oss:120b",
+            "model_summary": "gpt-oss:120b",
             "timeout_sec": 180,
         },
         "chat": {
-            "history_lines": 20,
+            "history_lines": 100,
             "history_max_messages": 1000,
             "history_retention_days": 30,
             "max_response_length": 1800,
@@ -53,7 +53,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "max_minutes": 90,
             "audio_max_total_mb": 64,
             "audio_max_user_mb": 8,
+            "transcription_provider": "google",
+            "google_language_code": "ja-JP",
+            "google_chunk_seconds": 20,
+            "google_timeout_sec": 90,
+            "google_model": "",
             "whisper_model": "tiny",
+            "realtime_translation_enabled": True,
+            "translation_target_language": "ja",
+            "realtime_translation_interval_sec": 20,
+            "realtime_translation_min_audio_bytes": 384000,
+        },
+        "voice": {
+            "log_private_channels": False,
         },
         "keyword_reactions": {
             "いいね": "👍",
@@ -65,6 +77,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "おはよう": "☀",
             "おやすみ": "🌙",
             "天使": "て、て、て、天使の羽👼",
+        },
+        "reaction_roles": {
+            "bindings": {},
+        },
+        "tts": {
+            "voicevox_url": "http://127.0.0.1:50021",
+            "speaker_id": 3,
+            "max_chars": 120,
         },
         "user_nicknames": {},
     },
