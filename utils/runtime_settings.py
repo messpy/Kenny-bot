@@ -86,6 +86,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "speaker_id": 3,
             "max_chars": 120,
         },
+        "external": {
+            "weather_default_location": "Tokyo",
+            "weather_timeout_sec": 8,
+            "holiday_timeout_sec": 8,
+        },
         "user_nicknames": {},
     },
     "guilds": {},
@@ -102,6 +107,7 @@ class SettingsStore:
 
     def reload(self) -> None:
         with self._lock:
+            previous = deepcopy(self._data)
             if self.path.exists():
                 try:
                     obj = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
@@ -114,7 +120,8 @@ class SettingsStore:
             else:
                 self._data = {}
             self._ensure_shape()
-            self.save()
+            if self._data != previous:
+                self.save()
 
     def save(self) -> None:
         with self._lock:

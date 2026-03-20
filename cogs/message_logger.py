@@ -18,6 +18,7 @@ from utils.config import (
     HISTORY_CONTEXT_TEMPLATE,
 )
 from utils.message_store import MessageStore
+from utils.live_info import ExternalContext, LiveInfoService
 from utils.local_rag import LocalRAG
 from utils.runtime_settings import get_settings
 from cogs.base import BaseCog
@@ -78,6 +79,7 @@ class MessageLogger(BaseCog):
         ai_concurrency = max(1, self._cfg_int("security.ai_max_concurrency", 1))
         self._ai_semaphore = asyncio.Semaphore(ai_concurrency)
         self._local_rag = LocalRAG(Path(__file__).resolve().parent.parent)
+        self._live_info = LiveInfoService()
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
 
     async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int = 15) -> str | None:
@@ -202,6 +204,12 @@ class MessageLogger(BaseCog):
             return v[:max_len]
         return v
 
+    def _build_external_context_text(self, contexts: list[ExternalContext]) -> str:
+        if not contexts:
+            return ""
+        blocks = [f"[{item.label}]\n{item.body}" for item in contexts]
+        return "\n\n".join(blocks)
+
     def _is_ai_channel_rate_limited(self, channel_id: int) -> bool:
         now = time.time()
         cooldown = float(self._cfg_int("security.ai_channel_cooldown_seconds", 4))
@@ -235,9 +243,14 @@ class MessageLogger(BaseCog):
         history_lines = self._cfg_int("chat.history_lines", 100)
         history_text = store.get_recent_context(lines=history_lines)
         history_context = HISTORY_CONTEXT_TEMPLATE.format(history=history_text) if history_text else ""
+        external_context = ""
+        if self._live_info.needs_external_context(text):
+            external_context = self._build_external_context_text(
+                await asyncio.to_thread(self._live_info.build_context, text)
+            )
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_name or str(msg.author.id),
-            history_context=history_context,
+            history_context=history_context + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
             user_message=text,
             max_response_length_prompt=self._cfg_int("chat.max_response_length_prompt", 500),
         )
@@ -697,13 +710,18 @@ class MessageLogger(BaseCog):
             history_context = HISTORY_CONTEXT_TEMPLATE.format(history=history_text)
         else:
             history_context = ""
+        external_context = ""
+        if self._live_info.needs_external_context(text):
+            external_context = self._build_external_context_text(
+                await asyncio.to_thread(self._live_info.build_context, text)
+            )
 
         # =========================
         # プロンプトを生成（履歴と表示名を含める）
         # =========================
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_display,
-            history_context=history_context,
+            history_context=history_context + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
             user_message=text,
             max_response_length_prompt=self._cfg_int("chat.max_response_length_prompt", 500),
         )

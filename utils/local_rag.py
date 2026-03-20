@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
+
 
 @dataclass
 class RagChunk:
@@ -40,7 +42,7 @@ def _split_markdown_sections(text: str) -> list[RagChunk]:
 
 
 def _static_chunks() -> list[RagChunk]:
-    return [
+    chunks = [
         RagChunk(
             source="BOT",
             title="会話",
@@ -48,6 +50,7 @@ def _static_chunks() -> list[RagChunk]:
                 "Bot はメンションや Bot への返信で AI 応答できます。"
                 "DM でもそのまま AI 会話できます。"
                 "会話時は直近100件のメッセージ履歴を参照します。"
+                "天気、日付、祝日は外部APIを参照して回答できます。"
             ),
         ),
         RagChunk(
@@ -70,6 +73,33 @@ def _static_chunks() -> list[RagChunk]:
             ),
         ),
     ]
+
+    for section in HELP_SECTIONS:
+        chunks.append(
+            RagChunk(
+                source="HELP",
+                title=section.title,
+                body="\n".join(section.lines),
+            )
+        )
+
+    commands_by_category: dict[str, list[str]] = {category: [] for category in COMMAND_CATEGORY_ORDER}
+    for meta in SLASH_COMMANDS.values():
+        commands_by_category.setdefault(meta.category, []).append(f"/{meta.name}: {meta.description}")
+
+    for category in COMMAND_CATEGORY_ORDER:
+        lines = commands_by_category.get(category, [])
+        if not lines:
+            continue
+        chunks.append(
+            RagChunk(
+                source="HELP",
+                title=f"コマンド {category}",
+                body="\n".join(lines),
+            )
+        )
+
+    return chunks
 
 
 class LocalRAG:
@@ -108,4 +138,3 @@ class LocalRAG:
         if top:
             return top
         return self._load_chunks()[:limit]
-

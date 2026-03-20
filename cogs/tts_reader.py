@@ -17,11 +17,16 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.command_catalog import get_slash_command_meta
 from utils.runtime_settings import get_settings
 
 logger = logging.getLogger(__name__)
 _settings = get_settings()
 ReadableChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
+TTS_JOIN_META = get_slash_command_meta("tts_join")
+TTS_LEAVE_META = get_slash_command_meta("tts_leave")
+TTS_VOICE_META = get_slash_command_meta("tts_voice")
+TTS_STATUS_META = get_slash_command_meta("tts_status")
 
 
 @dataclass
@@ -138,7 +143,7 @@ class TTSReader(commands.Cog):
                     pass
             logger.exception("Failed to synthesize or play TTS audio")
 
-    @app_commands.command(name="tts_join", description="現在の通話チャンネルに参加し、このチャンネルを読み上げ対象にする")
+    @app_commands.command(name=TTS_JOIN_META.name, description=TTS_JOIN_META.description)
     @app_commands.describe(speaker_id="VOICEVOX話者ID。ずんだもんノーマルは 3")
     async def tts_join(self, interaction: discord.Interaction, speaker_id: int | None = None):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -188,7 +193,7 @@ class TTSReader(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="tts_leave", description="読み上げを停止してVCから切断")
+    @app_commands.command(name=TTS_LEAVE_META.name, description=TTS_LEAVE_META.description)
     async def tts_leave(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
@@ -203,7 +208,7 @@ class TTSReader(commands.Cog):
                 return
         await interaction.response.send_message("読み上げを停止しました。", ephemeral=True)
 
-    @app_commands.command(name="tts_voice", description="読み上げ話者IDを変更")
+    @app_commands.command(name=TTS_VOICE_META.name, description=TTS_VOICE_META.description)
     @app_commands.describe(speaker_id="VOICEVOX話者ID。ずんだもんノーマルは 3")
     async def tts_voice(self, interaction: discord.Interaction, speaker_id: int):
         if not interaction.guild:
@@ -218,7 +223,7 @@ class TTSReader(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="tts_status", description="読み上げ状態を表示")
+    @app_commands.command(name=TTS_STATUS_META.name, description=TTS_STATUS_META.description)
     async def tts_status(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)

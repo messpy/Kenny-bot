@@ -1,5 +1,6 @@
 services:
   bot:
+    container_name: kennybot-bot
     build:
       context: .
     restart: unless-stopped
@@ -15,12 +16,14 @@ services:
       - ./log:/app/log
 
   ollama:
+    container_name: kennybot-ollama
     image: ollama/ollama:latest
     restart: unless-stopped
     volumes:
       - ollama-data:/root/.ollama
 
   voicevox:
+    container_name: kennybot-voicevox
     image: voicevox/voicevox_engine:cpu-latest
     restart: unless-stopped
 

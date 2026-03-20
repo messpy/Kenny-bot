@@ -13,11 +13,31 @@ from discord.app_commands import checks
 from discord.ext import commands
 
 from utils.build_info import load_build_info
+from utils.command_catalog import (
+    COMMAND_CATEGORY_ORDER,
+    HELP_SECTIONS,
+    SLASH_COMMANDS,
+    get_slash_command_meta,
+)
 from utils.runtime_settings import get_settings
 
 JST = timezone(timedelta(hours=9))
 _settings = get_settings()
 ReadableChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
+HELP_META = get_slash_command_meta("help")
+VC_CONTROL_META = get_slash_command_meta("vc_control")
+BOT_INFO_META = get_slash_command_meta("bot_info")
+SUMMARIZE_RECENT_META = get_slash_command_meta("summarize_recent")
+SET_RECENT_WINDOW_META = get_slash_command_meta("set_recent_window")
+CONFIG_SHOW_META = get_slash_command_meta("config_show")
+CONFIG_SET_META = get_slash_command_meta("config_set")
+REACTION_ROLE_SET_META = get_slash_command_meta("reaction_role_set")
+REACTION_ROLE_REMOVE_META = get_slash_command_meta("reaction_role_remove")
+REACTION_ROLE_LIST_META = get_slash_command_meta("reaction_role_list")
+MINUTES_START_META = get_slash_command_meta("minutes_start")
+MINUTES_STOP_META = get_slash_command_meta("minutes_stop")
+MINUTES_STATUS_META = get_slash_command_meta("minutes_status")
+TIMER_META = get_slash_command_meta("timer")
 
 
 @dataclass
@@ -110,79 +130,44 @@ class SlashCommands(commands.Cog):
     def _is_readable_channel(channel: object) -> bool:
         return isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread))
 
-    @app_commands.command(name="help", description="Botで使える機能とコマンドを表示")
+    @app_commands.command(name=HELP_META.name, description=HELP_META.description)
     async def slash_help(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title="Kenny Bot 使い方",
             description="このBotで使える主な機能です。",
             color=discord.Color.blurple(),
         )
-        embed.add_field(
-            name="会話機能",
-            value=(
-                "- Botへのメンション/返信でAI応答\n"
-                "- DMでもそのままAI会話可能\n"
-                "- 会話時は直近100件の履歴を参照\n"
-                "- キーワード自動リアクション\n"
-                "- スパム検知と自動処罰"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="議事録機能",
-            value=(
-                "- VC参加者が `/minutes_start` で開始\n"
-                "- `/minutes_stop` またはVC無人で停止\n"
-                "- Google Speech-to-Text を優先して文字起こし\n"
-                "- Google失敗時だけ faster-whisper にフォールバック\n"
-                "- 音声を文字起こしし、長文はAI要約して投稿\n"
-                "- 投稿時はコマンド実行者をメンション"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="kenny-chat 連携",
-            value=(
-                "- 各サーバーに `kenny-chat` チャンネルを作ると相互中継\n"
-                "- 表示名は発言者の頭文字のみ\n"
-                "- 12秒に1回まで発言可能\n"
-                "- 元発言を削除すると中継先の投稿も削除"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="ログ機能",
-            value=(
-                "- `voice-events`: VC入退室ログ\n"
-                "- `member-events`: 参加/退出ログ"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="スラッシュコマンド",
-            value=(
-                "- `/help`: このヘルプ\n"
-                "- `/bot_info`: Bot状態/疎通を表示\n"
-                "- `/summarize_recent`: 直近メッセージを要約\n"
-                "- `/set_recent_window`: 要約の既定件数を設定\n"
-                "- `/config_show`: 設定値を表示\n"
-                "- `/config_set`: 設定値を更新\n"
-                "- `/minutes_start`: 議事録開始（VC参加者のみ）\n"
-                "- `/minutes_stop`: 議事録停止して要約\n"
-                "- `/minutes_status`: 議事録状態表示\n"
-                "- `/reaction_role_set`: リアクションロール登録\n"
-                "- `/reaction_role_remove`: リアクションロール解除\n"
-                "- `/reaction_role_list`: リアクションロール一覧\n"
-                "- `/tts_join`: 現在いる通話に入り、このチャンネルをVOICEVOX読み上げ対象に設定\n"
-                "- `/tts_leave`: VOICEVOX読み上げ停止\n"
-                "- `/tts_voice`: 読み上げ話者ID変更\n"
-                "- `/tts_status`: 読み上げ状態表示\n"
-                "- `/game`: ミニゲーム（人狼DM襲撃/あいうえおバトル等）\n"
-                "- `/timer`: タイマー開始\n"
-                "- `/vc_control`: VC参加者のミュート/スピーカーミュート制御"
-            ),
-            inline=False,
-        )
+        for section in HELP_SECTIONS:
+            embed.add_field(name=section.title, value="\n".join(section.lines), inline=False)
+
+        registered_commands = {
+            command.name: command
+            for command in self.bot.tree.walk_commands()
+            if isinstance(command, app_commands.Command)
+        }
+        category_lines: dict[str, list[str]] = {category: [] for category in COMMAND_CATEGORY_ORDER}
+        uncategorized: list[str] = []
+
+        for key, meta in SLASH_COMMANDS.items():
+            if key not in registered_commands:
+                continue
+            line = f"- `/{meta.name}`: {meta.description}"
+            category_lines.setdefault(meta.category, []).append(line)
+
+        known_names = set(SLASH_COMMANDS)
+        for name, command in sorted(registered_commands.items()):
+            if name in known_names:
+                continue
+            uncategorized.append(f"- `/{name}`: {command.description or '説明なし'}")
+
+        for category in COMMAND_CATEGORY_ORDER:
+            lines = category_lines.get(category, [])
+            if lines:
+                embed.add_field(name=f"コマンド: {category}", value="\n".join(lines), inline=False)
+
+        if uncategorized:
+            embed.add_field(name="コマンド: その他", value="\n".join(uncategorized), inline=False)
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     def _git_short_commit(self) -> str:
@@ -222,7 +207,7 @@ class SlashCommands(commands.Cog):
         except Exception:
             return commit
 
-    @app_commands.command(name="vc_control", description="VCミュート操作パネルを作成")
+    @app_commands.command(name=VC_CONTROL_META.name, description=VC_CONTROL_META.description)
     @app_commands.checks.cooldown(1, 15.0)
     async def vc_control(self, interaction: discord.Interaction):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -275,7 +260,7 @@ class SlashCommands(commands.Cog):
         )
         await interaction.response.send_message("VCコントロールパネルを作成しました。", ephemeral=True)
 
-    @app_commands.command(name="bot_info", description="Bot状態と疎通確認を表示")
+    @app_commands.command(name=BOT_INFO_META.name, description=BOT_INFO_META.description)
     async def slash_bot_info(self, interaction: discord.Interaction):
         now = discord.utils.utcnow()
         uptime = now - self._started_at
@@ -308,7 +293,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="summarize_recent", description="指定チャンネルの直近メッセージをAI要約")
+    @app_commands.command(name=SUMMARIZE_RECENT_META.name, description=SUMMARIZE_RECENT_META.description)
     @app_commands.checks.cooldown(1, 20.0)
     @app_commands.describe(
         messages="何件を要約するか（1〜設定上限、省略時は設定値）",
@@ -411,7 +396,7 @@ class SlashCommands(commands.Cog):
         embed.set_footer(text=f"#{target.name} / 対象メッセージ数: {len(rows)}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="set_recent_window", description="チャット要約の既定件数を設定")
+    @app_commands.command(name=SET_RECENT_WINDOW_META.name, description=SET_RECENT_WINDOW_META.description)
     @app_commands.describe(messages="既定の件数（1〜300）")
     async def set_recent_window(
         self,
@@ -428,7 +413,7 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="config_show", description="設定値を表示")
+    @app_commands.command(name=CONFIG_SHOW_META.name, description=CONFIG_SHOW_META.description)
     @app_commands.describe(key="表示する設定キー")
     @app_commands.choices(key=_CONFIG_CHOICES)
     @checks.has_permissions(administrator=True)
@@ -440,7 +425,7 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="config_set", description="設定値を更新")
+    @app_commands.command(name=CONFIG_SET_META.name, description=CONFIG_SET_META.description)
     @app_commands.describe(
         key="更新する設定キー",
         value="新しい値（数値キーは数字、モデルは文字列）",
@@ -503,7 +488,7 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="reaction_role_set", description="メッセージのリアクションにロール付与を紐付け")
+    @app_commands.command(name=REACTION_ROLE_SET_META.name, description=REACTION_ROLE_SET_META.description)
     @checks.has_permissions(administrator=True)
     @app_commands.describe(
         message_id="対象メッセージID",
@@ -557,7 +542,7 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="reaction_role_remove", description="メッセージのリアクションロール設定を解除")
+    @app_commands.command(name=REACTION_ROLE_REMOVE_META.name, description=REACTION_ROLE_REMOVE_META.description)
     @checks.has_permissions(administrator=True)
     @app_commands.describe(
         message_id="対象メッセージID",
@@ -598,7 +583,7 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="reaction_role_list", description="リアクションロール設定を一覧表示")
+    @app_commands.command(name=REACTION_ROLE_LIST_META.name, description=REACTION_ROLE_LIST_META.description)
     @checks.has_permissions(administrator=True)
     async def reaction_role_list(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -625,7 +610,7 @@ class SlashCommands(commands.Cog):
 
         await interaction.response.send_message("\n".join(lines[:30]), ephemeral=True)
 
-    @app_commands.command(name="minutes_start", description="議事録モードを開始（VC参加者のみ）")
+    @app_commands.command(name=MINUTES_START_META.name, description=MINUTES_START_META.description)
     @app_commands.checks.cooldown(1, 10.0)
     async def minutes_start(self, interaction: discord.Interaction):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -669,7 +654,7 @@ class SlashCommands(commands.Cog):
             if out:
                 await out.send(f"{interaction.user.mention} 議事録を開始しました。（VC: {voice_channel_name}）")
 
-    @app_commands.command(name="minutes_stop", description="議事録モードを停止して要約を作成")
+    @app_commands.command(name=MINUTES_STOP_META.name, description=MINUTES_STOP_META.description)
     @app_commands.checks.cooldown(1, 15.0)
     async def minutes_stop(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -698,7 +683,7 @@ class SlashCommands(commands.Cog):
         if out_ch:
             await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
 
-    @app_commands.command(name="minutes_status", description="議事録モードの状態を表示")
+    @app_commands.command(name=MINUTES_STATUS_META.name, description=MINUTES_STATUS_META.description)
     async def minutes_status(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
@@ -717,7 +702,7 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="timer", description="タイマーを開始（時/分/秒指定）")
+    @app_commands.command(name=TIMER_META.name, description=TIMER_META.description)
     @app_commands.checks.cooldown(2, 10.0)
     @app_commands.describe(
         hours="時間（0〜23）",

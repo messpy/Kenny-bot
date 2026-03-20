@@ -12,11 +12,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.env import load_env_file, require_env
+from utils.single_instance import SingleInstanceError, acquire_lock
 from bot import MyBot
 
 
 def main():
     """Discord Bot メイン実行"""
+    try:
+        acquire_lock(Path("data") / "kennybot.lock")
+    except SingleInstanceError as exc:
+        print(f"[BOOT] Another kennybot instance is already running: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
     # .env ファイルを読み込む
     load_env_file()
 

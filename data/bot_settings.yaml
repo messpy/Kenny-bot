@@ -62,6 +62,10 @@ global:
     voicevox_url: http://127.0.0.1:50021
     speaker_id: 3
     max_chars: 120
+  external:
+    weather_default_location: Tokyo
+    weather_timeout_sec: 8
+    holiday_timeout_sec: 8
   user_nicknames: {}
   summarize_recent_default_minutes: 30
 guilds:

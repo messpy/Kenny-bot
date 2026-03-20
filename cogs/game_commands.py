@@ -13,10 +13,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.command_catalog import get_slash_command_meta
 from utils.runtime_settings import get_settings
 from utils.text import strip_ansi_and_ctrl
 
 _settings = get_settings()
+GAME_META = get_slash_command_meta("game")
 
 
 @dataclass
@@ -58,6 +60,7 @@ class WerewolfState:
     pending_day_votes: dict[int, int] | None = None
     day_vote_runoff: bool = False
     round_no: int = 1
+    medium_result_target: int | None = None
 
 
 class GameCommands(commands.Cog):
@@ -84,7 +87,7 @@ class GameCommands(commands.Cog):
         self._aiueo_states: dict[int, AiueoBattleState] = {}
         self._werewolf_states: dict[int, WerewolfState] = {}
 
-    @app_commands.command(name="game", description="ミニゲームを開始（リアクション参加）")
+    @app_commands.command(name=GAME_META.name, description=GAME_META.description)
     @app_commands.checks.cooldown(1, 20.0)
     @app_commands.describe(
         mode="ゲーム種類",
@@ -92,6 +95,7 @@ class GameCommands(commands.Cog):
         char="あいうえおバトルで宣言する1文字（action=文字宣言）",
         join_seconds="参加受付秒数（10〜60秒）",
         category="任意カテゴリ（例: 動物, 食べ物, 映画）",
+        minority_count="ワードウルフの少数派人数（1以上）",
     )
     @app_commands.choices(
         mode=[
@@ -116,6 +120,7 @@ class GameCommands(commands.Cog):
         char: str | None = None,
         join_seconds: app_commands.Range[int, 10, 60] = 20,
         category: str | None = None,
+        minority_count: app_commands.Range[int, 1, 9] | None = None,
     ):
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
             await interaction.response.send_message("サーバーのテキストチャンネルで実行してください。", ephemeral=True)
@@ -184,6 +189,11 @@ class GameCommands(commands.Cog):
         participants = await self._collect_participants(recruit, interaction.guild)
 
         min_players = 1 if mode.value in ("number", "words") else 2
+        if mode.value == "wordwolf":
+            requested_minority = int(minority_count or 1)
+            min_players = max(3, requested_minority + 2)
+        elif mode.value == "werewolf":
+            min_players = 4
         if len(participants) < min_players:
             await interaction.followup.send(
                 f"参加者が不足しています。`{mode.name}` は最低 {min_players} 人必要です。",
@@ -202,7 +212,14 @@ class GameCommands(commands.Cog):
             results = await self._run_words(participants, category)
             title = "単語をDM送信しました"
         elif mode.value == "wordwolf":
-            results = await self._run_wordwolf(participants, category)
+            requested_minority = int(minority_count or 1)
+            if requested_minority >= len(participants) - 1:
+                await interaction.followup.send(
+                    "少数派人数は、参加者数に対して多すぎます。多数派を2人以上残してください。",
+                    ephemeral=True,
+                )
+                return
+            results = await self._run_wordwolf(participants, category, requested_minority)
             title = "ワードウルフ配布をDM送信しました"
         else:
             results = await self._run_werewolf(interaction, participants)
@@ -317,36 +334,138 @@ class GameCommands(commands.Cog):
             out.append(await self._safe_dm(m, f"📝 あなたの単語: **{w}**"))
         return out
 
-    async def _run_wordwolf(self, members: list[discord.Member], category: str | None) -> list[DMResult]:
+    async def _run_wordwolf(self, members: list[discord.Member], category: str | None, minority_count: int) -> list[DMResult]:
         common, odd = await self._generate_wordwolf_pair(category)
-        wolf = random.choice(members)
+        minority_ids = {m.id for m in random.sample(members, k=minority_count)}
         out: list[DMResult] = []
         for m in members:
-            word = odd if m.id == wolf.id else common
-            note = "（あなたは少数派です）" if m.id == wolf.id else ""
+            is_minority = m.id in minority_ids
+            word = odd if is_minority else common
+            note = f"（あなたは少数派 {minority_count} 人のうちの1人です）" if is_minority else ""
             out.append(await self._safe_dm(m, f"🐺 ワードウルフのお題: **{word}** {note}"))
         return out
 
     async def _run_werewolf(self, interaction: discord.Interaction, members: list[discord.Member]) -> list[DMResult]:
-        roles = self._build_werewolf_roles(len(members))
-        random.shuffle(roles)
         out: list[DMResult] = []
-        role_map = {m.id: role for m, role in zip(members, roles)}
-        for m, role in zip(members, roles):
-            out.append(await self._safe_dm(m, f"🧩 あなたの役職は **{role}** です。"))
-        await self._start_werewolf_state(interaction, members, role_map)
+        active_members: list[discord.Member] = []
+
+        for m in members:
+            result = await self._safe_dm(m, "🎮 人狼ゲームの参加確認です。役職DMを送ります。")
+            if result.success:
+                active_members.append(m)
+            else:
+                out.append(result)
+
+        if len(active_members) < 4:
+            if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.send(
+                    "❌ 人狼を開始できません。DM を受け取れる参加者が 4 人未満でした。DM を許可して再試行してください。"
+                )
+            return out
+
+        roles = self._build_werewolf_roles(len(active_members))
+        random.shuffle(roles)
+        member_map = {m.id: m for m in active_members}
+        started_members: list[discord.Member] = []
+        active_role_map: dict[int, str] = {}
+
+        for m, role in zip(active_members, roles):
+            result = await self._safe_dm(m, self._build_role_dm_text(role))
+            out.append(result)
+            if result.success:
+                started_members.append(m)
+                active_role_map[m.id] = role
+
+        if len(started_members) < 4:
+            if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.send(
+                    "❌ 役職DMの送信に失敗したため、人狼ゲームを開始できませんでした。DM 設定を確認して再試行してください。"
+                )
+            return out
+
+        if len(started_members) != len(active_members):
+            roles = self._build_werewolf_roles(len(started_members))
+            random.shuffle(roles)
+            active_role_map = {m.id: role for m, role in zip(started_members, roles)}
+            member_map = {m.id: m for m in started_members}
+            for m, role in zip(started_members, roles):
+                await self._safe_dm(m, f"🔁 参加者数調整により、最終役職は **{role}** に更新されました。")
+
+        await self._send_role_briefings(member_map, active_role_map)
+        await self._start_werewolf_state(interaction, started_members, active_role_map)
         return out
 
     def _build_werewolf_roles(self, n: int) -> list[str]:
         wolves = 1 if n <= 5 else 2 if n <= 9 else 3
         roles = ["人狼"] * wolves
-        base = ["占い師", "騎士", "霊媒師"]
+        base: list[str] = []
+        if n >= 4:
+            base.append("占い師")
+        if n >= 5:
+            base.append("騎士")
+        if n >= 6:
+            base.append("霊媒師")
+        if n >= 7:
+            base.extend(["共有者", "共有者"])
         for r in base:
             if len(roles) < n:
                 roles.append(r)
         while len(roles) < n:
             roles.append("村人")
         return roles[:n]
+
+    def _build_role_dm_text(
+        self,
+        role: str,
+    ) -> str:
+        lines = [f"🧩 あなたの役職は **{role}** です。"]
+        if role == "人狼":
+            lines.append("夜に襲撃先を選んでください。")
+        elif role == "占い師":
+            lines.append("夜に1人を占い、人狼かどうかを確認できます。")
+        elif role == "騎士":
+            lines.append("夜に1人を護衛し、その人への襲撃を防げます。")
+        elif role == "霊媒師":
+            lines.append("昼に処刑された人の役職を知ることができます。")
+        elif role == "共有者":
+            lines.append("共有者同士はお互いの正体を知っています。")
+        else:
+            lines.append("昼は議論と投票で人狼を探してください。")
+        return "\n".join(lines)
+
+    async def _send_role_briefings(
+        self,
+        member_map: dict[int, discord.Member],
+        role_map: dict[int, str],
+    ) -> None:
+        wolves = [uid for uid, role in role_map.items() if role == "人狼"]
+        sharers = [uid for uid, role in role_map.items() if role == "共有者"]
+
+        for uid in wolves:
+            member = member_map.get(uid)
+            if member is None:
+                continue
+            fellows = [member_map[x].display_name for x in wolves if x != uid and x in member_map]
+            if not fellows:
+                continue
+            try:
+                dm = member.dm_channel or await member.create_dm()
+                await dm.send(f"🐺 仲間の人狼: {', '.join(fellows)}")
+            except Exception:
+                continue
+
+        for uid in sharers:
+            member = member_map.get(uid)
+            if member is None:
+                continue
+            partners = [member_map[x].display_name for x in sharers if x != uid and x in member_map]
+            if not partners:
+                continue
+            try:
+                dm = member.dm_channel or await member.create_dm()
+                await dm.send(f"🤝 相方の共有者: {', '.join(partners)}")
+            except Exception:
+                continue
 
     async def _safe_dm(self, member: discord.Member, text: str) -> DMResult:
         try:
@@ -384,11 +503,13 @@ class GameCommands(commands.Cog):
             pending_day_votes=None,
             day_vote_runoff=False,
             round_no=1,
+            medium_result_target=None,
         )
         self._werewolf_states[interaction.guild.id] = state
         await interaction.channel.send(
             "🐺 **人狼ゲーム開始**\n"
             "夜に人狼は襲撃先、占い師は占い先、騎士は護衛先をDMリアクションで選びます。"
+            "霊媒師は昼に処刑された人の役職を知り、共有者は開始時点で相方を把握します。"
         )
         await self._begin_werewolf_round(interaction.guild, state)
 
@@ -419,6 +540,7 @@ class GameCommands(commands.Cog):
         state.day_vote_excluded_voter_ids = None
         state.pending_day_votes = None
         state.day_vote_runoff = False
+        state.medium_result_target = None
 
         channel = guild.get_channel(state.channel_id)
         if isinstance(channel, discord.TextChannel):
@@ -581,6 +703,23 @@ class GameCommands(commands.Cog):
 
         await self._start_werewolf_day_vote(guild, state)
 
+    async def _notify_medium_result(self, guild: discord.Guild, state: WerewolfState, target_uid: int) -> None:
+        mediums = self._living_role_users(state, "霊媒師")
+        if not mediums:
+            return
+        target = guild.get_member(target_uid)
+        target_name = target.display_name if target else str(target_uid)
+        role = state.roles.get(target_uid, "不明")
+        for medium_uid in mediums:
+            medium = guild.get_member(medium_uid)
+            if medium is None:
+                continue
+            try:
+                dm = medium.dm_channel or await medium.create_dm()
+                await dm.send(f"🪦 霊媒結果: `{target_name}` の役職は **{role}** でした。")
+            except Exception:
+                continue
+
     async def _start_werewolf_day_vote(
         self,
         guild: discord.Guild,
@@ -661,6 +800,7 @@ class GameCommands(commands.Cog):
             target_name = target_member.mention if target_member else f"`{target_uid}`"
             await channel.send(f"⚖️ {target_name} が処刑されました。")
             state.alive_user_ids.discard(target_uid)
+            await self._notify_medium_result(guild, state, target_uid)
         elif not state.day_vote_runoff:
             mentions = ", ".join(f"<@{uid}>" for uid in top_targets)
             await channel.send(
@@ -680,6 +820,7 @@ class GameCommands(commands.Cog):
             target_name = target_member.mention if target_member else f"`{target_uid}`"
             await channel.send(f"🎲 再投票も同票だったため、ランダムで {target_name} を処刑しました。")
             state.alive_user_ids.discard(target_uid)
+            await self._notify_medium_result(guild, state, target_uid)
 
         state.day_vote_message_id = None
         state.day_vote_candidates = None
@@ -699,13 +840,17 @@ class GameCommands(commands.Cog):
         channel = guild.get_channel(state.channel_id)
         if isinstance(channel, discord.TextChannel):
             survivors = []
-            for uid in state.alive_user_ids:
+            all_roles = []
+            for uid, role in state.roles.items():
                 member = guild.get_member(uid)
-                role = state.roles.get(uid, "不明")
                 if member:
-                    survivors.append(f"{member.display_name}({role})")
+                    status = "生存" if uid in state.alive_user_ids else "死亡"
+                    all_roles.append(f"{member.display_name}({role}/{status})")
+                    if uid in state.alive_user_ids:
+                        survivors.append(f"{member.display_name}({role})")
             tail = f"\n生存者: {', '.join(survivors)}" if survivors else ""
-            await channel.send(f"🏁 {text}{tail}")
+            reveal = f"\n役職公開: {', '.join(all_roles)}" if all_roles else ""
+            await channel.send(f"🏁 {text}{tail}{reveal}")
         self._werewolf_states.pop(guild.id, None)
 
     def _werewolf_targets_for_actor(self, state: WerewolfState, role: str, actor_uid: int) -> list[int]:

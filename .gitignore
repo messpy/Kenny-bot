@@ -20,6 +20,7 @@ logs/
 # ===== Runtime data =====
 data/message_logs/
 data/*.json
+data/*.lock
 
 # ===== OS =====
 .DS_Store
@@ -52,6 +53,7 @@ env/
 
 data/message_logs/
 data/*.json
+data/*.lock
 
 log/
 logs/
