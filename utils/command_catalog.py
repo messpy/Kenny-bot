@@ -79,7 +79,7 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
     ),
     "summarize_recent": SlashCommandMeta(
         name="summarize_recent",
-        description="指定チャンネルの直近メッセージをAI要約",
+        description="このチャンネルの直近メッセージをAI要約",
         category="要約・設定",
     ),
     "set_recent_window": SlashCommandMeta(
@@ -160,6 +160,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
     "vc_control": SlashCommandMeta(
         name="vc_control",
         description="VCミュート操作パネルを作成",
+        category="ゲーム・VC",
+    ),
+    "group_match": SlashCommandMeta(
+        name="group_match",
+        description="リアクション参加で2人組/3人組を自動作成",
         category="ゲーム・VC",
     ),
 }

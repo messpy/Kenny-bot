@@ -7,6 +7,7 @@ import asyncio
 import json
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -63,10 +64,38 @@ class WerewolfState:
     medium_result_target: int | None = None
 
 
+@dataclass
+class WordWolfSessionState:
+    guild_id: int
+    channel_id: int
+    host_user_id: int
+    participant_user_ids: list[int]
+    category: str | None
+    minority_count: int
+    debug_enabled: bool
+    round_no: int = 0
+    common_word: str = ""
+    odd_word: str = ""
+    minority_user_ids: set[int] | None = None
+    active: bool = False
+
+
+@dataclass
+class GameLobbyState:
+    guild_id: int
+    channel_id: int
+    host_user_id: int
+    mode_name: str
+
+
 class GameCommands(commands.Cog):
     """ミニゲームコマンド"""
 
     JOIN_EMOJI = "🎮"
+    START_EMOJI = "▶️"
+    WORDWOLF_END_EMOJI = "⏹️"
+    WORDWOLF_REPEAT_EMOJI = "🔁"
+    WORDWOLF_PAIRS_PATH = Path("data") / "wordwolf_pairs.json"
     WEREWOLF_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     AIUEO_ROWS = [
         "あいうえお",
@@ -86,6 +115,10 @@ class GameCommands(commands.Cog):
         self.bot = bot
         self._aiueo_states: dict[int, AiueoBattleState] = {}
         self._werewolf_states: dict[int, WerewolfState] = {}
+        self._wordwolf_sessions: dict[int, WordWolfSessionState] = {}
+        self._game_lobbies: dict[int, GameLobbyState] = {}
+        self._recent_wordwolf_pairs: list[tuple[str, str]] = []
+        self._saved_wordwolf_pairs: list[tuple[str, str]] = self._load_saved_wordwolf_pairs()
 
     @app_commands.command(name=GAME_META.name, description=GAME_META.description)
     @app_commands.checks.cooldown(1, 20.0)
@@ -93,14 +126,14 @@ class GameCommands(commands.Cog):
         mode="ゲーム種類",
         action="操作（あいうえおバトル時: 開始/文字宣言/状況/終了）",
         char="あいうえおバトルで宣言する1文字（action=文字宣言）",
-        join_seconds="参加受付秒数（10〜60秒）",
         category="任意カテゴリ（例: 動物, 食べ物, 映画）",
         minority_count="ワードウルフの少数派人数（1以上）",
+        debug="ワードウルフをデバッグ配布モードで開始するか",
     )
     @app_commands.choices(
         mode=[
-            app_commands.Choice(name="ランダム数字(0-100)", value="number"),
-            app_commands.Choice(name="単語配布", value="words"),
+            app_commands.Choice(name="配布: 数字", value="number"),
+            app_commands.Choice(name="配布: 単語", value="words"),
             app_commands.Choice(name="ワードウルフ", value="wordwolf"),
             app_commands.Choice(name="人狼役職配布", value="werewolf"),
             app_commands.Choice(name="あいうえおバトル", value="aiueo_battle"),
@@ -111,6 +144,10 @@ class GameCommands(commands.Cog):
             app_commands.Choice(name="状況表示", value="status"),
             app_commands.Choice(name="終了", value="end"),
         ],
+        debug=[
+            app_commands.Choice(name="OFF", value=0),
+            app_commands.Choice(name="ON", value=1),
+        ],
     )
     async def game(
         self,
@@ -118,15 +155,16 @@ class GameCommands(commands.Cog):
         mode: app_commands.Choice[str],
         action: app_commands.Choice[str] | None = None,
         char: str | None = None,
-        join_seconds: app_commands.Range[int, 10, 60] = 20,
         category: str | None = None,
         minority_count: app_commands.Range[int, 1, 9] | None = None,
+        debug: app_commands.Choice[int] | None = None,
     ):
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
             await interaction.response.send_message("サーバーのテキストチャンネルで実行してください。", ephemeral=True)
             return
 
         action_value = action.value if action else "start"
+        debug_enabled = bool(debug.value) if debug is not None else False
 
         if mode.value == "aiueo_battle":
             if action_value == "char":
@@ -148,42 +186,28 @@ class GameCommands(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         recruit = await interaction.channel.send(
-            f"🎲 **{mode.name}** を開始します。\n"
-            f"{self.JOIN_EMOJI} を押した人が参加者です。\n"
-            f"受付終了まで: {join_seconds}秒"
+            self._build_game_lobby_content(mode.name, interaction.user.id, [])
         )
         await recruit.add_reaction(self.JOIN_EMOJI)
-
-        remain = int(join_seconds)
-        while remain > 10:
-            await asyncio.sleep(10)
-            remain -= 10
-            await recruit.edit(
-                content=(
-                    f"🎲 **{mode.name}** を開始します。\n"
-                    f"{self.JOIN_EMOJI} を押した人が参加者です。\n"
-                    f"受付終了まで: {remain}秒"
-                )
+        await recruit.add_reaction(self.START_EMOJI)
+        self._game_lobbies[recruit.id] = GameLobbyState(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            host_user_id=interaction.user.id,
+            mode_name=mode.name,
+        )
+        await interaction.followup.send(
+            f"募集メッセージを作成しました。参加者が揃ったら、そのメッセージに {self.START_EMOJI} を押してください。",
+            ephemeral=True,
+        )
+        await self._wait_for_game_start(recruit.id, interaction.user.id)
+        self._game_lobbies.pop(recruit.id, None)
+        await recruit.edit(
+            content=(
+                f"🎲 **{mode.name}** 参加受付を終了しました。\n"
+                f"{self.JOIN_EMOJI} で参加したユーザーを集計中..."
             )
-
-        # 最後の10秒は1秒ごとに更新
-        for remain in range(remain - 1, -1, -1):
-            await asyncio.sleep(1)
-            if remain > 0:
-                await recruit.edit(
-                    content=(
-                        f"🎲 **{mode.name}** を開始します。\n"
-                        f"{self.JOIN_EMOJI} を押した人が参加者です。\n"
-                        f"受付終了まで: {remain}秒"
-                    )
-                )
-            else:
-                await recruit.edit(
-                    content=(
-                        f"🎲 **{mode.name}** 参加受付を終了しました。\n"
-                        f"{self.JOIN_EMOJI} で参加したユーザーを集計中..."
-                    )
-                )
+        )
 
         recruit = await interaction.channel.fetch_message(recruit.id)
         participants = await self._collect_participants(recruit, interaction.guild)
@@ -191,7 +215,7 @@ class GameCommands(commands.Cog):
         min_players = 1 if mode.value in ("number", "words") else 2
         if mode.value == "wordwolf":
             requested_minority = int(minority_count or 1)
-            min_players = max(3, requested_minority + 2)
+            min_players = 1 if debug_enabled else max(3, requested_minority + 2)
         elif mode.value == "werewolf":
             min_players = 4
         if len(participants) < min_players:
@@ -213,13 +237,19 @@ class GameCommands(commands.Cog):
             title = "単語をDM送信しました"
         elif mode.value == "wordwolf":
             requested_minority = int(minority_count or 1)
-            if requested_minority >= len(participants) - 1:
+            if not debug_enabled and requested_minority >= len(participants) - 1:
                 await interaction.followup.send(
                     "少数派人数は、参加者数に対して多すぎます。多数派を2人以上残してください。",
                     ephemeral=True,
                 )
                 return
-            results = await self._run_wordwolf(participants, category, requested_minority)
+            results = await self._start_wordwolf_session(
+                interaction=interaction,
+                members=participants,
+                category=category,
+                minority_count=requested_minority,
+                debug_enabled=debug_enabled,
+            )
             title = "ワードウルフ配布をDM送信しました"
         else:
             results = await self._run_werewolf(interaction, participants)
@@ -242,6 +272,54 @@ class GameCommands(commands.Cog):
             embed=embed,
             ephemeral=True,
         )
+
+    async def _wait_for_game_start(self, message_id: int, host_user_id: int) -> None:
+        def check(payload: discord.RawReactionActionEvent) -> bool:
+            return (
+                payload.message_id == message_id
+                and payload.user_id == host_user_id
+                and str(payload.emoji) == self.START_EMOJI
+            )
+
+        await self.bot.wait_for("raw_reaction_add", check=check)
+
+    def _build_game_lobby_content(
+        self,
+        mode_name: str,
+        host_user_id: int,
+        participants: list[discord.Member],
+    ) -> str:
+        lines = [
+            f"🎲 **{mode_name}** を開始します。",
+            f"{self.JOIN_EMOJI} を押した人が参加者です。",
+            f"<@{host_user_id}> が {self.START_EMOJI} を押すと開始します。",
+            f"現在の参加者: {len(participants)}人",
+            "",
+        ]
+        if not participants:
+            lines.append("まだ参加者はいません。")
+            return "\n".join(lines)
+        lines.append("参加者:")
+        lines.extend(f"- {member.mention}" for member in participants)
+        return "\n".join(lines)
+
+    async def _refresh_game_lobby(self, message_id: int) -> None:
+        lobby = self._game_lobbies.get(message_id)
+        if lobby is None:
+            return
+        guild = self.bot.get_guild(lobby.guild_id)
+        channel = self.bot.get_channel(lobby.channel_id)
+        if guild is None or not isinstance(channel, discord.TextChannel):
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+        except Exception:
+            self._game_lobbies.pop(message_id, None)
+            return
+        participants = await self._collect_participants(message, guild)
+        content = self._build_game_lobby_content(lobby.mode_name, lobby.host_user_id, participants)
+        if message.content != content:
+            await message.edit(content=content)
 
     async def _aiueo_char_action(self, interaction: discord.Interaction, char: str):
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
@@ -334,15 +412,214 @@ class GameCommands(commands.Cog):
             out.append(await self._safe_dm(m, f"📝 あなたの単語: **{w}**"))
         return out
 
-    async def _run_wordwolf(self, members: list[discord.Member], category: str | None, minority_count: int) -> list[DMResult]:
+    def _build_wordwolf_control_text(
+        self,
+        session: WordWolfSessionState,
+        guild: discord.Guild,
+    ) -> str:
+        names = []
+        for uid in session.participant_user_ids:
+            member = guild.get_member(uid)
+            names.append(member.mention if member else f"<@{uid}>")
+        lines = [
+            f"🐺 **ワードウルフ Round {session.round_no}**",
+            f"参加者: {len(session.participant_user_ids)}人",
+            " / ".join(names),
+            "",
+            f"{self.WORDWOLF_END_EMOJI} を主催者が押すと結果公開",
+        ]
+        if not session.active:
+            lines.append(f"{self.WORDWOLF_REPEAT_EMOJI} を主催者が押すと同じメンバーで再配布")
+        return "\n".join(lines)
+
+    def _build_wordwolf_result_text(
+        self,
+        session: WordWolfSessionState,
+        guild: discord.Guild,
+    ) -> str:
+        minority_ids = session.minority_user_ids or set()
+        lines = [
+            f"🏁 **ワードウルフ Round {session.round_no} 結果**",
+            f"多数派単語: **{session.common_word or '不明'}**",
+            f"少数派単語: **{session.odd_word or '不明'}**",
+            "",
+            "役割公開:",
+        ]
+        for uid in session.participant_user_ids:
+            member = guild.get_member(uid)
+            mention = member.mention if member else f"<@{uid}>"
+            role = "ワードウルフ" if uid in minority_ids else "多数派"
+            lines.append(f"- {mention}: {role}")
+        lines.extend(
+            [
+                "",
+                f"{self.WORDWOLF_REPEAT_EMOJI} を主催者が押すと同じメンバーで再配布",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _load_saved_wordwolf_pairs(self) -> list[tuple[str, str]]:
+        path = self.WORDWOLF_PAIRS_PATH
+        try:
+            if not path.exists():
+                return []
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                return []
+            pairs: list[tuple[str, str]] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                common = str(item.get("common", "")).strip()
+                odd = str(item.get("odd", "")).strip()
+                if common and odd and common != odd:
+                    pairs.append((common, odd))
+            return pairs[-200:]
+        except Exception:
+            return []
+
+    def _save_wordwolf_pairs(self) -> None:
+        path = self.WORDWOLF_PAIRS_PATH
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = [{"common": common, "odd": odd} for common, odd in self._saved_wordwolf_pairs[-200:]]
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            return
+
+    def _remember_generated_wordwolf_pair(self, pair: tuple[str, str]) -> None:
+        if pair not in self._saved_wordwolf_pairs:
+            self._saved_wordwolf_pairs.append(pair)
+            self._save_wordwolf_pairs()
+
+    async def _start_wordwolf_session(
+        self,
+        interaction: discord.Interaction,
+        members: list[discord.Member],
+        category: str | None,
+        minority_count: int,
+        debug_enabled: bool,
+    ) -> list[DMResult]:
+        assert interaction.guild and isinstance(interaction.channel, discord.TextChannel)
+        session = WordWolfSessionState(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            host_user_id=interaction.user.id,
+            participant_user_ids=[member.id for member in members],
+            category=category,
+            minority_count=minority_count,
+            debug_enabled=debug_enabled,
+        )
+        results = await self._run_wordwolf_round(interaction.guild, session)
+        control = await interaction.channel.send(self._build_wordwolf_control_text(session, interaction.guild))
+        for emoji in (self.WORDWOLF_END_EMOJI, self.WORDWOLF_REPEAT_EMOJI):
+            try:
+                await control.add_reaction(emoji)
+            except Exception:
+                pass
+        self._wordwolf_sessions[control.id] = session
+        return results
+
+    async def _run_wordwolf_round(
+        self,
+        guild: discord.Guild,
+        session: WordWolfSessionState,
+    ) -> list[DMResult]:
+        members = [guild.get_member(uid) for uid in session.participant_user_ids]
+        active_members = [member for member in members if isinstance(member, discord.Member)]
+        session.participant_user_ids = [member.id for member in active_members]
+        if not active_members:
+            session.round_no += 1
+            session.common_word = ""
+            session.odd_word = ""
+            session.minority_user_ids = set()
+            session.active = False
+            return []
+        common, odd = await self._generate_wordwolf_pair(session.category)
+        if session.debug_enabled and len(active_members) <= session.minority_count:
+            minority_ids = {member.id for member in active_members}
+        else:
+            minority_ids = {m.id for m in random.sample(active_members, k=session.minority_count)}
+        session.round_no += 1
+        session.common_word = common
+        session.odd_word = odd
+        session.minority_user_ids = minority_ids
+        session.active = True
+
+        out: list[DMResult] = []
+        for member in active_members:
+            is_minority = member.id in minority_ids
+            word = odd if is_minority else common
+            lines = ["🐺 ワードウルフ", f"あなたの単語: **{word}**"]
+            if session.debug_enabled:
+                role_name = "ワードウルフ" if is_minority else "多数派"
+                lines.insert(1, f"あなたの役割: **{role_name}**")
+            if is_minority and len(active_members) > 1:
+                lines.append(f"少数派人数: {session.minority_count}人")
+            lines.extend(
+                [
+                    "",
+                    "進行の目安:",
+                    "・単語を直接言わずにヒントを出す",
+                    "・全員が1回ずつ話したあとで投票する",
+                    "・主催者が ⏹️ を押すと結果を公開する",
+                ]
+            )
+            if session.debug_enabled:
+                lines.extend(
+                    [
+                        "",
+                        "Debugモード:",
+                        f"・多数派単語: {common}",
+                        f"・少数派単語: {odd}",
+                        "・1人参加でもDM配布確認のため開始できます",
+                    ]
+                )
+            out.append(await self._safe_dm(member, "\n".join(lines)))
+        return out
+
+    async def _run_wordwolf(
+        self,
+        members: list[discord.Member],
+        category: str | None,
+        minority_count: int,
+        debug_enabled: bool = False,
+    ) -> list[DMResult]:
         common, odd = await self._generate_wordwolf_pair(category)
-        minority_ids = {m.id for m in random.sample(members, k=minority_count)}
+        if debug_enabled and len(members) <= minority_count:
+            minority_ids = {m.id for m in members}
+        else:
+            minority_ids = {m.id for m in random.sample(members, k=minority_count)}
         out: list[DMResult] = []
         for m in members:
             is_minority = m.id in minority_ids
             word = odd if is_minority else common
-            note = f"（あなたは少数派 {minority_count} 人のうちの1人です）" if is_minority else ""
-            out.append(await self._safe_dm(m, f"🐺 ワードウルフのお題: **{word}** {note}"))
+            lines = ["🐺 ワードウルフ", f"あなたの単語: **{word}**"]
+            if debug_enabled:
+                role_name = "ワードウルフ" if is_minority else "多数派"
+                lines.insert(1, f"あなたの役割: **{role_name}**")
+            if is_minority and len(members) > 1:
+                lines.append(f"少数派人数: {minority_count}人")
+            lines.extend(
+                [
+                    "",
+                    "進行の目安:",
+                    "・単語を直接言わずにヒントを出す",
+                    "・全員が1回ずつ話したあとで投票する",
+                    "・少数派を見つけたら多数派の勝ち",
+                ]
+            )
+            if debug_enabled:
+                lines.extend(
+                    [
+                        "",
+                        "Debugモード:",
+                        f"・多数派単語: {common}",
+                        f"・少数派単語: {odd}",
+                        "・1人参加でもDM配布確認のため開始できます",
+                    ]
+                )
+            out.append(await self._safe_dm(m, "\n".join(lines)))
         return out
 
     async def _run_werewolf(self, interaction: discord.Interaction, members: list[discord.Member]) -> list[DMResult]:
@@ -877,6 +1154,43 @@ class GameCommands(commands.Cog):
         if payload.user_id == self.bot.user.id:
             return
         emoji = str(payload.emoji)
+
+        lobby = self._game_lobbies.get(payload.message_id)
+        if lobby is not None:
+            if emoji == self.JOIN_EMOJI:
+                await self._refresh_game_lobby(payload.message_id)
+                return
+            if emoji == self.START_EMOJI and payload.user_id == lobby.host_user_id:
+                return
+
+        session = self._wordwolf_sessions.get(payload.message_id)
+        if session is not None:
+            if payload.user_id != session.host_user_id or payload.guild_id != session.guild_id:
+                return
+            guild = self.bot.get_guild(session.guild_id)
+            channel = guild.get_channel(session.channel_id) if guild else None
+            if guild is None or not isinstance(channel, discord.TextChannel):
+                return
+            try:
+                message = await channel.fetch_message(payload.message_id)
+            except Exception:
+                return
+
+            if emoji == self.WORDWOLF_END_EMOJI and session.active:
+                session.active = False
+                await message.edit(content=self._build_wordwolf_result_text(session, guild))
+                return
+            if emoji == self.WORDWOLF_REPEAT_EMOJI and not session.active:
+                results = await self._run_wordwolf_round(guild, session)
+                await message.edit(content=self._build_wordwolf_control_text(session, guild))
+                ok_count = sum(1 for result in results if result.success)
+                ng = [f"{result.user.mention} ({result.reason})" for result in results if not result.success]
+                notice = f"🔁 同じメンバーでワードウルフを再配布しました。DM成功 {ok_count}/{len(results)}"
+                if ng:
+                    notice += "\nDM失敗: " + ", ".join(ng[:5])
+                await channel.send(notice, delete_after=15)
+                return
+
         if emoji not in self.WEREWOLF_EMOJIS:
             return
 
@@ -950,6 +1264,16 @@ class GameCommands(commands.Cog):
             await self._maybe_resolve_werewolf_night(guild, state)
             return
 
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return
+        if str(payload.emoji) != self.JOIN_EMOJI:
+            return
+        if payload.message_id not in self._game_lobbies:
+            return
+        await self._refresh_game_lobby(payload.message_id)
+
     async def _generate_words(self, count: int, category: str | None) -> list[str]:
         cat = strip_ansi_and_ctrl((category or "").strip()).replace("@", "＠")[:80]
         cat_line = f"カテゴリ: {cat}\n" if cat else ""
@@ -973,8 +1297,14 @@ class GameCommands(commands.Cog):
         cat = strip_ansi_and_ctrl((category or "").strip()).replace("@", "＠")[:80]
         cat_line = f"カテゴリは「{cat}」です。" if cat else ""
         prompt = (
-            "ワードウルフ用に、似ているが異なる日本語の単語ペアを1組作ってください。"
+            "ワードウルフ用に、日本語の単語ペアを1組作ってください。"
             f"{cat_line}"
+            "次の条件を守ってください。"
+            "1. 同じカテゴリに属すること。"
+            "2. 連想しやすいが、ほぼ同義語や上下関係すぎる組み合わせは避けること。"
+            "3. 片方だけが極端に限定的・専門的にならないこと。"
+            "4. 小学生でも分かる一般的な名詞を優先すること。"
+            "5. 直接比較しにくい、会話が少し割れそうな難易度にすること。"
             "JSONオブジェクトのみで返すこと。"
             "形式: {\"common\":\"...\",\"odd\":\"...\"}"
         )
@@ -984,10 +1314,88 @@ class GameCommands(commands.Cog):
             c = str(obj.get("common", "")).strip()
             o = str(obj.get("odd", "")).strip()
             if c and o and c != o:
-                return c, o
+                pair = (c, o)
+                if pair not in self._recent_wordwolf_pairs:
+                    self._remember_generated_wordwolf_pair(pair)
+                    self._remember_wordwolf_pair(pair)
+                    return pair
         except Exception:
             pass
-        return "犬", "オオカミ"
+        fallback_pairs = [
+            ("コーヒー", "紅茶"),
+            ("犬", "猫"),
+            ("ライオン", "トラ"),
+            ("スマホ", "タブレット"),
+            ("電車", "バス"),
+            ("うどん", "そば"),
+            ("海", "川"),
+            ("映画", "ドラマ"),
+            ("自転車", "バイク"),
+            ("りんご", "なし"),
+            ("学校", "塾"),
+            ("春", "秋"),
+            ("サッカー", "フットサル"),
+            ("漫画", "アニメ"),
+            ("寿司", "刺身"),
+            ("雪", "雨"),
+            ("山", "丘"),
+            ("夜", "夕方"),
+            ("机", "テーブル"),
+            ("病院", "薬局"),
+            ("温泉", "プール"),
+            ("ギター", "ベース"),
+            ("ケーキ", "プリン"),
+            ("ラーメン", "パスタ"),
+            ("ハンバーガー", "ホットドッグ"),
+            ("りす", "うさぎ"),
+            ("ペン", "えんぴつ"),
+            ("本", "雑誌"),
+            ("ピアノ", "オルガン"),
+            ("洗濯機", "冷蔵庫"),
+            ("パン", "おにぎり"),
+            ("スキー", "スノボ"),
+            ("プリンター", "スキャナー"),
+            ("帽子", "ヘルメット"),
+            ("鳥", "魚"),
+            ("花", "木"),
+            ("月", "星"),
+            ("カメラ", "ビデオカメラ"),
+            ("ホテル", "旅館"),
+            ("公園", "遊園地"),
+            ("ビール", "ワイン"),
+            ("チョコ", "クッキー"),
+            ("バナナ", "みかん"),
+            ("椅子", "ソファ"),
+        ]
+        category_hints: list[tuple[tuple[str, ...], list[tuple[str, str]]]] = [
+            (("動物", "どうぶつ", "アニマル"), [("犬", "猫"), ("ライオン", "トラ"), ("イルカ", "クジラ"), ("りす", "うさぎ"), ("鳥", "魚")]),
+            (("食べ物", "飲み物", "グルメ"), [("コーヒー", "紅茶"), ("うどん", "そば"), ("カレー", "シチュー"), ("パン", "おにぎり"), ("ハンバーガー", "ホットドッグ"), ("ビール", "ワイン"), ("チョコ", "クッキー"), ("バナナ", "みかん")]),
+            (("乗り物", "交通"), [("電車", "バス"), ("自転車", "バイク"), ("飛行機", "新幹線")]),
+            (("家電", "機械", "ガジェット"), [("スマホ", "タブレット"), ("パソコン", "テレビ"), ("イヤホン", "ヘッドホン"), ("洗濯機", "冷蔵庫"), ("プリンター", "スキャナー"), ("カメラ", "ビデオカメラ")]),
+            (("場所", "施設", "旅行"), [("学校", "塾"), ("病院", "薬局"), ("温泉", "プール"), ("ホテル", "旅館"), ("公園", "遊園地")]),
+            (("天気", "自然"), [("雪", "雨"), ("海", "川"), ("山", "丘"), ("花", "木"), ("月", "星")]),
+            (("娯楽", "エンタメ", "音楽"), [("映画", "ドラマ"), ("漫画", "アニメ"), ("ギター", "ベース"), ("ピアノ", "オルガン")]),
+            (("文房具", "学校用品"), [("ペン", "えんぴつ"), ("本", "雑誌")]),
+            (("スポーツ", "運動"), [("サッカー", "フットサル"), ("スキー", "スノボ")]),
+            (("家具", "部屋"), [("机", "テーブル"), ("椅子", "ソファ"), ("帽子", "ヘルメット")]),
+        ]
+        fallback_pairs.extend(self._saved_wordwolf_pairs)
+        lowered = cat.lower()
+        for keywords, pairs in category_hints:
+            if any(keyword in cat or keyword in lowered for keyword in keywords):
+                candidates = [pair for pair in pairs if pair not in self._recent_wordwolf_pairs]
+                pair = random.choice(candidates or pairs)
+                self._remember_wordwolf_pair(pair)
+                return pair
+        candidates = [pair for pair in fallback_pairs if pair not in self._recent_wordwolf_pairs]
+        pair = random.choice(candidates or fallback_pairs)
+        self._remember_wordwolf_pair(pair)
+        return pair
+
+    def _remember_wordwolf_pair(self, pair: tuple[str, str]) -> None:
+        self._recent_wordwolf_pairs.append(pair)
+        if len(self._recent_wordwolf_pairs) > 20:
+            self._recent_wordwolf_pairs = self._recent_wordwolf_pairs[-20:]
 
     async def _ask_ollama(self, prompt: str) -> str:
         try:

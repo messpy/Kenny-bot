@@ -2,6 +2,7 @@
 # スラッシュコマンド集
 
 import asyncio
+import random
 import subprocess
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ MINUTES_START_META = get_slash_command_meta("minutes_start")
 MINUTES_STOP_META = get_slash_command_meta("minutes_stop")
 MINUTES_STATUS_META = get_slash_command_meta("minutes_status")
 TIMER_META = get_slash_command_meta("timer")
+GROUP_MATCH_META = get_slash_command_meta("group_match")
 
 
 @dataclass
@@ -47,6 +49,16 @@ class VcPanelState:
     voice_channel_id: int
     host_user_id: int
     joined_user_ids: set[int] = field(default_factory=set)
+
+
+@dataclass
+class GroupMatchState:
+    guild_id: int
+    channel_id: int
+    host_user_id: int
+    group_size: int
+    visibility: str = "public"
+    title: str | None = None
 
 
 class SlashCommands(commands.Cog):
@@ -59,12 +71,16 @@ class SlashCommands(commands.Cog):
         self._timer_restart_templates: dict[int, tuple[int, str]] = {}
         # message_id -> vc panel state
         self._vc_panels: dict[int, VcPanelState] = {}
+        # message_id -> group match state
+        self._group_matches: dict[int, GroupMatchState] = {}
 
     VC_JOIN_EMOJI = "✅"
     VC_MUTE_ON_EMOJI = "🔇"
     VC_MUTE_OFF_EMOJI = "🎤"
     VC_DEAF_ON_EMOJI = "🙉"
     VC_DEAF_OFF_EMOJI = "🙊"
+    GROUP_MATCH_EMOJI = "🤝"
+    GROUP_MATCH_START_EMOJI = "▶️"
 
     _CONFIG_CHOICES = [
         app_commands.Choice(name="会話履歴の参照行数", value="chat.history_lines"),
@@ -125,6 +141,18 @@ class SlashCommands(commands.Cog):
         "kenny_chat.block_invite_and_mass_mention",
         "meeting.realtime_translation_enabled",
     }
+    _SUMMARY_SCOPE_CHOICES = [
+        app_commands.Choice(name="全体", value="all"),
+        app_commands.Choice(name="特定ユーザー", value="user"),
+    ]
+    _GROUP_SIZE_CHOICES = [
+        app_commands.Choice(name="2人組", value=2),
+        app_commands.Choice(name="3人組", value=3),
+    ]
+    _GROUP_VISIBILITY_CHOICES = [
+        app_commands.Choice(name="公開", value="public"),
+        app_commands.Choice(name="非公開", value="private"),
+    ]
 
     @staticmethod
     def _is_readable_channel(channel: object) -> bool:
@@ -260,6 +288,155 @@ class SlashCommands(commands.Cog):
         )
         await interaction.response.send_message("VCコントロールパネルを作成しました。", ephemeral=True)
 
+    def _build_group_match_content(
+        self,
+        state: GroupMatchState,
+        participants: list[discord.Member],
+    ) -> str:
+        title = state.title.strip() if state.title else ""
+        header = f"🤝 **{state.group_size}人組 自動マッチング**"
+        if title:
+            header += f" | {title}"
+
+        lines = [
+            header,
+            f"{self.GROUP_MATCH_EMOJI} を押すと参加します。",
+            f"<@{state.host_user_id}> が {self.GROUP_MATCH_START_EMOJI} を押すとシャッフルして確定します。",
+            "結果表示: チャンネル公開" if state.visibility == "public" else "結果表示: 参加者へのDM送信",
+            f"現在の参加者: {len(participants)}人",
+            "",
+        ]
+
+        if not participants:
+            lines.append("まだ参加者はいません。")
+            return "\n".join(lines)
+        lines.append("参加者:")
+        lines.extend(f"- {member.mention}" for member in participants)
+
+        return "\n".join(lines)
+
+    def _build_group_match_result_content(
+        self,
+        state: GroupMatchState,
+        participants: list[discord.Member],
+    ) -> str:
+        title = state.title.strip() if state.title else ""
+        header = f"🤝 **{state.group_size}人組 シャッフル結果**"
+        if title:
+            header += f" | {title}"
+
+        lines = [
+            header,
+            f"参加者: {len(participants)}人",
+            "",
+        ]
+        if not participants:
+            lines.append("参加者がいないため、組み分けできませんでした。")
+            return "\n".join(lines)
+
+        groups = [
+            participants[index:index + state.group_size]
+            for index in range(0, len(participants), state.group_size)
+        ]
+        for idx, group in enumerate(groups, start=1):
+            mentions = " / ".join(member.mention for member in group)
+            label = f"{idx}組目"
+            if len(group) < state.group_size:
+                label += " (端数)"
+            lines.append(f"{label}: {mentions}")
+        return "\n".join(lines)
+
+    async def _collect_group_match_participants(
+        self,
+        message: discord.Message,
+        guild: discord.Guild,
+    ) -> list[discord.Member]:
+        users: list[discord.Member] = []
+        for reaction in message.reactions:
+            if str(reaction.emoji) != self.GROUP_MATCH_EMOJI:
+                continue
+            async for user in reaction.users():
+                if not isinstance(user, discord.Member):
+                    member = guild.get_member(user.id)
+                else:
+                    member = user
+                if not isinstance(member, discord.Member) or member.bot:
+                    continue
+                if member not in users:
+                    users.append(member)
+            break
+        users.sort(key=lambda member: member.display_name.lower())
+        return users
+
+    async def _refresh_group_match(self, message_id: int) -> None:
+        state = self._group_matches.get(message_id)
+        if not state:
+            return
+
+        guild = self.bot.get_guild(state.guild_id)
+        if not guild:
+            self._group_matches.pop(message_id, None)
+            return
+        channel = self.bot.get_channel(state.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            self._group_matches.pop(message_id, None)
+            return
+        except Exception:
+            return
+
+        participants = await self._collect_group_match_participants(message, guild)
+        content = self._build_group_match_content(state, participants)
+        if message.content != content:
+            await message.edit(content=content)
+
+    @app_commands.command(name=GROUP_MATCH_META.name, description=GROUP_MATCH_META.description)
+    @app_commands.checks.cooldown(1, 10.0)
+    @app_commands.describe(
+        size="作る組の人数",
+        title="募集タイトル（任意）",
+        visibility="結果の公開範囲",
+    )
+    @app_commands.choices(size=_GROUP_SIZE_CHOICES, visibility=_GROUP_VISIBILITY_CHOICES)
+    async def group_match(
+        self,
+        interaction: discord.Interaction,
+        size: app_commands.Choice[int],
+        visibility: app_commands.Choice[str] | None = None,
+        title: str | None = None,
+    ):
+        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message("サーバーのテキストチャンネルで実行してください。", ephemeral=True)
+            return
+
+        state = GroupMatchState(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            host_user_id=interaction.user.id,
+            group_size=int(size.value),
+            visibility=visibility.value if visibility is not None else "public",
+            title=title.strip() if title else None,
+        )
+        content = self._build_group_match_content(state, [])
+        message = await interaction.channel.send(content)
+        try:
+            await message.add_reaction(self.GROUP_MATCH_EMOJI)
+        except Exception:
+            pass
+        try:
+            await message.add_reaction(self.GROUP_MATCH_START_EMOJI)
+        except Exception:
+            pass
+
+        self._group_matches[message.id] = state
+        await interaction.response.send_message(
+            f"{int(size.value)}人組の募集メッセージを作成しました。",
+            ephemeral=True,
+        )
+
     @app_commands.command(name=BOT_INFO_META.name, description=BOT_INFO_META.description)
     async def slash_bot_info(self, interaction: discord.Interaction):
         now = discord.utils.utcnow()
@@ -297,17 +474,30 @@ class SlashCommands(commands.Cog):
     @app_commands.checks.cooldown(1, 20.0)
     @app_commands.describe(
         messages="何件を要約するか（1〜設定上限、省略時は設定値）",
-        channel="省略時はこのチャンネル",
+        scope="チャンネル全体を要約するか、特定ユーザーだけを要約するか",
+        user="scope が「特定ユーザー」のときの対象ユーザー",
     )
+    @app_commands.choices(scope=_SUMMARY_SCOPE_CHOICES)
     async def summarize_recent(
         self,
         interaction: discord.Interaction,
         messages: app_commands.Range[int, 1, 300] | None = None,
-        channel: ReadableChannel | None = None,
+        scope: app_commands.Choice[str] | None = None,
+        user: discord.Member | discord.User | None = None,
     ):
-        target = channel or interaction.channel
+        target = interaction.channel
         if not self._is_readable_channel(target):
             await interaction.response.send_message("このチャンネルでは要約できません。", ephemeral=True)
+            return
+        scope_value = scope.value if scope is not None else ("user" if user is not None else "all")
+        if scope_value == "user" and user is None:
+            await interaction.response.send_message(
+                "特定ユーザー要約では対象ユーザーを指定してください。",
+                ephemeral=True,
+            )
+            return
+        if scope_value not in {"all", "user"}:
+            await interaction.response.send_message("要約対象の指定が不正です。", ephemeral=True)
             return
 
         guild_id = interaction.guild.id if interaction.guild else 0
@@ -336,36 +526,58 @@ class SlashCommands(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         rows: List[str] = []
-        history_limit = max(50, fetch_limit, messages_val * 2)
+        matched_count = 0
+        target_user_id = user.id if scope_value == "user" and user is not None else None
+        history_limit = max(100, fetch_limit, messages_val * (8 if target_user_id else 2))
         async for m in target.history(limit=history_limit):
             if m.author.bot:
                 continue
             text = (m.content or "").strip()
             if not text:
                 continue
+            if target_user_id is not None and m.author.id != target_user_id:
+                continue
             name = m.author.display_name if isinstance(m.author, discord.Member) else m.author.name
-            rows.append(f"[{m.created_at.astimezone(JST).strftime('%H:%M')}] {name}: {text[:160]}")
-            if len(rows) >= messages_val:
+            time_label = m.created_at.astimezone(JST).strftime("%Y-%m-%d %H:%M")
+            rows.append(f"[{time_label}] {name} ({m.author.id}): {text[:400]}")
+            matched_count += 1
+            if matched_count >= messages_val:
                 break
 
         if not rows:
+            target_label = f"{user.mention} の" if target_user_id is not None and user is not None else ""
             await interaction.followup.send(
-                f"要約対象メッセージが見つかりませんでした。（指定: {messages_val}件）",
+                f"要約対象メッセージが見つかりませんでした。（{target_label}指定: {messages_val}件）",
                 ephemeral=True,
             )
             return
 
         rows = list(reversed(rows[:messages_val]))
-        transcript = "\n".join(rows[:max(20, line_limit)])
+        prompt_line_limit = max(20, line_limit)
+        prompt_rows = rows[-prompt_line_limit:]
+        transcript = "\n".join(prompt_rows)
+        scope_label = "特定ユーザー" if target_user_id is not None else "チャンネル全体"
+        user_label = (
+            f"{user.display_name} ({user.id})" if target_user_id is not None and user is not None else "なし"
+        )
         prompt = (
             "以下は Discord のチャットログです。\n"
-            "日本語で簡潔に要約してください。\n"
+            "ログに書かれている事実だけを日本語で正確に要約してください。\n"
+            "書かれていない内容は推測しないでください。\n"
+            "不明点は『不明』、未確認事項は『ログ上では確認できない』と明記してください。\n"
+            "発言者、日時、依頼、決定事項、未解決事項を取り違えないでください。\n"
             "出力形式:\n"
-            "1) 全体の要点（3行以内）\n"
-            "2) 話題トピック（箇条書き最大5件）\n"
-            "3) 次アクション/未解決事項（あれば）\n\n"
+            "1) 対象範囲\n"
+            "2) 要点（3行以内）\n"
+            "3) 主要トピック（箇条書き最大5件）\n"
+            "4) 決定事項\n"
+            "5) 未解決事項・次アクション\n"
+            "6) 注意点（情報不足や曖昧さがあれば）\n\n"
             f"対象チャンネル: #{target.name}\n"
-            f"対象件数: 直近{len(rows)}件\n\n"
+            f"要約範囲: {scope_label}\n"
+            f"対象ユーザー: {user_label}\n"
+            f"抽出メッセージ数: {len(rows)}件\n"
+            f"AI投入メッセージ数: {len(prompt_rows)}件\n\n"
             f"{transcript}"
         )
 
@@ -393,7 +605,10 @@ class SlashCommands(commands.Cog):
             color=discord.Color.orange(),
             timestamp=datetime.now(JST),
         )
-        embed.set_footer(text=f"#{target.name} / 対象メッセージ数: {len(rows)}")
+        footer_bits = [f"#{target.name}", f"対象: {scope_label}", f"件数: {len(rows)}"]
+        if target_user_id is not None and user is not None:
+            footer_bits.append(f"ユーザー: {user.display_name}")
+        embed.set_footer(text=" / ".join(footer_bits))
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name=SET_RECENT_WINDOW_META.name, description=SET_RECENT_WINDOW_META.description)
@@ -790,6 +1005,42 @@ class SlashCommands(commands.Cog):
             return
         emoji = str(payload.emoji)
 
+        if payload.message_id in self._group_matches:
+            state = self._group_matches.get(payload.message_id)
+            if not state:
+                return
+            if emoji == self.GROUP_MATCH_EMOJI:
+                await self._refresh_group_match(payload.message_id)
+                return
+            if emoji == self.GROUP_MATCH_START_EMOJI and payload.user_id == state.host_user_id:
+                guild = self.bot.get_guild(state.guild_id)
+                channel = self.bot.get_channel(state.channel_id)
+                if not guild or not isinstance(channel, discord.TextChannel):
+                    return
+                try:
+                    message = await channel.fetch_message(payload.message_id)
+                except Exception:
+                    return
+                participants = await self._collect_group_match_participants(message, guild)
+                shuffled = list(participants)
+                random.shuffle(shuffled)
+                if state.visibility == "private":
+                    result_text = self._build_group_match_result_content(state, shuffled)
+                    failures: list[str] = []
+                    for member in participants:
+                        try:
+                            await member.send(result_text)
+                        except Exception:
+                            failures.append(member.mention)
+                    notice = "🤝 組み分け結果を参加者へDMしました。"
+                    if failures:
+                        notice += "\nDM失敗: " + ", ".join(failures[:5])
+                    await message.edit(content=notice)
+                else:
+                    await message.edit(content=self._build_group_match_result_content(state, shuffled))
+                self._group_matches.pop(payload.message_id, None)
+                return
+
         # タイマー再スタート
         if emoji == "🔁":
             tpl = self._timer_restart_templates.get(payload.message_id)
@@ -912,6 +1163,16 @@ class SlashCommands(commands.Cog):
             f"{member.mention} 操作を実行しました。成功 {success} / 失敗 {failed}",
             delete_after=7,
         )
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == (self.bot.user.id if self.bot.user else 0):
+            return
+        if str(payload.emoji) != self.GROUP_MATCH_EMOJI:
+            return
+        if payload.message_id not in self._group_matches:
+            return
+        await self._refresh_group_match(payload.message_id)
 
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         if isinstance(error, app_commands.CommandOnCooldown):

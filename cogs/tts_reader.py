@@ -40,6 +40,19 @@ class GuildTtsState:
 class TTSReader(commands.Cog):
     """VOICEVOX 読み上げ"""
 
+    _SPEAKER_CHOICES = [
+        app_commands.Choice(name="ずんだもん ノーマル", value=3),
+        app_commands.Choice(name="ずんだもん あまあま", value=1),
+        app_commands.Choice(name="ずんだもん ツンツン", value=7),
+        app_commands.Choice(name="四国めたん ノーマル", value=2),
+        app_commands.Choice(name="四国めたん あまあま", value=0),
+        app_commands.Choice(name="春日部つむぎ ノーマル", value=8),
+        app_commands.Choice(name="波音リツ ノーマル", value=9),
+        app_commands.Choice(name="雨晴はう ノーマル", value=10),
+        app_commands.Choice(name="玄野武宏 ノーマル", value=11),
+        app_commands.Choice(name="WhiteCUL ノーマル", value=23),
+    ]
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._states: dict[int, GuildTtsState] = {}
@@ -69,6 +82,12 @@ class TTSReader(commands.Cog):
 
     def _max_chars(self, guild_id: int) -> int:
         return int(_settings.get("tts.max_chars", 120, guild_id=guild_id))
+
+    def _speaker_label(self, speaker_id: int) -> str:
+        for choice in self._SPEAKER_CHOICES:
+            if int(choice.value) == int(speaker_id):
+                return choice.name
+        return f"speaker_id={speaker_id}"
 
     def _synthesize_to_file(self, text: str, speaker_id: int) -> str:
         base_url = self._voicevox_url()
@@ -144,8 +163,9 @@ class TTSReader(commands.Cog):
             logger.exception("Failed to synthesize or play TTS audio")
 
     @app_commands.command(name=TTS_JOIN_META.name, description=TTS_JOIN_META.description)
-    @app_commands.describe(speaker_id="VOICEVOX話者ID。ずんだもんノーマルは 3")
-    async def tts_join(self, interaction: discord.Interaction, speaker_id: int | None = None):
+    @app_commands.describe(speaker="読み上げ話者")
+    @app_commands.choices(speaker=_SPEAKER_CHOICES)
+    async def tts_join(self, interaction: discord.Interaction, speaker: app_commands.Choice[int] | None = None):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
@@ -184,12 +204,12 @@ class TTSReader(commands.Cog):
 
         state = GuildTtsState(
             channel_id=target_channel.id,
-            speaker_id=int(speaker_id if speaker_id is not None else self._speaker_id(interaction.guild.id)),
+            speaker_id=int(speaker.value if speaker is not None else self._speaker_id(interaction.guild.id)),
         )
         self._states[interaction.guild.id] = state
         await interaction.followup.send(
             f"読み上げを開始しました。対象チャンネル: {target_channel.mention} / "
-            f"対象VC: `{voice_channel.name}` / speaker_id=`{state.speaker_id}`",
+            f"対象VC: `{voice_channel.name}` / 話者: `{self._speaker_label(state.speaker_id)}`",
             ephemeral=True,
         )
 
@@ -209,17 +229,19 @@ class TTSReader(commands.Cog):
         await interaction.response.send_message("読み上げを停止しました。", ephemeral=True)
 
     @app_commands.command(name=TTS_VOICE_META.name, description=TTS_VOICE_META.description)
-    @app_commands.describe(speaker_id="VOICEVOX話者ID。ずんだもんノーマルは 3")
-    async def tts_voice(self, interaction: discord.Interaction, speaker_id: int):
+    @app_commands.describe(speaker="読み上げ話者")
+    @app_commands.choices(speaker=_SPEAKER_CHOICES)
+    async def tts_voice(self, interaction: discord.Interaction, speaker: app_commands.Choice[int]):
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
-        _settings.set("tts.speaker_id", int(speaker_id), guild_id=interaction.guild.id)
+        speaker_id = int(speaker.value)
+        _settings.set("tts.speaker_id", speaker_id, guild_id=interaction.guild.id)
         state = self._states.get(interaction.guild.id)
         if state:
-            state.speaker_id = int(speaker_id)
+            state.speaker_id = speaker_id
         await interaction.response.send_message(
-            f"読み上げ話者IDを `{speaker_id}` に設定しました。",
+            f"読み上げ話者を `{speaker.name}` に設定しました。",
             ephemeral=True,
         )
 
@@ -237,7 +259,7 @@ class TTSReader(commands.Cog):
         text_name = channel.mention if self._is_supported_channel(channel) else f"`{state.channel_id}`"
         vc_name = vc.channel.name if vc and vc.channel else "未接続"
         await interaction.response.send_message(
-            f"読み上げ中です。\n対象チャンネル: {text_name}\nVC: `{vc_name}`\nspeaker_id=`{state.speaker_id}`\n待機キュー: {len(state.queue)}件",
+            f"読み上げ中です。\n対象チャンネル: {text_name}\nVC: `{vc_name}`\n話者: `{self._speaker_label(state.speaker_id)}`\n待機キュー: {len(state.queue)}件",
             ephemeral=True,
         )
 
