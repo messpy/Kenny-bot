@@ -98,6 +98,45 @@ class MessageLogger(BaseCog):
             return list(message.get("tool_calls") or [])
         return list(getattr(message, "tool_calls", None) or [])
 
+    def _extract_message_content(self, response: object) -> str:
+        if response is None:
+            return ""
+        message = None
+        if isinstance(response, dict):
+            message = response.get("message", {})
+        else:
+            message = getattr(response, "message", None)
+        if message is None:
+            return ""
+        if isinstance(message, dict):
+            return str(message.get("content") or "")
+        return str(getattr(message, "content", "") or "")
+
+    def _response_message_payload(self, response: object) -> dict:
+        if response is None:
+            return {}
+        message = None
+        if isinstance(response, dict):
+            message = response.get("message", {})
+        else:
+            message = getattr(response, "message", None)
+        if isinstance(message, dict):
+            return dict(message)
+        if message is None:
+            return {}
+
+        payload: dict[str, object] = {"role": getattr(message, "role", "assistant")}
+        content = getattr(message, "content", None)
+        if content is not None:
+            payload["content"] = content
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            payload["tool_calls"] = tool_calls
+        thinking = getattr(message, "thinking", None)
+        if thinking:
+            payload["thinking"] = thinking
+        return payload
+
     def _normalize_tool_call(self, call: object) -> tuple[str, dict]:
         if isinstance(call, dict):
             fn = call.get("function") or {}
@@ -195,6 +234,70 @@ class MessageLogger(BaseCog):
             logger.exception("Failed to resolve chat context via tool calling")
 
         return self._build_history_context(blocks)
+
+    async def _run_ollama_chat_with_tools(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        tools: list[object],
+        max_rounds: int = 4,
+    ) -> str | None:
+        if not tools:
+            response = await asyncio.to_thread(
+                self.bot.ollama_client.chat,
+                model=model,
+                messages=messages,
+                stream=False,
+            )
+            return self._extract_message_content(response)
+
+        working_messages = [dict(item) for item in messages]
+        for _ in range(max_rounds):
+            response = await asyncio.to_thread(
+                self.bot.ollama_client.chat,
+                model=model,
+                messages=working_messages,
+                stream=False,
+                tools=tools,
+            )
+            assistant_message = self._response_message_payload(response)
+            if assistant_message:
+                working_messages.append(assistant_message)
+
+            tool_calls = self._extract_tool_calls(response)
+            if not tool_calls:
+                return self._extract_message_content(response)
+
+            for call in tool_calls:
+                name, args = self._normalize_tool_call(call)
+                tool_fn = next((tool for tool in tools if getattr(tool, "__name__", "") == name), None)
+                if tool_fn is None:
+                    working_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": name,
+                            "content": f"Tool {name} not found",
+                        }
+                    )
+                    continue
+                try:
+                    result = tool_fn(**args)
+                    result_text = str(result)
+                except Exception as e:
+                    logger.exception("Tool call failed: %s", name)
+                    result_text = f"Tool {name} failed: {e}"
+                if len(result_text) > 8000:
+                    result_text = result_text[:8000] + "\n...(省略)..."
+                working_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": name,
+                        "content": result_text,
+                    }
+                )
+
+        return self._extract_message_content(response)
 
     async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int = 15) -> str | None:
         return await asyncio.wait_for(
@@ -872,11 +975,32 @@ class MessageLogger(BaseCog):
         try:
             async with self._ai_semaphore:
                 async with msg.channel.typing():
-                    # Ollama クライアントで応答生成
                     model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
-                    answer = await self._run_ollama_text(
+                    tools: list[object] = []
+                    if self.bot.ollama_client.has_web_tools():
+                        tools = [
+                            self.bot.ollama_client.web_search,
+                            self.bot.ollama_client.web_fetch,
+                        ]
+                    answer = await self._run_ollama_chat_with_tools(
                         model=model_name,
-                        prompt=prompt,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are Kenny Bot, a helpful Discord assistant.\n"
+                                    "Answer in Japanese.\n"
+                                    "Use web_search or web_fetch only when the user needs current facts, external references, or verification.\n"
+                                    "Prefer provided local context when it is sufficient.\n"
+                                    "Do not claim to have searched the web unless you actually used the web tools."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt,
+                            },
+                        ],
+                        tools=tools,
                     )
 
             answer = (answer or "").strip()

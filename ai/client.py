@@ -138,7 +138,68 @@ class OllamaClientService:
             format=format,
             **kwargs,
         )
-    
+
+    def has_web_tools(self) -> bool:
+        has_methods = callable(getattr(self.client, "web_search", None)) and callable(getattr(self.client, "web_fetch", None))
+        return has_methods and bool(self.config.api_key or os.getenv("OLLAMA_API_KEY"))
+
+    def _format_web_search_response(self, response: object) -> str:
+        results = []
+        if isinstance(response, dict):
+            results = list(response.get("results") or [])
+        else:
+            results = list(getattr(response, "results", None) or [])
+
+        lines: list[str] = []
+        for idx, item in enumerate(results, start=1):
+            if isinstance(item, dict):
+                title = str(item.get("title") or "").strip()
+                url = str(item.get("url") or "").strip()
+                content = str(item.get("content") or "").strip()
+            else:
+                title = str(getattr(item, "title", "") or "").strip()
+                url = str(getattr(item, "url", "") or "").strip()
+                content = str(getattr(item, "content", "") or "").strip()
+            if not (title or url or content):
+                continue
+            lines.append(f"{idx}. {title}\nURL: {url}\n概要: {content[:1200]}")
+        return "\n\n".join(lines)
+
+    def _format_web_fetch_response(self, response: object) -> str:
+        if isinstance(response, dict):
+            title = str(response.get("title") or "").strip()
+            content = str(response.get("content") or "").strip()
+            links = list(response.get("links") or [])
+        else:
+            title = str(getattr(response, "title", "") or "").strip()
+            content = str(getattr(response, "content", "") or "").strip()
+            links = list(getattr(response, "links", None) or [])
+
+        lines = []
+        if title:
+            lines.append(f"Title: {title}")
+        if content:
+            lines.append(content[:6000])
+        if links:
+            lines.append("Links:\n" + "\n".join(str(link) for link in links[:20]))
+        return "\n\n".join(lines).strip()
+
+    def web_search(self, query: str, max_results: int = 3) -> str:
+        """Search the web for up-to-date information."""
+        tool = getattr(self.client, "web_search", None)
+        if not callable(tool):
+            raise RuntimeError("web_search is not available in the current Ollama client")
+        response = tool(query=query, max_results=max(1, min(int(max_results), 10)))
+        return self._format_web_search_response(response)
+
+    def web_fetch(self, url: str) -> str:
+        """Fetch the contents of a web page by URL."""
+        tool = getattr(self.client, "web_fetch", None)
+        if not callable(tool):
+            raise RuntimeError("web_fetch is not available in the current Ollama client")
+        response = tool(url=url)
+        return self._format_web_fetch_response(response)
+
     def chat_simple(
         self,
         model: str,
