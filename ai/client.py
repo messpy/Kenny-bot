@@ -63,6 +63,12 @@ class OllamaClientService:
     def __init__(self, config: OllamaClientConfig):
         self.config = config
         self.client = config.build_client()
+        self._local_fallback_client = None
+        if self.config.host and not self.config._is_local_host():
+            try:
+                self._local_fallback_client = OllamaClientConfig(host="http://127.0.0.1:11434").build_client()
+            except Exception:
+                logger.exception("Failed to initialize local Ollama fallback client")
         self._pull_lock = Lock()
         self._ensured_models: set[str] = set()
         self._embed_disabled = False
@@ -89,6 +95,33 @@ class OllamaClientService:
             self.client.pull(model=model, stream=False)
             self._ensured_models.add(model)
 
+    def _normalize_local_fallback_model(self, model: str) -> str:
+        value = (model or "").strip()
+        if value.endswith("-cloud"):
+            return value[: -len("-cloud")]
+        return value
+
+    def _try_local_chat_fallback(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        stream: bool,
+        format: Optional[str | dict],
+        **kwargs,
+    ):
+        if self._local_fallback_client is None:
+            raise RuntimeError("local fallback client is not available")
+        local_model = self._normalize_local_fallback_model(model)
+        logger.warning("Falling back to local Ollama model '%s' after remote failure", local_model)
+        return self._local_fallback_client.chat(
+            model=local_model,
+            messages=messages,
+            stream=stream,
+            format=format,
+            **kwargs,
+        )
+
     def _chat_with_auto_pull(
         self,
         model: str,
@@ -106,16 +139,27 @@ class OllamaClientService:
                 **kwargs,
             )
         except Exception as err:
-            if not self._is_model_missing_error(err):
-                raise
-            self._ensure_model_available(model)
-            return self.client.chat(
-                model=model,
-                messages=messages,
-                stream=stream,
-                format=format,
-                **kwargs,
-            )
+            if self._is_model_missing_error(err):
+                self._ensure_model_available(model)
+                return self.client.chat(
+                    model=model,
+                    messages=messages,
+                    stream=stream,
+                    format=format,
+                    **kwargs,
+                )
+            if self._local_fallback_client is not None:
+                try:
+                    return self._try_local_chat_fallback(
+                        model=model,
+                        messages=messages,
+                        stream=stream,
+                        format=format,
+                        **kwargs,
+                    )
+                except Exception:
+                    logger.exception("Local Ollama fallback failed")
+            raise
     
     def chat(
         self,
