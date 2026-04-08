@@ -16,6 +16,16 @@ class RagChunk:
     body: str
 
 
+README_CAPABILITY_TITLE_TOKENS = (
+    "主な機能",
+    "設定方法",
+    "使用方法",
+    "会話履歴",
+    "semantic memory",
+    "トラブルシューティング",
+)
+
+
 def _tokenize(text: str) -> list[str]:
     text = (text or "").lower()
     parts = re.split(r"[\s\r\n\t:：、。・,./()（）\[\]{}!?！？]+", text)
@@ -41,6 +51,15 @@ def _split_markdown_sections(text: str) -> list[RagChunk]:
         if body:
             chunks.append(RagChunk(source="README", title=cur_title, body=body))
     return chunks
+
+
+def _filter_capability_chunks(chunks: list[RagChunk]) -> list[RagChunk]:
+    filtered: list[RagChunk] = []
+    for chunk in chunks:
+        title = (chunk.title or "").strip().lower()
+        if any(token.lower() in title for token in README_CAPABILITY_TITLE_TOKENS):
+            filtered.append(chunk)
+    return filtered
 
 
 def _chunks_from_mapping(source: str, obj: object) -> list[RagChunk]:
@@ -157,12 +176,15 @@ class LocalRAG:
             self.root / "data" / "chat_rag.toml",
         ]
 
-    def _load_chunks(self) -> list[RagChunk]:
+    def _load_chunks(self, *, capability_only: bool = False) -> list[RagChunk]:
         chunks = _static_chunks()
         readme = self.root / "README.md"
         if readme.exists():
             try:
-                chunks.extend(_split_markdown_sections(readme.read_text(encoding="utf-8", errors="ignore")))
+                readme_chunks = _split_markdown_sections(readme.read_text(encoding="utf-8", errors="ignore"))
+                if capability_only:
+                    readme_chunks = _filter_capability_chunks(readme_chunks)
+                chunks.extend(readme_chunks)
             except Exception:
                 pass
         for path in self._extra_paths:
@@ -176,13 +198,14 @@ class LocalRAG:
                 pass
         return chunks
 
-    def retrieve(self, query: str, limit: int = 4) -> list[RagChunk]:
+    def retrieve(self, query: str, limit: int = 4, *, capability_only: bool = False) -> list[RagChunk]:
         tokens = set(_tokenize(query))
+        chunks = self._load_chunks(capability_only=capability_only)
         if not tokens:
-            return self._load_chunks()[:limit]
+            return chunks[:limit]
 
         scored: list[tuple[int, RagChunk]] = []
-        for chunk in self._load_chunks():
+        for chunk in chunks:
             hay = f"{chunk.title}\n{chunk.body}".lower()
             score = 0
             for token in tokens:
@@ -197,4 +220,4 @@ class LocalRAG:
         top = [chunk for _, chunk in scored[:limit]]
         if top:
             return top
-        return self._load_chunks()[:limit]
+        return chunks[:limit]

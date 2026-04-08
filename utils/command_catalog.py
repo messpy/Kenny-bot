@@ -29,6 +29,16 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
         ),
     ),
     HelpSection(
+        title="検索・RAG機能",
+        lines=(
+            "- README と `data/chat_rag.md/json/toml` をローカル知識として参照",
+            "- Bot自身の機能説明や使い方をローカル資料から回答",
+            "- semantic memory で意味的に近い過去発言を補助的に参照",
+            "- Cloud Ollama + APIキー構成では必要時のみ `web search` / `web fetch` を使用",
+            "- 最新情報が必要な質問では、検索未実施なら検索したふりをしない",
+        ),
+    ),
+    HelpSection(
         title="議事録機能",
         lines=(
             "- VC参加者が `/minutes_start` で開始",
@@ -63,7 +73,7 @@ COMMAND_CATEGORY_ORDER: tuple[str, ...] = (
     "議事録",
     "ロール",
     "読み上げ",
-    "ゲーム・VC",
+    "ゲーム・ユーティリティ",
 )
 
 SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
@@ -160,22 +170,22 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
     "game": SlashCommandMeta(
         name="game",
         description="ミニゲームを開始（リアクション参加）",
-        category="ゲーム・VC",
+        category="ゲーム・ユーティリティ",
     ),
     "timer": SlashCommandMeta(
         name="timer",
         description="タイマーを開始（時/分/秒指定）",
-        category="ゲーム・VC",
+        category="ゲーム・ユーティリティ",
     ),
     "vc_control": SlashCommandMeta(
         name="vc_control",
         description="VCミュート操作パネルを作成",
-        category="ゲーム・VC",
+        category="ゲーム・ユーティリティ",
     ),
     "group_match": SlashCommandMeta(
         name="group_match",
         description="リアクション参加で2人組/3人組を自動作成",
-        category="ゲーム・VC",
+        category="ゲーム・ユーティリティ",
     ),
 }
 
