@@ -24,6 +24,7 @@ from utils.command_catalog import (
     get_slash_command_meta,
 )
 from utils.event_logger import send_event_log
+from utils.countdown import ChannelCountdown
 from utils.runtime_settings import get_settings
 
 JST = timezone(timedelta(hours=9))
@@ -78,6 +79,7 @@ class SlashCommands(commands.Cog):
         self._vc_panels: dict[int, VcPanelState] = {}
         # message_id -> group match state
         self._group_matches: dict[int, GroupMatchState] = {}
+        self._countdowns = ChannelCountdown()
 
     VC_JOIN_EMOJI = "✅"
     VC_MUTE_ON_EMOJI = "🔇"
@@ -1187,29 +1189,30 @@ class SlashCommands(commands.Cog):
         total_seconds: int,
         title: str | None,
     ) -> None:
-        countdown_msg = await channel.send(
-            f"<@{mention_user_id}> ⏳ 残り {total_seconds} 秒"
-        )
-        remain = total_seconds
-        while remain > 0:
-            # 長時間は10秒ごと、最後の10秒だけ1秒ごとに更新
-            step = 1 if remain <= 10 else 10
-            await asyncio.sleep(step)
-            remain -= step
-            if remain > 0:
-                await countdown_msg.edit(
-                    content=f"<@{mention_user_id}> ⏳ 残り {remain} 秒"
-                )
-            else:
-                done_text = title.strip() if title and title.strip() else "タイマー終了です。"
+        done_text = title.strip() if title and title.strip() else "タイマー終了です。"
+
+        async def _after_done(countdown_msg: discord.Message) -> None:
+            try:
                 await countdown_msg.edit(
                     content=f"<@{mention_user_id}> ⏰ {done_text}\n🔁 を押すと同じ設定で再スタート"
                 )
-                try:
-                    await countdown_msg.add_reaction("🔁")
-                except Exception:
-                    pass
-                self._timer_restart_templates[countdown_msg.id] = (int(total_seconds), done_text)
+            except Exception:
+                return
+            try:
+                await countdown_msg.add_reaction("🔁")
+            except Exception:
+                pass
+            self._timer_restart_templates[countdown_msg.id] = (int(total_seconds), done_text)
+
+        await self._countdowns.start_or_replace(
+            key=f"timer:{channel.id}:{mention_user_id}",
+            channel=channel,
+            initial_text=f"⏳ 残り {total_seconds} 秒",
+            total_seconds=total_seconds,
+            mention_user_id=mention_user_id,
+            done_text=f"⏰ {done_text}",
+            on_done=_after_done,
+        )
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):

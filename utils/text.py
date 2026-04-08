@@ -60,3 +60,25 @@ def is_search_intent(text: str) -> bool:
     """検索クエリ生成が必要かどうかを判定"""
     t = text or ""
     return ("教えて" in t) or ("調べて" in t) or ("ニュース" in t)
+
+
+def is_current_info_intent(text: str) -> bool:
+    """最新情報や今日の情報を欲しがっているかを判定"""
+    t = normalize_keyword_match_text(text or "")
+    keywords = (
+        "今日",
+        "きょう",
+        "現在",
+        "今",
+        "いま",
+        "最新",
+        "最近",
+        "ニュース",
+        "天気",
+        "気温",
+        "速報",
+        "トレンド",
+        "株価",
+        "レート",
+    )
+    return any(keyword in t for keyword in keywords)

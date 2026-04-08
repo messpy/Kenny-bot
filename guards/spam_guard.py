@@ -107,6 +107,19 @@ class SpamGuard:
         """AI呼び出しを許可するか"""
         return self._allow(self._ai_times, user_id, self.p.max_ai_calls, self.p.ai_per_seconds)
 
+    def ai_retry_after(self, user_id: int) -> float:
+        """次の AI 呼び出しが許可されるまでの残り秒数を返す。"""
+        now = time.time()
+        dq = self._ai_times.get(user_id)
+        if not dq:
+            return 0.0
+        while dq and (now - dq[0]) > self.p.ai_per_seconds:
+            dq.popleft()
+        if len(dq) < self.p.max_ai_calls:
+            return 0.0
+        oldest = dq[0]
+        return max(0.0, self.p.ai_per_seconds - (now - oldest))
+
     def should_warn(self, user_id: int) -> bool:
         """警告メッセージを送出するか（cooldown付き）"""
         now = time.time()

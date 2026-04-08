@@ -22,6 +22,7 @@ from utils.live_info import ExternalContext, LiveInfoService
 from utils.local_rag import LocalRAG
 from utils.runtime_settings import get_settings
 from utils.event_logger import send_event_log
+from utils.countdown import ChannelCountdown
 from utils.message_vector_store import MessageVectorStore
 from cogs.base import BaseCog
 from utils.channel import resolve_log_channel
@@ -29,6 +30,7 @@ from utils.text import (
     normalize_user_text,
     normalize_keyword_match_text,
     is_search_intent,
+    is_current_info_intent,
     strip_ansi_and_ctrl,
 )
 from guards.spam_guard import SpamGuard
@@ -85,6 +87,7 @@ class MessageLogger(BaseCog):
         self._live_info = LiveInfoService()
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
         self._vector_store = MessageVectorStore(Path("data") / "message_logs" / "message_vectors.sqlite3")
+        self._ai_retry_countdowns = ChannelCountdown()
 
     def _extract_tool_calls(self, response: object) -> list[object]:
         if response is None:
@@ -1057,10 +1060,15 @@ class MessageLogger(BaseCog):
         # スパム対策（AI 呼び出しレート制限）
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
         if not guard.allow_ai(msg.author.id):
+            remain = max(1, int(guard.ai_retry_after(msg.author.id)) + 1)
             if guard.should_warn(msg.author.id):
-                await msg.channel.send(
-                    f"{msg.author.mention}\n短時間に AI 呼び出しが多いので少し待ってください。",
-                    allowed_mentions=discord.AllowedMentions.none(),
+                await self._ai_retry_countdowns.start_or_replace(
+                    key=f"ai-retry:{msg.channel.id}:{msg.author.id}",
+                    channel=msg.channel,
+                    initial_text=f"⏳ 残り {remain} 秒",
+                    total_seconds=remain,
+                    mention_user_id=msg.author.id,
+                    done_text="✅ AI 呼び出しを再開できます。",
                 )
             await self.bot.process_commands(msg)
             return
@@ -1115,6 +1123,9 @@ class MessageLogger(BaseCog):
             user_message=text,
             max_response_length_prompt=self._cfg_int("chat.max_response_length_prompt", 500),
         )
+        today_local = datetime.now(JST)
+        absolute_date = today_local.strftime("%Y-%m-%d")
+        requires_current_lookup = is_current_info_intent(text)
 
         try:
             async with self._ai_semaphore:
@@ -1137,15 +1148,21 @@ class MessageLogger(BaseCog):
                                 "content": (
                                     "You are Kenny Bot, a helpful Discord assistant.\n"
                                     "Answer in Japanese.\n"
+                                    f"Today in JST is {absolute_date}.\n"
+                                    "When the user asks about today, current conditions, latest news, or other time-sensitive facts, use absolute dates in the answer.\n"
                                     "You can use get_local_knowledge to inspect the local README and custom RAG files for bot-specific facts.\n"
                                     "Use web_search or web_fetch only when the user needs current facts, external references, or verification.\n"
+                                    "If the request is time-sensitive and web tools are available, you must use them before answering.\n"
                                     "Prefer provided local context when it is sufficient.\n"
                                     "Do not claim to have searched the web unless you actually used the web tools."
                                 ),
                             },
                             {
                                 "role": "user",
-                                "content": prompt,
+                                "content": (
+                                    (f"[必須: 最新情報として扱う。回答に日付 {absolute_date} を明記すること]\n" if requires_current_lookup else "")
+                                    + prompt
+                                ),
                             },
                         ],
                         tools=tools,
