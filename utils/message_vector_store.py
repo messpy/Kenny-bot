@@ -74,6 +74,50 @@ class MessageVectorStore:
                 (guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json),
             )
 
+    def upsert_messages(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        payload = []
+        for row in rows:
+            embedding = row.get("embedding")
+            payload.append(
+                (
+                    int(row["guild_id"]),
+                    int(row["channel_id"]),
+                    int(row["message_id"]),
+                    int(row["author_id"]),
+                    str(row["author"]),
+                    str(row["content"]),
+                    str(row["timestamp"]),
+                    json.dumps(embedding) if embedding else None,
+                )
+            )
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO message_embeddings (
+                    guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    guild_id=excluded.guild_id,
+                    channel_id=excluded.channel_id,
+                    author_id=excluded.author_id,
+                    author=excluded.author,
+                    content=excluded.content,
+                    timestamp=excluded.timestamp,
+                    embedding_json=COALESCE(excluded.embedding_json, message_embeddings.embedding_json)
+                """,
+                payload,
+            )
+
+    def has_message(self, message_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM message_embeddings WHERE message_id = ? LIMIT 1",
+                (int(message_id),),
+            ).fetchone()
+        return row is not None
+
     def semantic_search(
         self,
         *,

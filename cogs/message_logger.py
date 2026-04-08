@@ -257,6 +257,7 @@ class MessageLogger(BaseCog):
                 "content": (
                     "You are a context planner for a Discord bot.\n"
                     "Decide which history is needed before answering the user.\n"
+                    "Prefer get_semantic_history first when the user is asking a follow-up, recalling prior discussion, or referencing earlier similar topics.\n"
                     "Use get_user_history for personal follow-ups, preferences, or self-referential questions.\n"
                     "Use get_channel_history for shared discussion, references to others, recent channel events, or ambiguous context.\n"
                     "Use get_semantic_history when exact recency is less important than topical similarity.\n"
@@ -322,6 +323,21 @@ class MessageLogger(BaseCog):
                         blocks.append((title, body))
         except Exception:
             logger.exception("Failed to resolve chat context via tool calling")
+
+        if not blocks:
+            query_embedding = await self._embed_text(text)
+            if query_embedding:
+                rows = await asyncio.to_thread(
+                    self._vector_store.semantic_search,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    query_embedding=query_embedding,
+                    author_id=None,
+                    limit=max(1, min(self._cfg_int("chat.semantic_history_k", 6), 12)),
+                )
+                body = self._vector_store.format_results(rows)
+                if body:
+                    blocks.append(("このチャンネルの意味的に近い過去発言", body))
 
         return self._build_history_context(blocks)
 
@@ -515,6 +531,20 @@ class MessageLogger(BaseCog):
         if not contexts:
             return ""
         blocks = [f"[{item.label}]\n{item.body}" for item in contexts]
+        return "\n\n".join(blocks)
+
+    def _get_local_knowledge(self, query: str, limit: int = 4) -> str:
+        query = (query or "").strip()
+        if not query:
+            return ""
+        limit = max(1, min(int(limit or 4), 6))
+        chunks = self._local_rag.retrieve(query, limit=limit)
+        blocks: list[str] = []
+        for chunk in chunks:
+            body = chunk.body.strip()
+            if len(body) > 1200:
+                body = body[:1200] + "\n...(省略)..."
+            blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
         return "\n\n".join(blocks)
 
     def _is_ai_channel_rate_limited(self, channel_id: int) -> bool:
@@ -1093,9 +1123,12 @@ class MessageLogger(BaseCog):
                     tools: list[object] = []
                     if self.bot.ollama_client.has_web_tools():
                         tools = [
+                            self._get_local_knowledge,
                             self.bot.ollama_client.web_search,
                             self.bot.ollama_client.web_fetch,
                         ]
+                    else:
+                        tools = [self._get_local_knowledge]
                     answer = await self._run_ollama_chat_with_tools(
                         model=model_name,
                         messages=[
@@ -1104,6 +1137,7 @@ class MessageLogger(BaseCog):
                                 "content": (
                                     "You are Kenny Bot, a helpful Discord assistant.\n"
                                     "Answer in Japanese.\n"
+                                    "You can use get_local_knowledge to inspect the local README and custom RAG files for bot-specific facts.\n"
                                     "Use web_search or web_fetch only when the user needs current facts, external references, or verification.\n"
                                     "Prefer provided local context when it is sufficient.\n"
                                     "Do not claim to have searched the web unless you actually used the web tools."
