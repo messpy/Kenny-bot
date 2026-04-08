@@ -143,6 +143,9 @@ class OllamaClientService:
         has_methods = callable(getattr(self.client, "web_search", None)) and callable(getattr(self.client, "web_fetch", None))
         return has_methods and bool(self.config.api_key or os.getenv("OLLAMA_API_KEY"))
 
+    def has_embed(self) -> bool:
+        return callable(getattr(self.client, "embed", None))
+
     def _format_web_search_response(self, response: object) -> str:
         results = []
         if isinstance(response, dict):
@@ -199,6 +202,25 @@ class OllamaClientService:
             raise RuntimeError("web_fetch is not available in the current Ollama client")
         response = tool(url=url)
         return self._format_web_fetch_response(response)
+
+    def embed(self, model: str, input_texts: str | list[str]) -> list[list[float]]:
+        tool = getattr(self.client, "embed", None)
+        if not callable(tool):
+            raise RuntimeError("embed is not available in the current Ollama client")
+        try:
+            response = tool(model=model, input=input_texts)
+        except Exception as err:
+            if not self._is_model_missing_error(err):
+                raise
+            self._ensure_model_available(model)
+            response = tool(model=model, input=input_texts)
+
+        embeddings = []
+        if isinstance(response, dict):
+            embeddings = list(response.get("embeddings") or [])
+        else:
+            embeddings = list(getattr(response, "embeddings", None) or [])
+        return [list(map(float, item)) for item in embeddings if isinstance(item, (list, tuple))]
 
     def chat_simple(
         self,

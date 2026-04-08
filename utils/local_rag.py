@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +41,49 @@ def _split_markdown_sections(text: str) -> list[RagChunk]:
         if body:
             chunks.append(RagChunk(source="README", title=cur_title, body=body))
     return chunks
+
+
+def _chunks_from_mapping(source: str, obj: object) -> list[RagChunk]:
+    chunks: list[RagChunk] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            title = str(key).strip() or source
+            if isinstance(value, dict):
+                body = "\n".join(f"{k}: {v}" for k, v in value.items()).strip()
+            elif isinstance(value, list):
+                body = "\n".join(str(item) for item in value).strip()
+            else:
+                body = str(value).strip()
+            if body:
+                chunks.append(RagChunk(source=source, title=title, body=body))
+    elif isinstance(obj, list):
+        for idx, item in enumerate(obj, start=1):
+            if isinstance(item, dict):
+                title = str(item.get("title") or item.get("name") or f"{source} {idx}").strip()
+                body = str(item.get("body") or item.get("content") or "").strip()
+                if not body:
+                    extra = {k: v for k, v in item.items() if k not in {"title", "name", "body", "content"}}
+                    body = "\n".join(f"{k}: {v}" for k, v in extra.items()).strip()
+                if body:
+                    chunks.append(RagChunk(source=source, title=title, body=body))
+            else:
+                body = str(item).strip()
+                if body:
+                    chunks.append(RagChunk(source=source, title=f"{source} {idx}", body=body))
+    return chunks
+
+
+def _load_extra_rag_file(path: Path) -> list[RagChunk]:
+    suffix = path.suffix.lower()
+    if suffix == ".md":
+        return _split_markdown_sections(path.read_text(encoding="utf-8", errors="ignore"))
+    if suffix == ".json":
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        return _chunks_from_mapping(path.stem, obj)
+    if suffix == ".toml":
+        obj = tomllib.loads(path.read_text(encoding="utf-8"))
+        return _chunks_from_mapping(path.stem, obj)
+    return []
 
 
 def _static_chunks() -> list[RagChunk]:
@@ -105,6 +150,11 @@ def _static_chunks() -> list[RagChunk]:
 class LocalRAG:
     def __init__(self, root: Path):
         self.root = root
+        self._extra_paths = [
+            self.root / "data" / "chat_rag.md",
+            self.root / "data" / "chat_rag.json",
+            self.root / "data" / "chat_rag.toml",
+        ]
 
     def _load_chunks(self) -> list[RagChunk]:
         chunks = _static_chunks()
@@ -112,6 +162,15 @@ class LocalRAG:
         if readme.exists():
             try:
                 chunks.extend(_split_markdown_sections(readme.read_text(encoding="utf-8", errors="ignore")))
+            except Exception:
+                pass
+        for path in self._extra_paths:
+            if not path.exists():
+                continue
+            try:
+                extra_chunks = _load_extra_rag_file(path)
+                for chunk in extra_chunks:
+                    chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
             except Exception:
                 pass
         return chunks

@@ -22,6 +22,7 @@ from utils.live_info import ExternalContext, LiveInfoService
 from utils.local_rag import LocalRAG
 from utils.runtime_settings import get_settings
 from utils.event_logger import send_event_log
+from utils.message_vector_store import MessageVectorStore
 from cogs.base import BaseCog
 from utils.channel import resolve_log_channel
 from utils.text import (
@@ -83,6 +84,7 @@ class MessageLogger(BaseCog):
         self._local_rag = LocalRAG(Path(__file__).resolve().parent.parent)
         self._live_info = LiveInfoService()
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
+        self._vector_store = MessageVectorStore(Path("data") / "message_logs" / "message_vectors.sqlite3")
 
     def _extract_tool_calls(self, response: object) -> list[object]:
         if response is None:
@@ -161,6 +163,70 @@ class MessageLogger(BaseCog):
             return ""
         return "\n\n".join(parts) + "\n\n"
 
+    async def _embed_text(self, text: str) -> list[float] | None:
+        if not text or not self.bot.ollama_client.has_embed():
+            return None
+        try:
+            model_name = self._cfg_str("ollama.model_embedding", "embeddinggemma")
+            vectors = await asyncio.to_thread(self.bot.ollama_client.embed, model_name, text)
+            return vectors[0] if vectors else None
+        except Exception:
+            logger.exception("Failed to embed text")
+            return None
+
+    async def _index_message_embedding(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        author_id: int,
+        author: str,
+        content: str,
+    ) -> None:
+        content = (content or "").strip()
+        if not content:
+            return
+        embedding = await self._embed_text(content)
+        if not embedding:
+            return
+        timestamp = datetime.now(JST).isoformat()
+        try:
+            await asyncio.to_thread(
+                self._vector_store.upsert_message,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                author_id=author_id,
+                author=author,
+                content=content,
+                timestamp=timestamp,
+                embedding=embedding,
+            )
+        except Exception:
+            logger.exception("Failed to index message embedding")
+
+    def _schedule_message_index(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        author_id: int,
+        author: str,
+        content: str,
+    ) -> None:
+        asyncio.create_task(
+            self._index_message_embedding(
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                author_id=author_id,
+                author=author,
+                content=content,
+            )
+        )
+
     async def _resolve_chat_history_context(
         self,
         *,
@@ -182,6 +248,9 @@ class MessageLogger(BaseCog):
             lines = max(1, min(int(lines or channel_lines), max(1, channel_lines)))
             return store.get_recent_context(lines=lines)
 
+        def get_semantic_history(scope: str = "channel", k: int = 6) -> str:
+            return f"scope={scope}, k={k}"
+
         planner_messages = [
             {
                 "role": "system",
@@ -190,6 +259,7 @@ class MessageLogger(BaseCog):
                     "Decide which history is needed before answering the user.\n"
                     "Use get_user_history for personal follow-ups, preferences, or self-referential questions.\n"
                     "Use get_channel_history for shared discussion, references to others, recent channel events, or ambiguous context.\n"
+                    "Use get_semantic_history when exact recency is less important than topical similarity.\n"
                     "You may call both tools if needed. If the message is self-contained, call no tools."
                 ),
             },
@@ -213,7 +283,7 @@ class MessageLogger(BaseCog):
                 model=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
                 messages=planner_messages,
                 stream=False,
-                tools=[get_user_history, get_channel_history],
+                tools=[get_user_history, get_channel_history, get_semantic_history],
             )
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
@@ -230,6 +300,26 @@ class MessageLogger(BaseCog):
                     body = get_channel_history(requested_lines if isinstance(requested_lines, int) else channel_lines)
                     if body:
                         blocks.append((f"このチャンネル全体の最近の発言 {channel_lines} 件以内", body))
+                elif name == "get_semantic_history":
+                    scope = str(args.get("scope") or "channel")
+                    k = args.get("k")
+                    query_embedding = await self._embed_text(text)
+                    if not query_embedding:
+                        continue
+                    scope_value = scope.strip().lower()
+                    limit = max(1, min(int(k if isinstance(k, int) else self._cfg_int("chat.semantic_history_k", 6)), 12))
+                    rows = await asyncio.to_thread(
+                        self._vector_store.semantic_search,
+                        guild_id=guild_id,
+                        channel_id=channel_id,
+                        query_embedding=query_embedding,
+                        author_id=user_id if scope_value == "user" else None,
+                        limit=limit,
+                    )
+                    body = self._vector_store.format_results(rows)
+                    if body:
+                        title = "このユーザーの意味的に近い過去発言" if scope_value == "user" else "このチャンネルの意味的に近い過去発言"
+                        blocks.append((title, body))
         except Exception:
             logger.exception("Failed to resolve chat context via tool calling")
 
@@ -456,6 +546,14 @@ class MessageLogger(BaseCog):
         store = MessageStore(0, msg.channel.id)
         user_name = msg.author.display_name if hasattr(msg.author, "display_name") else msg.author.name
         store.add_message(user_name or str(msg.author.id), text, msg.id, author_id=msg.author.id)
+        self._schedule_message_index(
+            guild_id=0,
+            channel_id=msg.channel.id,
+            message_id=msg.id,
+            author_id=msg.author.id,
+            author=user_name or str(msg.author.id),
+            content=text,
+        )
 
         history_lines = self._cfg_int("chat.history_lines", 100)
         history_text = store.get_recent_context(lines=history_lines)
@@ -829,6 +927,14 @@ class MessageLogger(BaseCog):
             user_name = msg.author.display_name or msg.author.name or str(msg.author.id)
             store = MessageStore(msg.guild.id, msg.channel.id)
             store.add_message(user_name, content, msg.id, author_id=msg.author.id)
+            self._schedule_message_index(
+                guild_id=msg.guild.id,
+                channel_id=msg.channel.id,
+                message_id=msg.id,
+                author_id=msg.author.id,
+                author=user_name,
+                content=content,
+            )
 
             # キーワード -> 絵文字 の対応（config から取得）
             normalized_content = normalize_keyword_match_text(content)
@@ -941,6 +1047,14 @@ class MessageLogger(BaseCog):
         # =========================
         store = MessageStore(msg.guild.id, msg.channel.id)
         store.add_message(user_name, text, msg.id, author_id=msg.author.id)
+        self._schedule_message_index(
+            guild_id=msg.guild.id,
+            channel_id=msg.channel.id,
+            message_id=msg.id,
+            author_id=msg.author.id,
+            author=user_name,
+            content=text,
+        )
 
         history_context = await self._resolve_chat_history_context(
             guild_id=msg.guild.id,
