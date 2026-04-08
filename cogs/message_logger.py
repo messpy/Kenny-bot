@@ -905,6 +905,7 @@ class MessageLogger(BaseCog):
             max_response_length_prompt=self._cfg_int("chat.max_response_length_prompt", 500),
         )
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
 
         try:
             async with self._ai_semaphore:
@@ -912,10 +913,9 @@ class MessageLogger(BaseCog):
                     key=progress_key,
                     channel=msg.channel,
                     mention_user_id=msg.author.id,
-                    base_text="Kennybot推論中",
+                    base_text=f"{model_name} 推論中",
                 )
                 async with msg.channel.typing():
-                    model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
                     answer = await self._run_ollama_text(
                         model=model_name,
                         prompt=prompt,
@@ -1215,14 +1215,14 @@ class MessageLogger(BaseCog):
             f"[関連資料]\n{rag_context}\n\n"
             + (f"[最新更新(git log)]\n{updates}\n" if updates else "")
         )
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
         try:
             async with self._ai_semaphore:
                 await self._ai_progress_countdowns.start_countup(
                     key=progress_key,
                     channel=channel,
-                    base_text="Kennybot推論中",
+                    base_text=f"{model_name} 推論中",
                 )
-                model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
                 answer = await self._run_ollama_text(
                     model=model_name,
                     prompt=prompt,
@@ -1579,6 +1579,7 @@ class MessageLogger(BaseCog):
         requires_current_lookup = is_current_info_intent(text)
         requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
 
         try:
             async with self._ai_semaphore:
@@ -1586,10 +1587,9 @@ class MessageLogger(BaseCog):
                     key=progress_key,
                     channel=msg.channel,
                     mention_user_id=msg.author.id,
-                    base_text="Kennybot推論中",
+                    base_text=f"{model_name} 推論中",
                 )
                 async with msg.channel.typing():
-                    model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
                     tools: list[object] = []
                     if self.bot.ollama_client.has_web_tools():
                         tools = [

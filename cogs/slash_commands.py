@@ -670,15 +670,15 @@ class SlashCommands(commands.Cog):
             f"<chat_log>\n{transcript}\n</chat_log>"
         )
         progress_key = f"ai-progress:{interaction.channel_id}:summarize:{interaction.user.id}"
+        model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b"))
 
         try:
             await self._countdowns.start_countup(
                 key=progress_key,
                 channel=interaction.channel,
                 mention_user_id=interaction.user.id,
-                base_text="Kennybot推論中",
+                base_text=f"{model_summary} 推論中",
             )
-            model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b"))
             summary = self.bot.ollama_client.chat_simple(
                 model=model_summary,
                 prompt=prompt,
