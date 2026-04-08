@@ -314,6 +314,14 @@ class SlashCommands(commands.Cog):
         except Exception:
             return commit
 
+    def _display_model_name(self, model: str) -> str:
+        value = (model or "").strip()
+        if not value:
+            return "unknown"
+        if value.endswith("-cloud"):
+            value = value[: -len("-cloud")]
+        return value.replace(":", "").replace("-", "-")
+
     @app_commands.command(name=VC_CONTROL_META.name, description=VC_CONTROL_META.description)
     @app_commands.checks.cooldown(1, 15.0)
     async def vc_control(self, interaction: discord.Interaction):
@@ -534,6 +542,7 @@ class SlashCommands(commands.Cog):
         ping_ms = round(self.bot.latency * 1000, 1)
         commit = self._git_short_commit()
         version = self._git_version()
+        ai_model = self._display_model_name(str(_settings.get("ollama.model_default", "gpt-oss:120b")))
 
         embed = discord.Embed(
             title="Kenny Bot 情報",
@@ -545,6 +554,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="稼働時間", value=f"{h}h {m}m {s}s", inline=True)
         embed.add_field(name="参加サーバー", value=str(guild_count), inline=True)
         embed.add_field(name="総メンバー数(概算)", value=str(member_count), inline=True)
+        embed.add_field(name="AI Model", value=f"`{ai_model}`", inline=True)
         embed.add_field(name="Version", value=f"`{version}`", inline=True)
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)

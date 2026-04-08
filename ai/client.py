@@ -65,12 +65,19 @@ class OllamaClientService:
         self.client = config.build_client()
         self._pull_lock = Lock()
         self._ensured_models: set[str] = set()
+        self._embed_disabled = False
 
     def _is_model_missing_error(self, err: Exception) -> bool:
         if not isinstance(err, ResponseError):
             return False
         text = (getattr(err, "error", "") or str(err)).lower()
         return "not found" in text and "model" in text
+
+    def _is_unauthorized_error(self, err: Exception) -> bool:
+        if not isinstance(err, ResponseError):
+            return False
+        text = (getattr(err, "error", "") or str(err)).lower()
+        return "unauthorized" in text or getattr(err, "status_code", None) == 401
 
     def _ensure_model_available(self, model: str) -> None:
         if model in self._ensured_models:
@@ -144,7 +151,7 @@ class OllamaClientService:
         return has_methods and bool(self.config.api_key or os.getenv("OLLAMA_API_KEY"))
 
     def has_embed(self) -> bool:
-        return callable(getattr(self.client, "embed", None))
+        return (not self._embed_disabled) and callable(getattr(self.client, "embed", None))
 
     def pull_model(self, model: str) -> None:
         model = (model or "").strip()
@@ -222,12 +229,18 @@ class OllamaClientService:
         return self._format_web_fetch_response(response)
 
     def embed(self, model: str, input_texts: str | list[str]) -> list[list[float]]:
+        if self._embed_disabled:
+            return []
         tool = getattr(self.client, "embed", None)
         if not callable(tool):
             raise RuntimeError("embed is not available in the current Ollama client")
         try:
             response = tool(model=model, input=input_texts)
         except Exception as err:
+            if self._is_unauthorized_error(err):
+                self._embed_disabled = True
+                logger.warning("Disabling Ollama embed calls after unauthorized response")
+                return []
             if not self._is_model_missing_error(err):
                 raise
             self._ensure_model_available(model)

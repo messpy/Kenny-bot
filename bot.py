@@ -84,6 +84,13 @@ class MyBot(commands.Bot):
             logger.info("Using local Ollama (http://localhost:11434)")
             self.ollama_client = create_ollama_client()
 
+        ollama_embed_host = os.getenv("OLLAMA_EMBED_HOST")
+        if ollama_embed_host:
+            logger.info("Using dedicated embed Ollama host: %s", ollama_embed_host)
+            self.ollama_embed_client = create_ollama_client(host=ollama_embed_host)
+        else:
+            self.ollama_embed_client = self.ollama_client
+
         # Bot 用に設定を保持
         self.ollama_model = OLLAMA_MODEL_DEFAULT
         self._tree_synced = False

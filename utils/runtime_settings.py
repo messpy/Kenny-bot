@@ -41,7 +41,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "block_invite_and_mass_mention": True,
         },
         "security": {
-            "ai_max_concurrency": 1,
+            "ai_max_concurrency": 2,
             "ai_channel_cooldown_seconds": 4,
             "max_user_message_chars": 1200,
             "spam": {

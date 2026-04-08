@@ -2,6 +2,7 @@
 # 会話 + リアクション
 
 import json
+import io
 import logging
 import re
 import subprocess
@@ -83,7 +84,7 @@ class MessageLogger(BaseCog):
         # AI応答のチャンネル単位クールダウン
         self._ai_channel_last: dict[int, float] = {}
         # AI同時実行数の上限（Raspberry Pi負荷対策）
-        ai_concurrency = max(1, self._cfg_int("security.ai_max_concurrency", 1))
+        ai_concurrency = min(2, max(1, self._cfg_int("security.ai_max_concurrency", 2)))
         self._ai_semaphore = asyncio.Semaphore(ai_concurrency)
         self._local_rag = LocalRAG(Path(__file__).resolve().parent.parent)
         self._live_info = LiveInfoService()
@@ -180,11 +181,12 @@ class MessageLogger(BaseCog):
         return urls
 
     async def _embed_text(self, text: str) -> list[float] | None:
-        if not text or not self.bot.ollama_client.has_embed():
+        embed_client = getattr(self.bot, "ollama_embed_client", self.bot.ollama_client)
+        if not text or not embed_client.has_embed():
             return None
         try:
             model_name = self._cfg_str("ollama.model_embedding", "embeddinggemma")
-            vectors = await asyncio.to_thread(self.bot.ollama_client.embed, model_name, text)
+            vectors = await asyncio.to_thread(embed_client.embed, model_name, text)
             return vectors[0] if vectors else None
         except Exception:
             logger.exception("Failed to embed text")
@@ -571,6 +573,20 @@ class MessageLogger(BaseCog):
                 body = body[:1200] + "\n...(省略)..."
             blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
         return "\n\n".join(blocks)
+
+    def _should_send_letter_file(self, text: str) -> bool:
+        return "ぽっぷこーんきめら" in normalize_keyword_match_text(text or "")
+
+    async def _send_letter_file(self, msg: discord.Message, answer: str) -> None:
+        display_name = (getattr(msg.author, "display_name", None) or msg.author.name or "user").strip() or "user"
+        filename = f"{display_name}への手紙.txt"
+        payload = io.BytesIO(answer.encode("utf-8"))
+        discord_file = discord.File(payload, filename=filename)
+        await msg.channel.send(
+            content=f"{msg.author.mention}\n{answer}",
+            file=discord_file,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     def _is_ai_channel_rate_limited(self, channel_id: int) -> bool:
         now = time.time()
@@ -1217,7 +1233,10 @@ class MessageLogger(BaseCog):
                 answer = answer[:max_answer_len] + "\n...(省略)..."
                 final_message = f"{msg.author.mention}\n{answer}"
 
-            await msg.channel.send(final_message, allowed_mentions=discord.AllowedMentions.none())
+            if self._should_send_letter_file(text):
+                await self._send_letter_file(msg, answer)
+            else:
+                await msg.channel.send(final_message, allowed_mentions=discord.AllowedMentions.none())
 
         except Exception as e:
             logger.exception("AI response failed")
