@@ -16,6 +16,7 @@ from ai.search import AISearchService  # search.py から移動
 from guards.spam_guard import SpamGuard, SpamPolicy
 from cogs.voice_logger import VoiceLogger
 from cogs.member_logger import MemberLogger
+from cogs.audit_logger import AuditLogger
 from cogs.message_logger import MessageLogger
 from cogs.mod_panel import ModPanel
 from cogs.reaction_roles import ReactionRoles
@@ -110,6 +111,7 @@ class MyBot(commands.Bot):
         self.tree.on_error = self.on_app_command_error
         await self.add_cog(VoiceLogger(self))
         await self.add_cog(MemberLogger(self))
+        await self.add_cog(AuditLogger(self))
         await self.add_cog(MessageLogger(self))
         await self.add_cog(ModPanel(self))
         await self.add_cog(ReactionRoles(self))
