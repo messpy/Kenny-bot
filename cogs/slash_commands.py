@@ -73,6 +73,14 @@ class GroupMatchState:
     title: str | None = None
 
 
+@dataclass
+class DebugEchoState:
+    guild_id: int
+    channel_id: int
+    owner_user_id: int
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class SlashCommands(commands.Cog):
     """スラッシュコマンド"""
 
@@ -85,6 +93,8 @@ class SlashCommands(commands.Cog):
         self._vc_panels: dict[int, VcPanelState] = {}
         # message_id -> group match state
         self._group_matches: dict[int, GroupMatchState] = {}
+        # message_id -> debug echo state
+        self._debug_echo_sessions: dict[int, DebugEchoState] = {}
         self._countdowns = ChannelCountdown()
 
     VC_JOIN_EMOJI = "✅"
@@ -94,6 +104,7 @@ class SlashCommands(commands.Cog):
     VC_DEAF_OFF_EMOJI = "🙊"
     GROUP_MATCH_EMOJI = "🤝"
     GROUP_MATCH_START_EMOJI = "▶️"
+    DEBUG_ECHO_STOP_EMOJI = "⏹️"
 
     _CONFIG_CHOICES = [
         app_commands.Choice(name="会話履歴の参照行数", value="chat.history_lines"),
@@ -1266,12 +1277,10 @@ class SlashCommands(commands.Cog):
 
         vc.play(source, after=_after_playback)
 
-    @app_commands.command(name="minutes_debug_echo", description="VC音声を数秒録音して、そのまま再生")
-    @app_commands.describe(seconds="録音秒数（3〜20秒）")
+    @app_commands.command(name="minutes_debug_echo", description="VC音声を録音して、停止後にそのまま再生")
     async def minutes_debug_echo(
         self,
         interaction: discord.Interaction,
-        seconds: app_commands.Range[int, 3, 20] = 8,
     ):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
@@ -1294,14 +1303,46 @@ class SlashCommands(commands.Cog):
             return
 
         try:
-            await interaction.followup.send(f"{seconds}秒録音します。終わるまで待ってください。", ephemeral=True)
-            await asyncio.sleep(int(seconds))
+            if not isinstance(interaction.channel, discord.TextChannel):
+                await interaction.followup.send("停止リアクションを置けるテキストチャンネルで実行してください。", ephemeral=True)
+                return
+            stop_message = await interaction.channel.send(
+                f"{interaction.user.mention} 録音を開始しました。停止するまで録音し続けます。\n"
+                f"停止するときは {self.DEBUG_ECHO_STOP_EMOJI} リアクションを押してください。"
+            )
+            await stop_message.add_reaction(self.DEBUG_ECHO_STOP_EMOJI)
+            self._debug_echo_sessions[stop_message.id] = DebugEchoState(
+                guild_id=interaction.guild.id,
+                channel_id=interaction.channel_id,
+                owner_user_id=interaction.user.id,
+            )
+            await interaction.followup.send("録音を開始しました。停止はチャンネル上の `⏹️` リアクションで行ってください。", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"録音開始に失敗しました: {e}", ephemeral=True)
             return
 
+        proc = runtime.recorder_process
+        state = self._debug_echo_sessions.get(stop_message.id)
+        if state is None:
+            await interaction.followup.send("録音セッションの初期化に失敗しました。", ephemeral=True)
+            return
+        wait_tasks: set[asyncio.Task] = {asyncio.create_task(state.stop_event.wait())}
+        if proc is not None:
+            wait_tasks.add(asyncio.create_task(proc.wait()))
         try:
-            proc = runtime.recorder_process
+            _done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await stop_message.edit(content=f"{interaction.user.mention} 録音を停止しています。少し待ってください。")
+        except Exception as e:
+            for task in wait_tasks:
+                task.cancel()
+            await interaction.followup.send(f"録音待機中に失敗しました: {e}", ephemeral=True)
+            return
+        finally:
+            self._debug_echo_sessions.pop(stop_message.id, None)
+
+        try:
             if proc is not None and proc.stdin is not None:
                 proc.stdin.write(b"stop\n")
                 await proc.stdin.drain()
@@ -1416,6 +1457,17 @@ class SlashCommands(commands.Cog):
         if payload.user_id == (self.bot.user.id if self.bot.user else 0):
             return
         emoji = str(payload.emoji)
+
+        debug_echo = self._debug_echo_sessions.get(payload.message_id)
+        if debug_echo:
+            if (
+                emoji == self.DEBUG_ECHO_STOP_EMOJI
+                and payload.guild_id == debug_echo.guild_id
+                and payload.channel_id == debug_echo.channel_id
+                and payload.user_id == debug_echo.owner_user_id
+            ):
+                debug_echo.stop_event.set()
+            return
 
         if payload.message_id in self._group_matches:
             state = self._group_matches.get(payload.message_id)
