@@ -311,6 +311,14 @@ python bin/reindex_message_embeddings.py
 - 文字起こしは Google Speech-to-Text を優先
 - Google 側の認証や API 失敗時のみ `faster-whisper` にフォールバック
 
+### kenny-chat 連携
+
+- 各サーバーに `kenny-chat` チャンネルを作ると、同名チャンネル間で相互中継
+- 転送時の表示は発言者名そのものではなく、頭文字のみ
+- 1ユーザーあたり 12 秒に 1 回まで発言可能
+- `@everyone` / `@here` / 招待 URL は禁止
+- 元発言を削除すると、中継先の投稿も削除
+
 ### ゲーム機能
 
 **人狼（最小構成）**

@@ -204,16 +204,20 @@ class OllamaClientService:
         self.client.pull(model=model, stream=False)
 
     def list_model_names(self) -> list[str]:
-        response = self.client.list()
-        models = response.get("models", []) if isinstance(response, dict) else []
-        names: list[str] = []
-        for item in models:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("model") or item.get("name") or "").strip()
-            if name and name not in names:
-                names.append(name)
-        return names
+        try:
+            response = self.client.list()
+            models = response.get("models", []) if isinstance(response, dict) else []
+            names: list[str] = []
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("model") or item.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            return names
+        except Exception:
+            logger.exception("Failed to list Ollama models")
+            return []
 
     def _format_web_search_response(self, response: object) -> str:
         results = []
@@ -261,16 +265,24 @@ class OllamaClientService:
         tool = getattr(self.client, "web_search", None)
         if not callable(tool):
             raise RuntimeError("web_search is not available in the current Ollama client")
-        response = tool(query=query, max_results=max(1, min(int(max_results), 10)))
-        return self._format_web_search_response(response)
+        try:
+            response = tool(query=query, max_results=max(1, min(int(max_results), 10)))
+            return self._format_web_search_response(response)
+        except Exception as err:
+            logger.exception("web_search failed")
+            return f"web_search failed: {err}"
 
     def web_fetch(self, url: str) -> str:
         """Fetch the contents of a web page by URL."""
         tool = getattr(self.client, "web_fetch", None)
         if not callable(tool):
             raise RuntimeError("web_fetch is not available in the current Ollama client")
-        response = tool(url=url)
-        return self._format_web_fetch_response(response)
+        try:
+            response = tool(url=url)
+            return self._format_web_fetch_response(response)
+        except Exception as err:
+            logger.exception("web_fetch failed")
+            return f"web_fetch failed: {err}"
 
     def embed(self, model: str, input_texts: str | list[str]) -> list[list[float]]:
         if self._embed_disabled:
@@ -286,16 +298,25 @@ class OllamaClientService:
                 logger.warning("Disabling Ollama embed calls after unauthorized response")
                 return []
             if not self._is_model_missing_error(err):
-                raise
+                logger.exception("embed failed")
+                return []
             self._ensure_model_available(model)
-            response = tool(model=model, input=input_texts)
+            try:
+                response = tool(model=model, input=input_texts)
+            except Exception:
+                logger.exception("embed retry failed")
+                return []
 
         embeddings = []
-        if isinstance(response, dict):
-            embeddings = list(response.get("embeddings") or [])
-        else:
-            embeddings = list(getattr(response, "embeddings", None) or [])
-        return [list(map(float, item)) for item in embeddings if isinstance(item, (list, tuple))]
+        try:
+            if isinstance(response, dict):
+                embeddings = list(response.get("embeddings") or [])
+            else:
+                embeddings = list(getattr(response, "embeddings", None) or [])
+            return [list(map(float, item)) for item in embeddings if isinstance(item, (list, tuple))]
+        except Exception:
+            logger.exception("Failed to parse embeddings response")
+            return []
 
     def chat_simple(
         self,
@@ -320,21 +341,29 @@ class OllamaClientService:
         
         if stream:
             last_content = None
-            for chunk in self._chat_with_auto_pull(
-                model=model,
-                messages=messages,
-                stream=True,
-                **kwargs,
-            ):
-                msg = chunk.get("message", {})
-                content = msg.get("content")
-                if content:
-                    last_content = content
+            try:
+                for chunk in self._chat_with_auto_pull(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    **kwargs,
+                ):
+                    msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {}) or {}
+                    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+                    if content:
+                        last_content = content
+            except Exception:
+                logger.exception("chat_simple stream failed")
+                return None
             return last_content
         else:
-            resp = self._chat_with_auto_pull(model=model, messages=messages, **kwargs)
-            msg = resp.get("message", {})
-            return msg.get("content")
+            try:
+                resp = self._chat_with_auto_pull(model=model, messages=messages, **kwargs)
+                msg = resp.get("message", {}) if isinstance(resp, dict) else getattr(resp, "message", {}) or {}
+                return msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            except Exception:
+                logger.exception("chat_simple failed")
+                return None
 
 
 def create_ollama_client(

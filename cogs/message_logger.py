@@ -305,6 +305,37 @@ class MessageLogger(BaseCog):
             lines = max(1, min(int(lines or channel_lines), max(1, channel_lines)))
             return store.get_recent_context(lines=lines)
 
+        def get_recent_turns(lines: int = 6) -> str:
+            """Get the most recent turns in this channel regardless of speaker."""
+            lines = max(1, min(int(lines or 6), 12))
+            return store.format_messages(store.get_recent_messages(lines=lines))
+
+        def get_reply_chain(lines: int = 4) -> str:
+            """Get a short reply chain centered on the referenced message and latest turns."""
+            lines = max(1, min(int(lines or 4), 8))
+            messages = store.get_recent_messages(lines=max(lines * 2, 6))
+            if not messages:
+                return ""
+
+            if msg.reference and msg.reference.resolved and isinstance(msg.reference.resolved, discord.Message):
+                reference_id = msg.reference.resolved.id
+                chain: list[dict] = []
+                for item in messages:
+                    if int(item.get("id", 0) or 0) == int(reference_id):
+                        chain.append(item)
+                chain.extend(messages[-lines:])
+                deduped: list[dict] = []
+                seen_ids: set[int] = set()
+                for item in chain:
+                    item_id = int(item.get("id", 0) or 0)
+                    if item_id and item_id in seen_ids:
+                        continue
+                    if item_id:
+                        seen_ids.add(item_id)
+                    deduped.append(item)
+                return store.format_messages(deduped[-lines:])
+            return store.format_messages(messages[-lines:])
+
         def get_semantic_history(scope: str = "channel", k: int = 6, target: str = "author") -> str:
             """Search semantically related messages from the channel or a specific user."""
             return f"scope={scope}, k={k}, target={target}"
@@ -323,9 +354,12 @@ class MessageLogger(BaseCog):
                     "You are a context planner for a Discord bot.\n"
                     "Decide what context should be gathered before answering the user.\n"
                     "Available tools let you fetch recent message history, semantic history, and bot-local documentation.\n"
+                    "Use get_reply_chain first for direct replies, short acknowledgements, clarification answers, or context that depends on the immediately previous turns.\n"
+                    "Use get_recent_turns for short conversational context before considering semantic history.\n"
                     "Use get_member_history when the user asks about themselves, a replied user, or a mentioned user.\n"
                     "Use get_channel_history for shared discussion or recent events in the channel.\n"
-                    "Prefer get_semantic_history when topical similarity matters more than strict recency.\n"
+                    "Use get_semantic_history only when topical similarity matters more than strict recency.\n"
+                    "Avoid get_semantic_history for very short replies such as numbers, yes/no, which one, this/that, or direct answers to the bot's previous message.\n"
                     "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
                     "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
                     "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
@@ -353,7 +387,7 @@ class MessageLogger(BaseCog):
                 model=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
                 messages=planner_messages,
                 stream=False,
-                tools=[get_user_history, get_member_history, get_channel_history, get_semantic_history, get_local_knowledge, self._get_bot_game_catalog, self._get_bot_command_catalog],
+                tools=[get_recent_turns, get_reply_chain, get_user_history, get_member_history, get_channel_history, get_semantic_history, get_local_knowledge, self._get_bot_game_catalog, self._get_bot_command_catalog],
             )
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
@@ -366,6 +400,14 @@ class MessageLogger(BaseCog):
                     body = get_user_history(requested_lines if isinstance(requested_lines, int) else user_lines)
                     if body:
                         blocks.append((f"このユーザーの最近の発言 {user_lines} 件以内", body))
+                elif name == "get_recent_turns":
+                    body = get_recent_turns(requested_lines if isinstance(requested_lines, int) else 6)
+                    if body:
+                        blocks.append(("このチャンネルの直近会話", body))
+                elif name == "get_reply_chain":
+                    body = get_reply_chain(requested_lines if isinstance(requested_lines, int) else 4)
+                    if body:
+                        blocks.append(("直前の会話チェーン", body))
                 elif name == "get_member_history":
                     target = str(args.get("target") or "author")
                     target_key = target.strip().lower()
@@ -465,6 +507,7 @@ class MessageLogger(BaseCog):
 
         working_messages = [dict(item) for item in messages]
         source_urls: list[str] = []
+        last_tool_outputs: list[tuple[str, str]] = []
         for _ in range(max_rounds):
             response = await asyncio.to_thread(
                 self.bot.ollama_client.chat,
@@ -479,7 +522,12 @@ class MessageLogger(BaseCog):
 
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
-                return self._extract_message_content(response)
+                answer = self._extract_message_content(response)
+                if answer and source_urls:
+                    logger.info("Appending source URLs to response: %s", source_urls[:8])
+                    refs = "\n".join(f"- {url}" for url in source_urls[:8])
+                    answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
+                return answer
 
             async def execute_tool_call(call: object) -> tuple[dict, list[str]]:
                 name, args = self._normalize_tool_call(call)
@@ -529,11 +577,66 @@ class MessageLogger(BaseCog):
             results = await asyncio.gather(*(execute_tool_call(call) for call in tool_calls))
             for tool_message, found_urls in results:
                 working_messages.append(tool_message)
+                last_tool_outputs.append((str(tool_message.get("tool_name") or ""), str(tool_message.get("content") or "")))
                 for url in found_urls:
                     if url not in source_urls:
                         source_urls.append(url)
 
         answer = self._extract_message_content(response)
+        if not answer and last_tool_outputs:
+            successful_searches: list[str] = []
+            tool_summaries: list[str] = []
+            user_request = ""
+            for item in reversed(messages):
+                if str(item.get("role") or "") == "user":
+                    user_request = str(item.get("content") or "").strip()
+                    break
+            for tool_name, content in last_tool_outputs[-6:]:
+                text = strip_ansi_and_ctrl(content or "").strip()
+                if not text:
+                    continue
+                if tool_name == "web_search" and "failed:" not in text.lower():
+                    successful_searches.append(text[:1500])
+                    continue
+                if tool_name == "web_fetch" and "failed:" in text.lower():
+                    continue
+                if len(text) > 300:
+                    text = text[:300] + "..."
+                tool_summaries.append(f"- {tool_name}: {text}")
+            if successful_searches:
+                retry_prompt = (
+                    "以下は外部検索結果です。日本語で簡潔に整理して回答してください。\n"
+                    "ユーザーの依頼が翻訳なら、検索結果の内容を日本語として自然に訳してください。\n"
+                    "検索結果に書かれている範囲だけを使い、推測しないでください。\n\n"
+                    f"[ユーザー依頼]\n{user_request or '指定なし'}\n\n"
+                    f"[検索結果]\n{chr(10).join(successful_searches[:2])}"
+                )
+                try:
+                    answer = strip_ansi_and_ctrl(
+                        (
+                            await asyncio.to_thread(
+                                self.bot.ollama_client.chat_simple,
+                                model=model,
+                                prompt=retry_prompt,
+                                stream=False,
+                            )
+                            or ""
+                        ).strip()
+                    )
+                except Exception:
+                    logger.exception("Failed to synthesize answer from web_search fallback")
+                    answer = ""
+                if not answer:
+                    answer = (
+                        "外部検索結果をもとに回答します。\n\n"
+                        + "\n\n".join(successful_searches[:2])
+                    )
+            elif tool_summaries:
+                answer = (
+                    "外部情報の取得は試しましたが、回答文をうまく生成できませんでした。\n"
+                    "取得結果:\n"
+                    + "\n".join(tool_summaries)
+                )
         if answer and source_urls:
             logger.info("Appending source URLs to response: %s", source_urls[:8])
             refs = "\n".join(f"- {url}" for url in source_urls[:8])

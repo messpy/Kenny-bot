@@ -1,7 +1,7 @@
 global:
   ollama:
     model_default: gpt-oss:120b
-    model_chat: gpt-oss:120b
+    model_chat: mistral-large-3:675b-cloud
     model_summary: gpt-oss:120b
     model_embedding: embeddinggemma
     timeout_sec: 180
