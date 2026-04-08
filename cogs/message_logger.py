@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 import subprocess
 import time
 import asyncio
@@ -39,6 +40,7 @@ from guards.mod_actions import ModActions
 
 logger = logging.getLogger(__name__)
 JST = timezone(timedelta(hours=9))
+URL_RE = re.compile(r"https?://[^\s)>\"]+")
 
 import random
 _settings = get_settings()
@@ -165,6 +167,17 @@ class MessageLogger(BaseCog):
         if not parts:
             return ""
         return "\n\n".join(parts) + "\n\n"
+
+    def _extract_urls(self, text: str) -> list[str]:
+        seen: set[str] = set()
+        urls: list[str] = []
+        for match in URL_RE.findall(text or ""):
+            url = match.rstrip(".,]")
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+        return urls
 
     async def _embed_text(self, text: str) -> list[float] | None:
         if not text or not self.bot.ollama_client.has_embed():
@@ -350,7 +363,7 @@ class MessageLogger(BaseCog):
         model: str,
         messages: list[dict],
         tools: list[object],
-        max_rounds: int = 4,
+    max_rounds: int = 4,
     ) -> str | None:
         if not tools:
             response = await asyncio.to_thread(
@@ -362,6 +375,7 @@ class MessageLogger(BaseCog):
             return self._extract_message_content(response)
 
         working_messages = [dict(item) for item in messages]
+        source_urls: list[str] = []
         for _ in range(max_rounds):
             response = await asyncio.to_thread(
                 self.bot.ollama_client.chat,
@@ -393,6 +407,10 @@ class MessageLogger(BaseCog):
                 try:
                     result = tool_fn(**args)
                     result_text = str(result)
+                    if name in {"web_search", "web_fetch"}:
+                        for url in self._extract_urls(result_text):
+                            if url not in source_urls:
+                                source_urls.append(url)
                 except Exception as e:
                     logger.exception("Tool call failed: %s", name)
                     result_text = f"Tool {name} failed: {e}"
@@ -406,7 +424,11 @@ class MessageLogger(BaseCog):
                     }
                 )
 
-        return self._extract_message_content(response)
+        answer = self._extract_message_content(response)
+        if answer and source_urls:
+            refs = "\n".join(f"- {url}" for url in source_urls[:8])
+            answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
+        return answer
 
     async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int = 15) -> str | None:
         return await asyncio.wait_for(

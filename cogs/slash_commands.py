@@ -38,6 +38,8 @@ SUMMARIZE_RECENT_META = get_slash_command_meta("summarize_recent")
 SET_RECENT_WINDOW_META = get_slash_command_meta("set_recent_window")
 CONFIG_SHOW_META = get_slash_command_meta("config_show")
 CONFIG_SET_META = get_slash_command_meta("config_set")
+OLLAMA_PULL_META = get_slash_command_meta("ollama_pull")
+OLLAMA_USE_MODEL_META = get_slash_command_meta("ollama_use_model")
 REACTION_ROLE_SET_META = get_slash_command_meta("reaction_role_set")
 REACTION_ROLE_REMOVE_META = get_slash_command_meta("reaction_role_remove")
 REACTION_ROLE_LIST_META = get_slash_command_meta("reaction_role_list")
@@ -170,6 +172,12 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="whisper/large-v3-turbo", value="whisper/large-v3-turbo"),
         app_commands.Choice(name="moonshine/tiny-ja", value="moonshine/tiny-ja"),
         app_commands.Choice(name="moonshine/base-ja", value="moonshine/base-ja"),
+    ]
+    _OLLAMA_MODEL_TARGET_CHOICES = [
+        app_commands.Choice(name="default", value="default"),
+        app_commands.Choice(name="chat", value="chat"),
+        app_commands.Choice(name="summary", value="summary"),
+        app_commands.Choice(name="embedding", value="embedding"),
     ]
 
     @staticmethod
@@ -759,6 +767,95 @@ class SlashCommands(commands.Cog):
         note = "（一部設定は再起動後に完全反映）"
         await interaction.response.send_message(
             f"設定を更新しました: `{key.value}` = `{parsed}` / scope=`{sc}` {note}",
+            ephemeral=True,
+        )
+
+    def _ollama_model_key(self, target: str) -> str:
+        mapping = {
+            "default": "ollama.model_default",
+            "chat": "ollama.model_chat",
+            "summary": "ollama.model_summary",
+            "embedding": "ollama.model_embedding",
+        }
+        return mapping[target]
+
+    @app_commands.command(name=OLLAMA_PULL_META.name, description=OLLAMA_PULL_META.description)
+    @app_commands.describe(
+        model="pull するモデル名（例: gpt-oss:120b-cloud）",
+        set_as="pull 後にどの用途へ設定するか",
+    )
+    @app_commands.choices(set_as=_OLLAMA_MODEL_TARGET_CHOICES)
+    @checks.has_permissions(administrator=True)
+    async def ollama_pull(
+        self,
+        interaction: discord.Interaction,
+        model: str,
+        set_as: app_commands.Choice[str] | None = None,
+    ):
+        model_name = model.strip()
+        if not model_name:
+            await interaction.response.send_message("モデル名を指定してください。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await asyncio.to_thread(self.bot.ollama_client.pull_model, model_name)
+        except Exception as e:
+            await interaction.followup.send(
+                "モデル pull に失敗しました。\n"
+                f"モデル: `{model_name}`\n"
+                f"理由: `{str(e)[:300]}`\n"
+                "Cloud モデルなら Ollama 側のサインインや API キー設定を確認してください。",
+                ephemeral=True,
+            )
+            return
+
+        note = f"モデル `{model_name}` を pull しました。"
+        if set_as is not None:
+            key = self._ollama_model_key(set_as.value)
+            _settings.set(key, model_name)
+            if set_as.value == "default":
+                self.bot.ollama_model = model_name
+            note += f"\n利用先: `{key}` に設定しました。"
+        await interaction.followup.send(note, ephemeral=True)
+
+    @app_commands.command(name=OLLAMA_USE_MODEL_META.name, description=OLLAMA_USE_MODEL_META.description)
+    @app_commands.describe(
+        target="切り替える用途",
+        model="設定するモデル名",
+    )
+    @app_commands.choices(target=_OLLAMA_MODEL_TARGET_CHOICES)
+    @checks.has_permissions(administrator=True)
+    async def ollama_use_model(
+        self,
+        interaction: discord.Interaction,
+        target: app_commands.Choice[str],
+        model: str,
+    ):
+        model_name = model.strip()
+        if not model_name:
+            await interaction.response.send_message("モデル名を指定してください。", ephemeral=True)
+            return
+
+        key = self._ollama_model_key(target.value)
+        try:
+            names = await asyncio.to_thread(self.bot.ollama_client.list_model_names)
+        except Exception:
+            names = []
+
+        if names and model_name not in names:
+            await interaction.response.send_message(
+                f"`{model_name}` は現在の Ollama 一覧に見つかりませんでした。\n"
+                "先に `/ollama_pull` を実行してください。",
+                ephemeral=True,
+            )
+            return
+
+        _settings.set(key, model_name)
+        if target.value == "default":
+            self.bot.ollama_model = model_name
+        await interaction.response.send_message(
+            f"`{key}` を `{model_name}` に設定しました。",
             ephemeral=True,
         )
 

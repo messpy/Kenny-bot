@@ -97,6 +97,16 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="設定値を更新",
         category="要約・設定",
     ),
+    "ollama_pull": SlashCommandMeta(
+        name="ollama_pull",
+        description="Ollama でモデルを pull し、必要なら利用モデルへ設定",
+        category="要約・設定",
+    ),
+    "ollama_use_model": SlashCommandMeta(
+        name="ollama_use_model",
+        description="Bot が使う Ollama モデルを切り替え",
+        category="要約・設定",
+    ),
     "minutes_start": SlashCommandMeta(
         name="minutes_start",
         description="議事録モードを開始（VC参加者のみ）",

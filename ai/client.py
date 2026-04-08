@@ -146,6 +146,24 @@ class OllamaClientService:
     def has_embed(self) -> bool:
         return callable(getattr(self.client, "embed", None))
 
+    def pull_model(self, model: str) -> None:
+        model = (model or "").strip()
+        if not model:
+            raise ValueError("model is required")
+        self.client.pull(model=model, stream=False)
+
+    def list_model_names(self) -> list[str]:
+        response = self.client.list()
+        models = response.get("models", []) if isinstance(response, dict) else []
+        names: list[str] = []
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("model") or item.get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
     def _format_web_search_response(self, response: object) -> str:
         results = []
         if isinstance(response, dict):
