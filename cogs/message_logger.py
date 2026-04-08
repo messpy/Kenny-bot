@@ -84,6 +84,118 @@ class MessageLogger(BaseCog):
         self._live_info = LiveInfoService()
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
 
+    def _extract_tool_calls(self, response: object) -> list[object]:
+        if response is None:
+            return []
+        message = None
+        if isinstance(response, dict):
+            message = response.get("message", {})
+        else:
+            message = getattr(response, "message", None)
+        if message is None:
+            return []
+        if isinstance(message, dict):
+            return list(message.get("tool_calls") or [])
+        return list(getattr(message, "tool_calls", None) or [])
+
+    def _normalize_tool_call(self, call: object) -> tuple[str, dict]:
+        if isinstance(call, dict):
+            fn = call.get("function") or {}
+            name = str(fn.get("name") or "")
+            args = fn.get("arguments") or {}
+            return name, args if isinstance(args, dict) else {}
+        fn = getattr(call, "function", None)
+        if fn is None:
+            return "", {}
+        name = str(getattr(fn, "name", "") or "")
+        args = getattr(fn, "arguments", None) or {}
+        return name, args if isinstance(args, dict) else {}
+
+    def _build_history_context(self, blocks: list[tuple[str, str]]) -> str:
+        parts: list[str] = []
+        for title, body in blocks:
+            body = (body or "").strip()
+            if not body:
+                continue
+            parts.append(f"[{title}]\n{body}")
+        if not parts:
+            return ""
+        return "\n\n".join(parts) + "\n\n"
+
+    async def _resolve_chat_history_context(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        user_id: int,
+        user_display: str,
+        text: str,
+    ) -> str:
+        store = MessageStore(guild_id, channel_id)
+        user_lines = self._cfg_int("chat.user_history_lines", 24)
+        channel_lines = self._cfg_int("chat.channel_history_lines", 16)
+
+        def get_user_history(lines: int = user_lines) -> str:
+            lines = max(1, min(int(lines or user_lines), max(1, user_lines)))
+            return store.get_recent_context_for_user(user_id, lines=lines)
+
+        def get_channel_history(lines: int = channel_lines) -> str:
+            lines = max(1, min(int(lines or channel_lines), max(1, channel_lines)))
+            return store.get_recent_context(lines=lines)
+
+        planner_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a context planner for a Discord bot.\n"
+                    "Decide which history is needed before answering the user.\n"
+                    "Use get_user_history for personal follow-ups, preferences, or self-referential questions.\n"
+                    "Use get_channel_history for shared discussion, references to others, recent channel events, or ambiguous context.\n"
+                    "You may call both tools if needed. If the message is self-contained, call no tools."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"user_id={user_id}\n"
+                    f"user_display={user_display}\n"
+                    f"channel_id={channel_id}\n"
+                    f"user_history_limit={user_lines}\n"
+                    f"channel_history_limit={channel_lines}\n"
+                    f"message={text}"
+                ),
+            },
+        ]
+
+        blocks: list[tuple[str, str]] = []
+        try:
+            response = await asyncio.to_thread(
+                self.bot.ollama_client.chat,
+                model=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
+                messages=planner_messages,
+                stream=False,
+                tools=[get_user_history, get_channel_history],
+            )
+            tool_calls = self._extract_tool_calls(response)
+            if not tool_calls:
+                return ""
+
+            for call in tool_calls:
+                name, args = self._normalize_tool_call(call)
+                requested_lines = args.get("lines")
+                if name == "get_user_history":
+                    body = get_user_history(requested_lines if isinstance(requested_lines, int) else user_lines)
+                    if body:
+                        blocks.append((f"このユーザーの最近の発言 {user_lines} 件以内", body))
+                elif name == "get_channel_history":
+                    body = get_channel_history(requested_lines if isinstance(requested_lines, int) else channel_lines)
+                    if body:
+                        blocks.append((f"このチャンネル全体の最近の発言 {channel_lines} 件以内", body))
+        except Exception:
+            logger.exception("Failed to resolve chat context via tool calling")
+
+        return self._build_history_context(blocks)
+
     async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int = 15) -> str | None:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -727,13 +839,20 @@ class MessageLogger(BaseCog):
         store = MessageStore(msg.guild.id, msg.channel.id)
         store.add_message(user_name, text, msg.id, author_id=msg.author.id)
 
-        # 前の会話を取得して文脈を作成
-        history_lines = self._cfg_int("chat.history_lines", 100)
-        history_text = store.get_recent_context(lines=history_lines)
-        if history_text:
-            history_context = HISTORY_CONTEXT_TEMPLATE.format(history=history_text)
-        else:
-            history_context = ""
+        history_context = await self._resolve_chat_history_context(
+            guild_id=msg.guild.id,
+            channel_id=msg.channel.id,
+            user_id=msg.author.id,
+            user_display=user_display,
+            text=text,
+        )
+        if not history_context:
+            history_lines = self._cfg_int("chat.history_lines", 100)
+            history_text = store.get_recent_context(lines=history_lines)
+            if history_text:
+                history_context = HISTORY_CONTEXT_TEMPLATE.format(history=history_text)
+            else:
+                history_context = ""
         external_context = ""
         if self._live_info.needs_external_context(text):
             external_context = self._build_external_context_text(

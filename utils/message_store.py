@@ -151,3 +151,63 @@ class MessageStore:
         except Exception as e:
             logger.error(f"Failed to get recent context: {e}")
             return ""
+
+    def get_recent_messages(
+        self,
+        lines: int = 5,
+        *,
+        author_id: int | None = None,
+    ) -> List[dict]:
+        """最近のメッセージ一覧を取得する。
+
+        Args:
+            lines: 取得する件数
+            author_id: 指定時はそのユーザーの発言だけに絞る
+        """
+        try:
+            messages = self._prune_messages(self._load_messages())
+            if author_id is not None:
+                messages = [m for m in messages if int(m.get("author_id", 0) or 0) == int(author_id)]
+            if lines > 0:
+                messages = messages[-lines:]
+            return messages
+        except Exception as e:
+            logger.error(f"Failed to get recent messages: {e}")
+            return []
+
+    def format_messages(self, messages: List[dict]) -> str:
+        """メッセージ一覧をプロンプト向け文字列に整形する。"""
+        try:
+            if not messages:
+                return ""
+
+            context_lines = []
+            for msg in messages:
+                author = msg.get("author", "Unknown")
+                author_id = msg.get("author_id", 0)
+                content = msg.get("content", "")
+                timestamp = msg.get("timestamp", "")
+
+                time_str = ""
+                if timestamp:
+                    try:
+                        time_str = timestamp.split("T")[1][:5]
+                    except Exception:
+                        pass
+
+                author_display = author
+                if author_id:
+                    author_display = f"{author} ({author_id})"
+
+                if time_str:
+                    context_lines.append(f"[{time_str}] {author_display}: {content}")
+                else:
+                    context_lines.append(f"{author_display}: {content}")
+            return "\n".join(context_lines)
+        except Exception as e:
+            logger.error(f"Failed to format messages: {e}")
+            return ""
+
+    def get_recent_context_for_user(self, author_id: int, lines: int = 5) -> str:
+        """指定ユーザーの最近の発言だけを整形して返す。"""
+        return self.format_messages(self.get_recent_messages(lines=lines, author_id=author_id))

@@ -21,6 +21,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
         "chat": {
             "history_lines": 100,
+            "user_history_lines": 24,
+            "channel_history_lines": 16,
             "history_max_messages": 1000,
             "history_retention_days": 30,
             "max_response_length": 1800,

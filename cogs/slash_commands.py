@@ -89,6 +89,8 @@ class SlashCommands(commands.Cog):
 
     _CONFIG_CHOICES = [
         app_commands.Choice(name="会話履歴の参照行数", value="chat.history_lines"),
+        app_commands.Choice(name="本人履歴の参照行数", value="chat.user_history_lines"),
+        app_commands.Choice(name="全体履歴の参照行数", value="chat.channel_history_lines"),
         app_commands.Choice(name="履歴保存の最大件数", value="chat.history_max_messages"),
         app_commands.Choice(name="履歴保存日数", value="chat.history_retention_days"),
         app_commands.Choice(name="AI返信の最大文字数", value="chat.max_response_length"),
@@ -117,6 +119,8 @@ class SlashCommands(commands.Cog):
 
     _INT_KEYS = {
         "chat.history_lines",
+        "chat.user_history_lines",
+        "chat.channel_history_lines",
         "chat.history_max_messages",
         "chat.history_retention_days",
         "chat.max_response_length",
