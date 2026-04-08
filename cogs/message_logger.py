@@ -530,7 +530,10 @@ class MessageLogger(BaseCog):
             answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
         return answer
 
-    async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int = 15) -> str | None:
+    async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int | None = None) -> str | None:
+        effective_timeout = timeout_sec
+        if effective_timeout is None or effective_timeout <= 0:
+            effective_timeout = self._cfg_int("ollama.timeout_sec", 180)
         return await asyncio.wait_for(
             asyncio.to_thread(
                 self.bot.ollama_client.chat_simple,
@@ -538,7 +541,7 @@ class MessageLogger(BaseCog):
                 prompt=prompt,
                 stream=False,
             ),
-            timeout=timeout_sec,
+            timeout=effective_timeout,
         )
 
     def _is_model_available(self, model: str) -> bool:
