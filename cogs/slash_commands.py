@@ -842,6 +842,12 @@ class SlashCommands(commands.Cog):
                 names.append(parts[0])
         return names
 
+    def _list_local_models(self) -> list[str]:
+        try:
+            return self._list_local_models_via_cli()
+        except Exception:
+            return self._list_remote_models_via_tags_api("http://127.0.0.1:11434")
+
     def _list_remote_models_via_tags_api(self, host: str) -> list[str]:
         base = (host or "").rstrip("/")
         if base == "https://ollama.com":
@@ -872,7 +878,7 @@ class SlashCommands(commands.Cog):
                 continue
             name = str(item.get("name") or item.get("model") or "").strip()
             if name:
-                names.append(name)
+                names.append(name if name.endswith("-cloud") else f"{name}-cloud")
         return sorted(set(names))
 
     @app_commands.command(name=MODEL_LIST_META.name, description=MODEL_LIST_META.description)
@@ -887,7 +893,7 @@ class SlashCommands(commands.Cog):
         sections: list[str] = []
 
         try:
-            local_names = await asyncio.to_thread(self._list_local_models_via_cli)
+            local_names = await asyncio.to_thread(self._list_local_models)
             local_body = "\n".join(f"- `{name}`" for name in local_names[:30]) if local_names else "0件"
         except Exception as e:
             local_body = f"取得失敗: `{str(e)[:200]}`"
@@ -926,7 +932,7 @@ class SlashCommands(commands.Cog):
         local_names: list[str] = []
         remote_names: list[str] = []
         try:
-            local_names = await asyncio.to_thread(self._list_local_models_via_cli)
+            local_names = await asyncio.to_thread(self._list_local_models)
         except Exception:
             local_names = []
         remote_host = os.getenv("OLLAMA_HOST")
