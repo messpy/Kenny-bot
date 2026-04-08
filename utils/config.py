@@ -88,6 +88,7 @@ HISTORY_CONTEXT_TEMPLATE = (
 # =========================
 # モデレーションパネルチャンネルID
 MOD_PANEL_CHANNEL_ID = 1005826751391342663
+GLOBAL_MEETING_LOG_CHANNEL_ID = 1005826751391342663
 
 # スパム処罰の段階
 # violation_count に基づて自動昇格:

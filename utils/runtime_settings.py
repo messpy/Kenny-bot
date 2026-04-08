@@ -58,19 +58,23 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "google_chunk_seconds": 20,
             "google_timeout_sec": 90,
             "google_model": "",
-            "whisper_model": "tiny",
+            "whisper_model": "base",
             "realtime_translation_enabled": True,
             "translation_target_language": "ja",
             "realtime_translation_interval_sec": 20,
-            "realtime_translation_min_audio_bytes": 384000,
+            "realtime_translation_min_audio_bytes": 24000,
         },
         "voice": {
             "log_private_channels": False,
         },
+        "logging": {
+            "event_channel_id": 0,
+            "event_channel_name": "kennybot-log",
+        },
         "keyword_reactions": {
             "いいね": "👍",
-            "ミュ": "🐈️",
-            "みゅ": "🐈️",
+            "ミュ": "🐈",
+            "みゅ": "🐈",
             "草": "😂",
             "天才": "🧠",
             "かわいい": "💕",
@@ -103,7 +107,19 @@ class SettingsStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self._data: dict[str, Any] = {}
+        self._last_mtime_ns: int | None = None
         self.reload()
+
+    def _current_mtime_ns(self) -> int | None:
+        try:
+            return self.path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return None
+
+    def _maybe_reload(self) -> None:
+        current = self._current_mtime_ns()
+        if current != self._last_mtime_ns:
+            self.reload()
 
     def reload(self) -> None:
         with self._lock:
@@ -120,6 +136,7 @@ class SettingsStore:
             else:
                 self._data = {}
             self._ensure_shape()
+            self._last_mtime_ns = self._current_mtime_ns()
             if self._data != previous:
                 self.save()
 
@@ -166,6 +183,7 @@ class SettingsStore:
         cur[parts[-1]] = value
 
     def get(self, path: str, default: Any = None, guild_id: int | None = None) -> Any:
+        self._maybe_reload()
         with self._lock:
             if guild_id is not None:
                 g = self._data["guilds"].get(str(guild_id), {})

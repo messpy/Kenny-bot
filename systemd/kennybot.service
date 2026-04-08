@@ -1,0 +1,23 @@
+[Unit]
+Description=Kenny Bot Discord service
+After=network-online.target
+Wants=network-online.target
+After=kennybot-voicevox.service
+Wants=kennybot-voicevox.service
+
+[Service]
+Type=simple
+User=kennypi
+Group=kennypi
+WorkingDirectory=/home/kennypi/work/Kenny-bot
+Environment=HOME=/home/kennypi
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/kennypi/work/Kenny-bot/.env
+ExecStart=/home/kennypi/.local/bin/uv run bin/run.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

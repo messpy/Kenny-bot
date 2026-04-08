@@ -21,10 +21,12 @@ from utils.message_store import MessageStore
 from utils.live_info import ExternalContext, LiveInfoService
 from utils.local_rag import LocalRAG
 from utils.runtime_settings import get_settings
+from utils.event_logger import send_event_log
 from cogs.base import BaseCog
 from utils.channel import resolve_log_channel
 from utils.text import (
     normalize_user_text,
+    normalize_keyword_match_text,
     is_search_intent,
     strip_ansi_and_ctrl,
 )
@@ -275,6 +277,17 @@ class MessageLogger(BaseCog):
             await msg.channel.send(answer)
         except Exception as e:
             logger.exception("DM AI response failed")
+            await send_event_log(
+                self.bot,
+                level="error",
+                title="DM AI 応答失敗",
+                description="DM の AI 応答処理中にエラーが発生しました。",
+                fields=[
+                    ("ユーザー", f"{msg.author} ({msg.author.id})", False),
+                    ("チャンネル", str(msg.channel.id), True),
+                    ("エラー", str(e)[:1000], False),
+                ],
+            )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
                 await msg.channel.send("モデル準備中です。完了したら通知します。")
@@ -310,36 +323,22 @@ class MessageLogger(BaseCog):
                 detail = action_result.detail or "権限・ロール階層・対象状態を確認してください。"
                 punishment_result = f"❌ 処罰実行失敗: {level}\n理由: {detail[:140]}"
 
-        embed = discord.Embed(
+        spam_log_msg = await send_event_log(
+            self.bot,
+            guild=msg.guild,
+            level="error",
             title="🚨 スパム検出",
             description=f"ユーザー {msg.author.mention} のスパムを検出しました。",
-            color=discord.Color.red(),
-            timestamp=datetime.now(JST)
+            fields=[
+                ("ユーザー情報", f"名前: {msg.author.display_name or msg.author.name}\nID: {msg.author.id}", False),
+                ("削除内容", f"```{content[:200]}{'...' if len(content) > 200 else ''}```", False),
+                ("違反情報", f"レベル: **{level}**\n違反回数: {violation_count}", True),
+                ("処罰", punishment_result if punishment_result else "警告のみ", True),
+            ],
+            footer=f"チャンネル: {msg.channel.name}",
         )
-        embed.add_field(
-            name="ユーザー情報",
-            value=f"名前: {msg.author.display_name or msg.author.name}\nID: {msg.author.id}",
-            inline=False
-        )
-        embed.add_field(
-            name="削除内容",
-            value=f"```{content[:200]}{'...' if len(content) > 200 else ''}```",
-            inline=False
-        )
-        embed.add_field(
-            name="違反情報",
-            value=f"レベル: **{level}**\n違反回数: {violation_count}",
-            inline=True
-        )
-        embed.add_field(
-            name="処罰",
-            value=punishment_result if punishment_result else "警告のみ",
-            inline=True
-        )
-        embed.set_footer(text=f"チャンネル: {msg.channel.name}")
-
-        spam_log_msg = await msg.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        await spam_log_msg.add_reaction("🔄")
+        if spam_log_msg is not None:
+            await spam_log_msg.add_reaction("🔄")
 
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
         if guard.should_warn(msg.author.id):
@@ -436,6 +435,17 @@ class MessageLogger(BaseCog):
             await channel.send(f"{prefix}{answer}")
         except Exception as e:
             prefix = f"{mention}\n" if mention else ""
+            await send_event_log(
+                self.bot,
+                level="error",
+                title="機能説明生成失敗",
+                description="機能説明の AI 生成に失敗しました。",
+                fields=[
+                    ("チャンネル", str(getattr(channel, "id", 0)), True),
+                    ("クエリ", query[:1000], False),
+                    ("エラー", str(e)[:1000], False),
+                ],
+            )
             if isinstance(e, asyncio.TimeoutError):
                 await channel.send(f"{prefix}モデル準備中です。完了したら通知します。")
                 if mention:
@@ -606,10 +616,24 @@ class MessageLogger(BaseCog):
             store.add_message(user_name, content, msg.id, author_id=msg.author.id)
 
             # キーワード -> 絵文字 の対応（config から取得）
+            normalized_content = normalize_keyword_match_text(content)
             for keyword, emoji in self._cfg_map("keyword_reactions").items():
-                if keyword.lower() in content.lower():
+                if normalize_keyword_match_text(str(keyword)) in normalized_content:
                     try:
                         await msg.add_reaction(emoji)
+                        await send_event_log(
+                            self.bot,
+                            guild=msg.guild,
+                            level="info",
+                            title="キーワードリアクション",
+                            description=f"{msg.author.mention} のメッセージにリアクションを付与しました。",
+                            fields=[
+                                ("キーワード", keyword, True),
+                                ("絵文字", emoji, True),
+                                ("チャンネル", f"{msg.channel.name} ({msg.channel.id})", False),
+                                ("メッセージID", str(msg.id), True),
+                            ],
+                        )
                     except Exception as e:
                         logger.debug(f"Reaction failed: {e}")
 
@@ -767,6 +791,19 @@ class MessageLogger(BaseCog):
 
         except Exception as e:
             logger.exception("AI response failed")
+            await send_event_log(
+                self.bot,
+                guild=msg.guild,
+                level="error",
+                title="AI 応答失敗",
+                description="メンションまたはリプライへの AI 応答に失敗しました。",
+                fields=[
+                    ("ユーザー", f"{msg.author} ({msg.author.id})", False),
+                    ("チャンネル", f"{msg.channel.name} ({msg.channel.id})", False),
+                    ("メッセージID", str(msg.id), True),
+                    ("エラー", str(e)[:1000], False),
+                ],
+            )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
                 await msg.channel.send(

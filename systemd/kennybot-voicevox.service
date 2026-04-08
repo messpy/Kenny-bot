@@ -1,0 +1,16 @@
+[Unit]
+Description=Kenny Bot VOICEVOX Engine
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f kennybot-voicevox
+ExecStart=/usr/bin/docker run --rm --name kennybot-voicevox -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
+ExecStop=/usr/bin/docker stop kennybot-voicevox
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

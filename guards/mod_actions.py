@@ -8,6 +8,8 @@ from datetime import timedelta
 import discord
 from discord.ext import commands
 
+from utils.event_logger import send_event_log
+
 logger = logging.getLogger(__name__)
 
 
@@ -157,26 +159,92 @@ class ModActions:
         if level == "warning":
             # 警告は cogs で送出する想定
             logger.info(f"Warning for {member}")
+            await send_event_log(
+                bot,
+                guild=guild,
+                level="warning",
+                title="モデレーション警告",
+                description="警告レベルの違反を記録しました。",
+                fields=[
+                    ("対象ユーザー", f"{member} ({member.id})", False),
+                    ("アクション", "warning", True),
+                ],
+            )
             return ActionResult(True, "warning", "")
 
         bot_member = ModActions._resolve_bot_member(bot, guild)
         blocked_reason = ModActions._validate_target(bot_member, member)
         if blocked_reason:
+            await send_event_log(
+                bot,
+                guild=guild,
+                level="warning",
+                title="モデレーション失敗",
+                description="対象ユーザーを処罰できませんでした。",
+                fields=[
+                    ("対象ユーザー", f"{member} ({member.id})", False),
+                    ("アクション", level, True),
+                    ("理由", blocked_reason[:1000], False),
+                ],
+            )
             return ActionResult(False, level, blocked_reason)
 
         assert bot_member is not None
         if level == "mute":
             if not bot_member.guild_permissions.moderate_members:
-                return ActionResult(False, "mute", "Botに『メンバーをタイムアウト』権限がありません。")
-            return await ModActions.timeout_user(member, duration_minutes=30, reason="スパム違反")
+                result = ActionResult(False, "mute", "Botに『メンバーをタイムアウト』権限がありません。")
+            else:
+                result = await ModActions.timeout_user(member, duration_minutes=30, reason="スパム違反")
+            await send_event_log(
+                bot,
+                guild=guild,
+                level="success" if result.success else "error",
+                title="モデレーション実行",
+                description="タイムアウト処理を実行しました。",
+                fields=[
+                    ("対象ユーザー", f"{member} ({member.id})", False),
+                    ("アクション", result.action, True),
+                    ("結果", "成功" if result.success else "失敗", True),
+                    ("詳細", (result.detail or "-")[:1000], False),
+                ],
+            )
+            return result
         if level == "kick":
             if not bot_member.guild_permissions.kick_members:
-                return ActionResult(False, "kick", "Botに『メンバーをキック』権限がありません。")
-            return await ModActions.kick_user(member, reason="スパム違反")
+                result = ActionResult(False, "kick", "Botに『メンバーをキック』権限がありません。")
+            else:
+                result = await ModActions.kick_user(member, reason="スパム違反")
+            await send_event_log(
+                bot,
+                guild=guild,
+                level="success" if result.success else "error",
+                title="モデレーション実行",
+                description="キック処理を実行しました。",
+                fields=[
+                    ("対象ユーザー", f"{member} ({member.id})", False),
+                    ("アクション", result.action, True),
+                    ("結果", "成功" if result.success else "失敗", True),
+                    ("詳細", (result.detail or "-")[:1000], False),
+                ],
+            )
+            return result
         if level == "ban":
             if bot_member.guild_permissions.ban_members:
                 ban_result = await ModActions.ban_user(guild, member, reason="スパム違反")
                 if ban_result.success:
+                    await send_event_log(
+                        bot,
+                        guild=guild,
+                        level="success",
+                        title="モデレーション実行",
+                        description="BAN 処理を実行しました。",
+                        fields=[
+                            ("対象ユーザー", f"{member} ({member.id})", False),
+                            ("アクション", ban_result.action, True),
+                            ("結果", "成功", True),
+                            ("詳細", (ban_result.detail or "-")[:1000], False),
+                        ],
+                    )
                     return ban_result
 
             # BAN不可/失敗時のフォールバック: 可能なら kick
@@ -189,11 +257,38 @@ class ModActions:
                     kick_result.action = "kick (ban失敗フォールバック)"
                     if not kick_result.detail:
                         kick_result.detail = "BANに失敗したためKICKで退室させました。"
+                await send_event_log(
+                    bot,
+                    guild=guild,
+                    level="success" if kick_result.success else "error",
+                    title="モデレーション実行",
+                    description="BAN の代替として KICK を実行しました。",
+                    fields=[
+                        ("対象ユーザー", f"{member} ({member.id})", False),
+                        ("アクション", kick_result.action, True),
+                        ("結果", "成功" if kick_result.success else "失敗", True),
+                        ("詳細", (kick_result.detail or "-")[:1000], False),
+                    ],
+                )
                 return kick_result
 
-            return ActionResult(
+            result = ActionResult(
                 False,
                 "ban",
                 "BAN権限がないかBANに失敗し、KICK権限もないため追放できませんでした。"
             )
+            await send_event_log(
+                bot,
+                guild=guild,
+                level="error",
+                title="モデレーション実行",
+                description="BAN 処理に失敗しました。",
+                fields=[
+                    ("対象ユーザー", f"{member} ({member.id})", False),
+                    ("アクション", result.action, True),
+                    ("結果", "失敗", True),
+                    ("詳細", result.detail[:1000], False),
+                ],
+            )
+            return result
         return ActionResult(False, level, "不明な違反レベルです。")

@@ -2,6 +2,7 @@
 # テキスト処理（正規化、キーワード判定など）
 
 import re
+import unicodedata
 
 
 # =========================
@@ -36,6 +37,20 @@ def normalize_user_text(raw: str) -> str:
     s = CHANNEL_MENTION_RE.sub("", s)
     s = s.strip()
     return s
+
+
+def normalize_keyword_match_text(raw: str) -> str:
+    """キーワード一致用に文字種の揺れを小さくする"""
+    text = unicodedata.normalize("NFKC", raw or "").casefold()
+    out: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        # カタカナをひらがなに寄せる
+        if 0x30A1 <= code <= 0x30F6:
+            out.append(chr(code - 0x60))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 # =========================

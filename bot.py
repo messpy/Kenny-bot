@@ -5,6 +5,7 @@ import logging
 import os
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from utils.config import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
@@ -22,6 +23,7 @@ from cogs.slash_commands import SlashCommands
 from cogs.tts_reader import TTSReader
 from cogs.game_commands import GameCommands
 from utils.meeting_minutes import MeetingMinutesManager
+from utils.event_logger import send_event_log
 from utils.runtime_settings import get_settings
 from utils.voice_recv_patch import apply_voice_recv_resilience_patch
 
@@ -98,6 +100,7 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         """Bot セットアップ（Cog登録）"""
+        self.tree.on_error = self.on_app_command_error
         await self.add_cog(VoiceLogger(self))
         await self.add_cog(MemberLogger(self))
         await self.add_cog(MessageLogger(self))
@@ -111,9 +114,73 @@ class MyBot(commands.Bot):
         """Bot 起動完了"""
         if not self._tree_synced:
             try:
-                synced = await self.tree.sync()
-                logger.info("Slash commands synced: %d", len(synced))
+                global_commands = list(self.tree.get_commands())
+                self.tree.clear_commands(guild=None)
+                await self.tree.sync()
+                logger.info("Cleared remote global slash commands")
+                for command in global_commands:
+                    self.tree.add_command(command)
+                for guild in self.guilds:
+                    try:
+                        self.tree.clear_commands(guild=guild)
+                        self.tree.copy_global_to(guild=guild)
+                        guild_synced = await self.tree.sync(guild=guild)
+                        logger.info("Guild slash commands synced: guild=%s count=%d", guild.id, len(guild_synced))
+                    except Exception:
+                        logger.exception("Failed to sync guild slash commands: %s", guild.id)
+                        await send_event_log(
+                            self,
+                            guild=guild,
+                            level="error",
+                            title="スラッシュコマンド同期失敗",
+                            description="ギルド単位のスラッシュコマンド同期に失敗しました。",
+                            fields=[
+                                ("ギルド", f"{guild.name} ({guild.id})", False),
+                            ],
+                        )
             except Exception:
                 logger.exception("Failed to sync slash commands")
+                await send_event_log(
+                    self,
+                    level="error",
+                    title="スラッシュコマンド同期失敗",
+                    description="グローバルなスラッシュコマンド同期に失敗しました。",
+                )
             self._tree_synced = True
         logger.info("=== Bot Ready as %s ===", self.user)
+
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        logger.exception("Unhandled app command error", exc_info=error)
+        await send_event_log(
+            self,
+            guild=interaction.guild,
+            level="error",
+            title="未処理スラッシュコマンド例外",
+            description="グローバルハンドラでスラッシュコマンド例外を捕捉しました。",
+            fields=[
+                ("コマンド", interaction.command.qualified_name if interaction.command else "unknown", True),
+                ("ユーザー", f"{interaction.user} ({interaction.user.id})", False),
+                ("チャンネル", str(interaction.channel_id), True),
+                ("エラー", str(error)[:1000], False),
+            ],
+        )
+        text = f"コマンド実行に失敗しました: {error}"
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except Exception:
+            logger.exception("Failed to send global slash command error response")
+
+    async def on_error(self, event_method: str, *args, **kwargs):
+        logger.exception("Unhandled Discord event error: %s", event_method)
+        await send_event_log(
+            self,
+            level="error",
+            title="未処理イベント例外",
+            description="Discord イベント処理中に未処理例外が発生しました。",
+            fields=[
+                ("イベント", event_method, True),
+            ],
+        )

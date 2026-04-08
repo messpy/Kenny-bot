@@ -6,6 +6,7 @@ import logging
 import discord
 from discord.ext import commands
 
+from utils.event_logger import send_event_log
 from utils.runtime_settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -53,13 +54,62 @@ class ReactionRoles(commands.Cog):
             return
         if not me.guild_permissions.manage_roles:
             logger.warning("Missing manage_roles permission for reaction role assignment")
+            await send_event_log(
+                self.bot,
+                guild=guild,
+                level="warning",
+                title="リアクションロール失敗",
+                description="ロール付与権限が不足しているため処理できませんでした。",
+                fields=[
+                    ("ユーザー", f"{member} ({member.id})", False),
+                    ("ロール", f"{role.name} ({role.id})", False),
+                    ("絵文字", str(payload.emoji), True),
+                ],
+            )
             return
         if role >= me.top_role:
             logger.warning("Cannot assign role %s due to hierarchy", role.id)
+            await send_event_log(
+                self.bot,
+                guild=guild,
+                level="warning",
+                title="リアクションロール失敗",
+                description="Bot のロール階層が不足しているため処理できませんでした。",
+                fields=[
+                    ("ユーザー", f"{member} ({member.id})", False),
+                    ("ロール", f"{role.name} ({role.id})", False),
+                    ("絵文字", str(payload.emoji), True),
+                ],
+            )
             return
 
         try:
             await member.add_roles(role, reason=f"Reaction role via emoji {payload.emoji}")
+            await send_event_log(
+                self.bot,
+                guild=guild,
+                level="success",
+                title="リアクションロール付与",
+                description=f"{member.mention} にロールを付与しました。",
+                fields=[
+                    ("ユーザー", f"{member} ({member.id})", False),
+                    ("ロール", f"{role.name} ({role.id})", False),
+                    ("絵文字", str(payload.emoji), True),
+                    ("メッセージID", str(payload.message_id), True),
+                ],
+            )
         except Exception:
             logger.exception("Failed to add role %s to member %s", role.id, member.id)
-
+            await send_event_log(
+                self.bot,
+                guild=guild,
+                level="error",
+                title="リアクションロール失敗",
+                description="リアクションロール付与中に例外が発生しました。",
+                fields=[
+                    ("ユーザー", f"{member} ({member.id})", False),
+                    ("ロール", f"{role.name} ({role.id})", False),
+                    ("絵文字", str(payload.emoji), True),
+                    ("メッセージID", str(payload.message_id), True),
+                ],
+            )

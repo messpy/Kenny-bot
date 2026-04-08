@@ -34,22 +34,25 @@ global:
     max_minutes: 90
     audio_max_total_mb: 64
     audio_max_user_mb: 8
-    transcription_provider: google
+    transcription_provider: whisper
     google_language_code: ja-JP
     google_chunk_seconds: 20
     google_timeout_sec: 90
     google_model: ''
-    whisper_model: tiny
+    whisper_model: base
     realtime_translation_enabled: true
     translation_target_language: ja
     realtime_translation_interval_sec: 20
-    realtime_translation_min_audio_bytes: 384000
+    realtime_translation_min_audio_bytes: 24000
   voice:
     log_private_channels: false
+  logging:
+    event_channel_id: 0
+    event_channel_name: kennybot-log
   keyword_reactions:
     いいね: 👍
-    ミュ: 🐈️
-    みゅ: 🐈️
+    ミュ: 🐈
+    みゅ: 🐈
     草: 😂
     天才: 🧠
     かわいい: 💕
@@ -57,7 +60,9 @@ global:
     おやすみ: 🌙
     天使: て、て、て、天使の羽👼
   reaction_roles:
-    bindings: {}
+    bindings:
+      '1489788137512108203': &id001
+        😂: 1162405024475922523
   tts:
     voicevox_url: http://127.0.0.1:50021
     speaker_id: 3
@@ -71,5 +76,8 @@ global:
 guilds:
   '664237144600215581':
     summarize_recent_default_minutes: 720
+    reaction_roles:
+      bindings:
+        '1489788137512108203': *id001
   '1317683053027659786':
     summarize_recent_default_minutes: 600

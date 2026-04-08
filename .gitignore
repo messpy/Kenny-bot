@@ -19,8 +19,10 @@ logs/
 
 # ===== Runtime data =====
 data/message_logs/
+data/meeting_audio_debug/
 data/*.json
 data/*.lock
+.codex
 
 # ===== OS =====
 .DS_Store
@@ -52,8 +54,10 @@ venv/
 env/
 
 data/message_logs/
+data/meeting_audio_debug/
 data/*.json
 data/*.lock
+.codex
 
 log/
 logs/

@@ -7,6 +7,7 @@ from typing import Dict, Tuple, Optional
 import discord
 from discord.ext import commands
 from utils.runtime_settings import get_settings
+from utils.event_logger import send_event_log
 
 JST = timezone(timedelta(hours=9))
 _settings = get_settings()
@@ -92,6 +93,7 @@ class VoiceLogger(commands.Cog):
             return
 
         out_ch = self.bot.meeting_minutes.resolve_announce_channel(  # type: ignore[attr-defined]
+            self.bot,
             guild,
             session.announce_channel_id,
             allow_fallback=False,
@@ -99,6 +101,13 @@ class VoiceLogger(commands.Cog):
         if out_ch:
             embed = self.bot.meeting_minutes.build_result_embed(guild, result)  # type: ignore[attr-defined]
             await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
+        log_ch = self.bot.meeting_minutes.resolve_global_log_channel(self.bot)  # type: ignore[attr-defined]
+        if log_ch and out_ch != log_ch:
+            await log_ch.send(
+                f"[minutes_auto_stop] guild={guild.id} channel={session.announce_channel_id} "
+                f"user={result.mention_user_id} lines={result.transcript_line_count} "
+                f"provider={result.session.transcription_provider or 'default'} model={result.session.whisper_model or 'default'}"
+            )
 
     async def _handle_voice_join(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC入室を記録してロギング"""
@@ -108,23 +117,18 @@ class VoiceLogger(commands.Cog):
         if not self._should_log_channel(guild, channel):
             return
 
-        # voice-events チャンネルを取得
-        log_channel = discord.utils.get(guild.text_channels, name="voice-events")
-        if not log_channel:
-            return
-
-        # Embed を生成
-        embed = discord.Embed(
+        await send_event_log(
+            self.bot,
+            guild=guild,
+            level="success",
             title="VC入室",
-            description=f"{member.mention} が ⁠{channel.name} に入室しました",
-            color=discord.Color.green(),
-            timestamp=datetime.now(JST)
+            description=f"{member.mention} が {channel.name} に入室しました",
+            fields=[
+                ("ユーザー", f"{member.name} ({member.id})", False),
+                ("サーバー", f"{guild.name} ({guild.id})", False),
+                ("チャンネル", channel.name, False),
+            ],
         )
-        embed.add_field(name="ユーザー", value=f"{member.name} ({member.id})", inline=False)
-        embed.add_field(name="サーバー", value=f"{guild.name} ({guild.id})", inline=False)
-        embed.add_field(name="チャンネル", value=f"{channel.name}", inline=False)
-
-        await log_channel.send(embed=embed)
 
     async def _handle_voice_leave(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC離脱を記録してロギング"""
@@ -135,24 +139,19 @@ class VoiceLogger(commands.Cog):
         if not self._should_log_channel(guild, channel):
             return
 
-        # voice-events チャンネルを取得
-        log_channel = discord.utils.get(guild.text_channels, name="voice-events")
-        if not log_channel:
-            return
-
-        # Embed を生成
-        embed = discord.Embed(
+        await send_event_log(
+            self.bot,
+            guild=guild,
+            level="warning",
             title="VC離脱",
-            description=f"{member.mention} が ⁠{channel.name} から離脱しました",
-            color=discord.Color.red(),
-            timestamp=datetime.now(JST)
+            description=f"{member.mention} が {channel.name} から離脱しました",
+            fields=[
+                ("ユーザー", f"{member.name} ({member.id})", False),
+                ("サーバー", f"{guild.name} ({guild.id})", False),
+                ("チャンネル", channel.name, False),
+                ("通話時間", duration, False),
+            ],
         )
-        embed.add_field(name="ユーザー", value=f"{member.name} ({member.id})", inline=False)
-        embed.add_field(name="サーバー", value=f"{guild.name} ({guild.id})", inline=False)
-        embed.add_field(name="チャンネル", value=f"{channel.name}", inline=False)
-        embed.add_field(name="通話時間", value=duration, inline=False)
-
-        await log_channel.send(embed=embed)
 
     def _calculate_duration(self, join_time: Optional[datetime]) -> str:
         """入室時刻から通話時間を計算"""
