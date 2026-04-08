@@ -1,17 +1,17 @@
 # 🤖 Discord Bot - Kenny Bot（リファクタリド版）
 
 モジュール化されたアーキテクチャを備えた高機能な Discord Bot です。
-AI との会話、スパム管理、ユーザー履歴追跡などの機能を備えています。
+会話応答、スパム管理、ユーザー履歴追跡などの機能を備えています。
 
 ## 📋 主な機能
 
-### 1. **AI 会話機能**
-- ✅ メンション・リプライに対して Ollama を使用した AI 応答
-- ✅ DM でもそのまま AI 会話
+### 1. **会話機能**
+- ✅ メンション・リプライに対して会話応答
+- ✅ DM でもそのまま会話可能
 - ✅ 本人履歴とチャンネル全体履歴を状況に応じて自動選択
 - ✅ `ollama.embed()` を使った semantic memory により、意味的に近い過去発言も参照可能
 - ✅ README と `data/chat_rag.md/json/toml` をローカル知識として参照可能
-- ✅ Cloud Ollama + API キー構成では必要時のみ web search / web fetch を使用
+- ✅ リモート接続 + API キー構成では必要時のみ web search / web fetch を使用
 - ✅ ユーザー名とあだなによるパーソナライズ応答
 - ✅ 時刻付きメッセージ履歴で「いつ何をしたか」を記憶
 
@@ -131,7 +131,7 @@ docker compose up -d --build
 
 この構成では `bot` から `ollama` と `voicevox` に Compose 内部ネットワークで接続するため、ホスト側ポートは公開しません。つまりホスト上の 11434 や 50021 と競合しません。
 
-初回は Ollama モデルが未取得でも、Bot 側が必要時に `pull` を試みます。
+利用可能なモデル一覧は `/model_list`、切替は `/model_change` で確認・変更できます。
 
 ### 1. 前提条件
 - Python 3.13+
@@ -241,7 +241,7 @@ MOD_PANEL_CHANNEL_ID = 1005826751391342663
 
 ## 📖 使用方法
 
-### AI 会話機能
+### 会話機能
 
 Bot にメンション or リプライすると自動応答：
 
@@ -258,6 +258,31 @@ Bot にメンション or リプライすると自動応答：
 - ✅ README や `data/chat_rag.md/json/toml` の内容を参照して Bot 自身の仕様説明に回答可能
 - ✅ web search が使える構成では最新情報を検索して回答可能
 - ✅ DM でも同様に会話可能
+
+### 主なスラッシュコマンド
+
+- `/help`: 利用できる機能とコマンド一覧を表示
+- `/bot_info`: Bot の状態と疎通確認を表示
+- `/summarize_recent`: チャンネルの直近メッセージを要約
+- `/set_recent_window`: 要約の既定件数を設定
+- `/config_show`: 設定値を表示
+- `/config_set`: 設定値を更新
+- `/model_list`: 利用可能なモデル一覧を表示（ローカル / リモート）
+- `/model_change`: 利用モデルを切り替え
+- `/minutes_start`: 議事録モードを開始
+- `/minutes_stop`: 議事録モードを停止して要約を作成
+- `/minutes_status`: 議事録モードの状態を表示
+- `/reaction_role_set`: リアクションロール設定を追加
+- `/reaction_role_remove`: リアクションロール設定を解除
+- `/reaction_role_list`: リアクションロール設定を一覧表示
+- `/tts_join`: 読み上げのため VC に参加
+- `/tts_leave`: 読み上げを停止して VC から切断
+- `/tts_voice`: 読み上げ話者 ID を変更
+- `/tts_status`: 読み上げ状態を表示
+- `/game`: ミニゲームを開始
+- `/timer`: タイマーを開始
+- `/vc_control`: VC 操作パネルを作成
+- `/group_match`: 2人組 / 3人組を自動作成
 
 ### 追加 RAG ファイル
 
@@ -315,7 +340,7 @@ python bin/reindex_message_embeddings.py
 **検出対象：**
 - 短時間の連投（5 メッセージ / 8 秒）
 - 同一文の重複（12 秒以内）
-- AI 呼び出しの過度な利用（2 回 / 20 秒）
+- 会話呼び出しの過度な利用（2 回 / 20 秒）
 
 **段階的処罰：**
 1. **1 回目**: ⚠️ 警告メッセージ

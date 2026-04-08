@@ -111,8 +111,8 @@ def _static_chunks() -> list[RagChunk]:
             source="BOT",
             title="会話",
             body=(
-                "Bot はメンションや Bot への返信で AI 応答できます。"
-                "DM でもそのまま AI 会話できます。"
+                "Bot はメンションや Bot への返信で会話応答できます。"
+                "DM でもそのまま会話できます。"
                 "会話時は本人履歴、チャンネル履歴、意味的に近い過去発言を状況に応じて使い分けます。"
                 "README と data/chat_rag.md/json/toml のローカル知識も参照できます。"
                 "最新情報が必要で web search が使える構成なら、必要時だけ web search/web fetch を使います。"

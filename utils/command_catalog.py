@@ -20,8 +20,8 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
     HelpSection(
         title="会話機能",
         lines=(
-            "- Botへのメンション/返信でAI応答",
-            "- DMでもそのままAI会話可能",
+            "- Botへのメンション/返信で会話応答",
+            "- DMでもそのまま会話可能",
             "- 会話時は直近100件の履歴を参照",
             "- 天気・日付・祝日は外部API参照で案内可能",
             "- キーワード自動リアクション",
@@ -29,12 +29,11 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
         ),
     ),
     HelpSection(
-        title="検索・RAG機能",
+        title="案内・検索機能",
         lines=(
-            "- README と `data/chat_rag.md/json/toml` をローカル知識として参照",
-            "- Bot自身の機能説明や使い方をローカル資料から回答",
-            "- semantic memory で意味的に近い過去発言を補助的に参照",
-            "- Cloud Ollama + APIキー構成では必要時のみ `web search` / `web fetch` を使用",
+            "- Bot自身の機能説明や使い方を案内可能",
+            "- 過去の会話内容を補助的に参照して応答可能",
+            "- リモート接続 + APIキー構成では必要時のみ `web search` / `web fetch` を使用",
             "- 最新情報が必要な質問では、検索未実施なら検索したふりをしない",
         ),
     ),
@@ -107,14 +106,14 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="設定値を更新",
         category="要約・設定",
     ),
-    "ollama_pull": SlashCommandMeta(
-        name="ollama_pull",
-        description="Ollama でモデルを pull し、必要なら利用モデルへ設定",
+    "model_list": SlashCommandMeta(
+        name="model_list",
+        description="利用可能なモデル一覧を表示（ローカル/リモート）",
         category="要約・設定",
     ),
-    "ollama_use_model": SlashCommandMeta(
-        name="ollama_use_model",
-        description="Bot が使う Ollama モデルを切り替え",
+    "model_change": SlashCommandMeta(
+        name="model_change",
+        description="Bot が使うモデルを切り替え",
         category="要約・設定",
     ),
     "minutes_start": SlashCommandMeta(

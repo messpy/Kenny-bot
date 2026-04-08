@@ -2,7 +2,9 @@
 # スラッシュコマンド集
 
 import asyncio
+import json
 import logging
+import os
 import random
 import subprocess
 from pathlib import Path
@@ -26,6 +28,7 @@ from utils.command_catalog import (
 from utils.event_logger import send_event_log
 from utils.countdown import ChannelCountdown
 from utils.runtime_settings import get_settings
+from ai.client import create_ollama_client
 
 JST = timezone(timedelta(hours=9))
 _settings = get_settings()
@@ -38,8 +41,8 @@ SUMMARIZE_RECENT_META = get_slash_command_meta("summarize_recent")
 SET_RECENT_WINDOW_META = get_slash_command_meta("set_recent_window")
 CONFIG_SHOW_META = get_slash_command_meta("config_show")
 CONFIG_SET_META = get_slash_command_meta("config_set")
-OLLAMA_PULL_META = get_slash_command_meta("ollama_pull")
-OLLAMA_USE_MODEL_META = get_slash_command_meta("ollama_use_model")
+MODEL_LIST_META = get_slash_command_meta("model_list")
+MODEL_CHANGE_META = get_slash_command_meta("model_change")
 REACTION_ROLE_SET_META = get_slash_command_meta("reaction_role_set")
 REACTION_ROLE_REMOVE_META = get_slash_command_meta("reaction_role_remove")
 REACTION_ROLE_LIST_META = get_slash_command_meta("reaction_role_list")
@@ -97,23 +100,23 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="全体履歴の参照行数", value="chat.channel_history_lines"),
         app_commands.Choice(name="履歴保存の最大件数", value="chat.history_max_messages"),
         app_commands.Choice(name="履歴保存日数", value="chat.history_retention_days"),
-        app_commands.Choice(name="AI返信の最大文字数", value="chat.max_response_length"),
+        app_commands.Choice(name="返信の最大文字数", value="chat.max_response_length"),
         app_commands.Choice(name="プロンプト文字数上限", value="chat.max_response_length_prompt"),
         app_commands.Choice(name="kenny-chat発言クールダウン秒", value="kenny_chat.cooldown_seconds"),
         app_commands.Choice(name="要約の既定件数", value="summarize_recent_default_messages"),
         app_commands.Choice(name="要約の履歴取得件数", value="summarize_recent.history_fetch_limit"),
         app_commands.Choice(name="要約の投入行数上限", value="summarize_recent.transcript_lines_limit"),
         app_commands.Choice(name="要約の最大件数", value="summarize_recent.max_messages"),
-        app_commands.Choice(name="既定Ollamaモデル", value="ollama.model_default"),
-        app_commands.Choice(name="埋め込みOllamaモデル", value="ollama.model_embedding"),
-        app_commands.Choice(name="要約Ollamaモデル", value="ollama.model_summary"),
-        app_commands.Choice(name="Ollamaタイムアウト秒", value="ollama.timeout_sec"),
+        app_commands.Choice(name="既定モデル", value="ollama.model_default"),
+        app_commands.Choice(name="埋め込みモデル", value="ollama.model_embedding"),
+        app_commands.Choice(name="要約モデル", value="ollama.model_summary"),
+        app_commands.Choice(name="モデル応答タイムアウト秒", value="ollama.timeout_sec"),
         app_commands.Choice(name="議事録リアルタイム翻訳", value="meeting.realtime_translation_enabled"),
         app_commands.Choice(name="議事録文字起こしプロバイダ", value="meeting.transcription_provider"),
         app_commands.Choice(name="Google STT 言語コード", value="meeting.google_language_code"),
-        app_commands.Choice(name="AI同時実行数", value="security.ai_max_concurrency"),
-        app_commands.Choice(name="AIチャンネル間隔秒", value="security.ai_channel_cooldown_seconds"),
-        app_commands.Choice(name="AI入力最大文字数", value="security.max_user_message_chars"),
+        app_commands.Choice(name="同時実行数", value="security.ai_max_concurrency"),
+        app_commands.Choice(name="チャンネル間隔秒", value="security.ai_channel_cooldown_seconds"),
+        app_commands.Choice(name="入力最大文字数", value="security.max_user_message_chars"),
         app_commands.Choice(name="kenny-chat招待URL/全体メンション禁止", value="kenny_chat.block_invite_and_mass_mention"),
         app_commands.Choice(name="スパム許容メッセージ数", value="security.spam.max_msgs"),
         app_commands.Choice(name="スパム判定秒数", value="security.spam.per_seconds"),
@@ -554,7 +557,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="稼働時間", value=f"{h}h {m}m {s}s", inline=True)
         embed.add_field(name="参加サーバー", value=str(guild_count), inline=True)
         embed.add_field(name="総メンバー数(概算)", value=str(member_count), inline=True)
-        embed.add_field(name="AI Model", value=f"`{ai_model}`", inline=True)
+        embed.add_field(name="利用モデル", value=f"`{ai_model}`", inline=True)
         embed.add_field(name="Version", value=f"`{version}`", inline=True)
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -654,8 +657,15 @@ class SlashCommands(commands.Cog):
             "ただし、ログにない内容の補完や推測はしないでください。\n\n"
             f"<chat_log>\n{transcript}\n</chat_log>"
         )
+        progress_key = f"ai-progress:{interaction.channel_id}:summarize:{interaction.user.id}"
 
         try:
+            await self._countdowns.start_countup(
+                key=progress_key,
+                channel=interaction.channel,
+                mention_user_id=interaction.user.id,
+                base_text="Kennybot推論中",
+            )
             model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b"))
             summary = self.bot.ollama_client.chat_simple(
                 model=model_summary,
@@ -669,6 +679,8 @@ class SlashCommands(commands.Cog):
                 ephemeral=True,
             )
             return
+        finally:
+            await self._countdowns.stop(progress_key, delete_message=True)
 
         if len(summary) > 1800:
             summary = summary[:1800] + "\n...(省略)..."
@@ -786,54 +798,103 @@ class SlashCommands(commands.Cog):
         }
         return mapping[target]
 
-    @app_commands.command(name=OLLAMA_PULL_META.name, description=OLLAMA_PULL_META.description)
-    @app_commands.describe(
-        model="pull するモデル名（例: gpt-oss:120b-cloud）",
-        set_as="pull 後にどの用途へ設定するか",
-    )
-    @app_commands.choices(set_as=_OLLAMA_MODEL_TARGET_CHOICES)
+    def _list_models_for_host(self, host: str | None) -> list[str]:
+        client = create_ollama_client(host=host)
+        return client.list_model_names()
+
+    def _list_local_models_via_cli(self) -> list[str]:
+        cp = subprocess.run(
+            ["ollama", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if cp.returncode != 0:
+            err = (cp.stderr or cp.stdout or "").strip() or "unknown error"
+            raise RuntimeError(err[:300])
+
+        names: list[str] = []
+        for idx, line in enumerate((cp.stdout or "").splitlines()):
+            row = line.strip()
+            if not row:
+                continue
+            if idx == 0 and row.lower().startswith("name"):
+                continue
+            parts = row.split()
+            if parts:
+                names.append(parts[0])
+        return names
+
+    def _list_remote_models_via_tags_api(self, host: str) -> list[str]:
+        base = (host or "").rstrip("/")
+        if base == "https://ollama.com":
+            url = "https://ollama.com/api/tags"
+        else:
+            url = f"{base}/api/tags"
+
+        cp = subprocess.run(
+            ["curl", "-sS", url],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if cp.returncode != 0:
+            err = (cp.stderr or cp.stdout or "").strip() or "unknown error"
+            raise RuntimeError(err[:300])
+
+        try:
+            payload = json.loads(cp.stdout or "{}")
+        except Exception as e:
+            raise RuntimeError(f"invalid response: {e}") from e
+
+        models = payload.get("models", [])
+        names: list[str] = []
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("model") or "").strip()
+            if name:
+                names.append(name)
+        return sorted(set(names))
+
+    @app_commands.command(name=MODEL_LIST_META.name, description=MODEL_LIST_META.description)
     @checks.has_permissions(administrator=True)
-    async def ollama_pull(
+    async def model_list(
         self,
         interaction: discord.Interaction,
-        model: str,
-        set_as: app_commands.Choice[str] | None = None,
     ):
-        model_name = model.strip()
-        if not model_name:
-            await interaction.response.send_message("モデル名を指定してください。", ephemeral=True)
-            return
-
         await interaction.response.defer(ephemeral=True, thinking=True)
+        local_host = "http://127.0.0.1:11434"
+        remote_host = os.getenv("OLLAMA_HOST")
+        sections: list[str] = []
+
         try:
-            await asyncio.to_thread(self.bot.ollama_client.pull_model, model_name)
+            local_names = await asyncio.to_thread(self._list_local_models_via_cli)
+            local_body = "\n".join(f"- `{name}`" for name in local_names[:30]) if local_names else "0件"
         except Exception as e:
-            await interaction.followup.send(
-                "モデル pull に失敗しました。\n"
-                f"モデル: `{model_name}`\n"
-                f"理由: `{str(e)[:300]}`\n"
-                "Cloud モデルなら Ollama 側のサインインや API キー設定を確認してください。",
-                ephemeral=True,
-            )
-            return
+            local_body = f"取得失敗: `{str(e)[:200]}`"
+        sections.append(f"ローカル:\n{local_body}")
 
-        note = f"モデル `{model_name}` を pull しました。"
-        if set_as is not None:
-            key = self._ollama_model_key(set_as.value)
-            _settings.set(key, model_name)
-            if set_as.value == "default":
-                self.bot.ollama_model = model_name
-            note += f"\n利用先: `{key}` に設定しました。"
-        await interaction.followup.send(note, ephemeral=True)
+        if remote_host and remote_host != local_host:
+            try:
+                remote_names = await asyncio.to_thread(self._list_remote_models_via_tags_api, remote_host)
+                remote_body = "\n".join(f"- `{name}`" for name in remote_names[:30]) if remote_names else "0件"
+            except Exception as e:
+                remote_body = f"取得失敗: `{str(e)[:200]}`"
+            sections.append(f"リモート ({remote_host}):\n{remote_body}")
 
-    @app_commands.command(name=OLLAMA_USE_MODEL_META.name, description=OLLAMA_USE_MODEL_META.description)
+        await interaction.followup.send("\n\n".join(sections), ephemeral=True)
+
+    @app_commands.command(name=MODEL_CHANGE_META.name, description=MODEL_CHANGE_META.description)
     @app_commands.describe(
         target="切り替える用途",
         model="設定するモデル名",
     )
     @app_commands.choices(target=_OLLAMA_MODEL_TARGET_CHOICES)
     @checks.has_permissions(administrator=True)
-    async def ollama_use_model(
+    async def model_change(
         self,
         interaction: discord.Interaction,
         target: app_commands.Choice[str],
@@ -852,8 +913,8 @@ class SlashCommands(commands.Cog):
 
         if names and model_name not in names:
             await interaction.response.send_message(
-                f"`{model_name}` は現在の Ollama 一覧に見つかりませんでした。\n"
-                "先に `/ollama_pull` を実行してください。",
+                f"`{model_name}` は現在のモデル一覧に見つかりませんでした。\n"
+                "先に `/model_list` で確認してください。",
                 ephemeral=True,
             )
             return

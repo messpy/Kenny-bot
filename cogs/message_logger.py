@@ -327,6 +327,8 @@ class MessageLogger(BaseCog):
                     "Use get_channel_history for shared discussion or recent events in the channel.\n"
                     "Prefer get_semantic_history when topical similarity matters more than strict recency.\n"
                     "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
+                    "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
+                    "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
                     "You may call multiple tools if needed. If the message is self-contained, call no tools."
                 ),
             },
@@ -351,7 +353,7 @@ class MessageLogger(BaseCog):
                 model=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
                 messages=planner_messages,
                 stream=False,
-                tools=[get_user_history, get_member_history, get_channel_history, get_semantic_history, get_local_knowledge],
+                tools=[get_user_history, get_member_history, get_channel_history, get_semantic_history, get_local_knowledge, self._get_bot_game_catalog, self._get_bot_command_catalog],
             )
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
@@ -413,6 +415,14 @@ class MessageLogger(BaseCog):
                     )
                     if body:
                         blocks.append(("Bot ローカル資料", body))
+                elif name == "_get_bot_game_catalog":
+                    body = self._get_bot_game_catalog()
+                    if body:
+                        blocks.append(("Bot ゲーム一覧", body))
+                elif name == "_get_bot_command_catalog":
+                    body = self._get_bot_command_catalog(str(args.get("category") or ""))
+                    if body:
+                        blocks.append(("Bot コマンド一覧", body))
         except Exception:
             logger.exception("Failed to resolve chat context via tool calling")
 
@@ -657,6 +667,33 @@ class MessageLogger(BaseCog):
             "help",
         )
         return any(k in t for k in keys)
+
+    def _is_bot_capability_or_game_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        capability_keys = (
+            "何ができる",
+            "できること",
+            "機能",
+            "使い方",
+            "コマンド",
+            "help",
+        )
+        game_keys = (
+            "ゲーム",
+            "遊べる",
+            "人狼",
+            "わーどうるふ",
+            "ワードウルフ",
+            "あいうえお",
+            "timer",
+            "vc_control",
+            "group_match",
+        )
+        bot_keys = ("kennybot", "kenny bot", "このbot", "あなた", "君", "お前")
+        return (
+            any(key in normalized for key in capability_keys)
+            or (any(key in normalized for key in game_keys) and any(key in normalized for key in bot_keys))
+        )
 
     def _sanitize_for_prompt(self, text: str, max_len: int) -> str:
         v = strip_ansi_and_ctrl(text or "")
@@ -943,6 +980,42 @@ class MessageLogger(BaseCog):
                 blocks.append(f"[HELP / コマンド {category}]\n" + "\n".join(lines))
         return "\n\n".join(blocks)
 
+    def _get_bot_command_catalog(self, category: str = "") -> str:
+        """Get the bot's confirmed help sections and slash commands."""
+        wanted = (category or "").strip()
+        blocks: list[str] = []
+        for section in HELP_SECTIONS:
+            if wanted and wanted not in section.title:
+                continue
+            blocks.append(f"[HELP / {section.title}]\n" + "\n".join(section.lines))
+
+        commands_by_category: dict[str, list[str]] = {name: [] for name in COMMAND_CATEGORY_ORDER}
+        for meta in SLASH_COMMANDS.values():
+            commands_by_category.setdefault(meta.category, []).append(f"/{meta.name}: {meta.description}")
+        for name in COMMAND_CATEGORY_ORDER:
+            if wanted and wanted not in name:
+                continue
+            lines = commands_by_category.get(name, [])
+            if lines:
+                blocks.append(f"[HELP / コマンド {name}]\n" + "\n".join(lines))
+        return "\n\n".join(blocks)
+
+    def _get_bot_game_catalog(self) -> str:
+        """Get confirmed game and utility commands for this bot."""
+        return (
+            "[ゲーム]\n"
+            "/game: ミニゲームを開始（リアクション参加）\n"
+            "- mode=配布: 数字\n"
+            "- mode=配布: 単語\n"
+            "- mode=ワードウルフ\n"
+            "- mode=人狼役職配布\n"
+            "- mode=あいうえおバトル\n\n"
+            "[ゲーム・ユーティリティ]\n"
+            "/timer: タイマーを開始（時/分/秒指定）\n"
+            "/vc_control: VCミュート操作パネルを作成\n"
+            "/group_match: リアクション参加で2人組/3人組を自動作成\n"
+        )
+
     def _build_rag_context(
         self,
         query: str,
@@ -995,6 +1068,7 @@ class MessageLogger(BaseCog):
             prefix = f"{mention}\n" if mention else ""
             await channel.send(f"{prefix}このチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。")
             return
+        progress_key = f"ai-progress:{channel_id}:capability:{mention or 'anon'}"
 
         normalized_query = (query or "").replace("きのう", "機能")
         rag_context = "\n\n".join(
@@ -1024,7 +1098,7 @@ class MessageLogger(BaseCog):
             "不明な点は推測せず『不明』と書くこと。\n"
             "質問が Bot 自身の機能説明なら、自分自身の機能として解釈して答えること。\n"
             "機能一覧や『何ができるか』を聞かれた場合は、一部だけで済ませず、資料にある全機能をカテゴリごとにできるだけ漏れなく列挙すること。\n"
-            "カテゴリ名は必要に応じて『会話』『検索・RAG』『議事録』『読み上げ』『ロール』『ゲーム・ユーティリティ』『モデレーション』『連携』のように整理すること。\n"
+            "カテゴリ名は必要に応じて『会話』『案内・検索』『議事録』『読み上げ』『ロール』『ゲーム・ユーティリティ』『モデレーション』『連携』のように整理すること。\n"
             "README のうち機能説明と使い方に関係する章だけを参照対象とし、ディレクトリ構成、セットアップ、開発者向け説明を機能紹介の主材料にしないこと。\n"
             "README、HELP、chat_rag に書かれている機能、使い方、slash command を優先して整理すること。\n"
             "何かを省略する場合は『主要なもの』ではなく、資料上の全カテゴリを先に列挙してから補足すること。\n"
@@ -1040,6 +1114,11 @@ class MessageLogger(BaseCog):
         )
         try:
             async with self._ai_semaphore:
+                await self._ai_progress_countdowns.start_countup(
+                    key=progress_key,
+                    channel=channel,
+                    base_text="Kennybot推論中",
+                )
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
                 answer = await self._run_ollama_text(
                     model=model_name,
@@ -1075,6 +1154,8 @@ class MessageLogger(BaseCog):
                     )
             else:
                 await channel.send(f"{prefix}機能説明の生成に失敗しました。\n```{str(e)[:180]}```")
+        finally:
+            await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 
     def _bridge_targets(self, src: discord.TextChannel) -> list[discord.TextChannel]:
         targets: list[discord.TextChannel] = []
@@ -1393,6 +1474,7 @@ class MessageLogger(BaseCog):
         today_local = datetime.now(JST)
         absolute_date = today_local.strftime("%Y-%m-%d")
         requires_current_lookup = is_current_info_intent(text)
+        requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
 
         try:
@@ -1409,11 +1491,13 @@ class MessageLogger(BaseCog):
                     if self.bot.ollama_client.has_web_tools():
                         tools = [
                             self._get_local_knowledge,
+                            self._get_bot_game_catalog,
+                            self._get_bot_command_catalog,
                             self.bot.ollama_client.web_search,
                             self.bot.ollama_client.web_fetch,
                         ]
                     else:
-                        tools = [self._get_local_knowledge]
+                        tools = [self._get_local_knowledge, self._get_bot_game_catalog, self._get_bot_command_catalog]
                     answer = await self._run_ollama_chat_with_tools(
                         model=model_name,
                         messages=[
@@ -1425,6 +1509,11 @@ class MessageLogger(BaseCog):
                                     f"Today in JST is {absolute_date}.\n"
                                     "When the user asks about today, current conditions, latest news, or other time-sensitive facts, use absolute dates in the answer.\n"
                                     "You can use get_local_knowledge to inspect the local README and custom RAG files for bot-specific facts.\n"
+                                    "You can use _get_bot_game_catalog for confirmed game and utility commands.\n"
+                                    "You can use _get_bot_command_catalog for confirmed command and feature lists.\n"
+                                    "When the user asks about this bot's features, games, commands, setup, or usage, you must ground the answer in get_local_knowledge before answering.\n"
+                                    "Do not invent commands, game modes, or behaviors that are not confirmed by local knowledge.\n"
+                                    "If bot-specific details are uncertain, say that they are unknown instead of guessing.\n"
                                     "Use web_search or web_fetch only when the user needs current facts, external references, or verification.\n"
                                     "If the request is time-sensitive and web tools are available, you must use them before answering.\n"
                                     "Prefer provided local context when it is sufficient.\n"
@@ -1435,6 +1524,7 @@ class MessageLogger(BaseCog):
                                 "role": "user",
                                 "content": (
                                     (f"[必須: 最新情報として扱う。回答に日付 {absolute_date} を明記すること]\n" if requires_current_lookup else "")
+                                    + ("[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n" if requires_bot_capability_grounding else "")
                                     + prompt
                                 ),
                             },
