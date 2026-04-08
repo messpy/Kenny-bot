@@ -8,6 +8,7 @@ import os
 import random
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 import wave
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
@@ -798,6 +799,21 @@ class SlashCommands(commands.Cog):
         }
         return mapping[target]
 
+    def _is_local_host(self, host: str | None) -> bool:
+        if not host:
+            return True
+        parsed = urlparse(host if "://" in host else f"http://{host}")
+        hostname = (parsed.hostname or "").lower()
+        return hostname in {"localhost", "127.0.0.1", "::1", "ollama"}
+
+    def _normalize_model_name_for_target(self, target: str, model_name: str) -> str:
+        normalized = (model_name or "").strip()
+        remote_host = os.getenv("OLLAMA_HOST")
+        if target != "embedding" and remote_host and not self._is_local_host(remote_host):
+            if normalized and not normalized.endswith("-cloud"):
+                normalized += "-cloud"
+        return normalized
+
     def _list_models_for_host(self, host: str | None) -> list[str]:
         client = create_ollama_client(host=host)
         return client.list_model_names()
@@ -900,18 +916,28 @@ class SlashCommands(commands.Cog):
         target: app_commands.Choice[str],
         model: str,
     ):
-        model_name = model.strip()
+        raw_model_name = model.strip()
+        model_name = self._normalize_model_name_for_target(target.value, raw_model_name)
         if not model_name:
             await interaction.response.send_message("モデル名を指定してください。", ephemeral=True)
             return
 
         key = self._ollama_model_key(target.value)
+        local_names: list[str] = []
+        remote_names: list[str] = []
         try:
-            names = await asyncio.to_thread(self.bot.ollama_client.list_model_names)
+            local_names = await asyncio.to_thread(self._list_local_models_via_cli)
         except Exception:
-            names = []
+            local_names = []
+        remote_host = os.getenv("OLLAMA_HOST")
+        if remote_host and not self._is_local_host(remote_host):
+            try:
+                remote_names = await asyncio.to_thread(self._list_remote_models_via_tags_api, remote_host)
+            except Exception:
+                remote_names = []
 
-        if names and model_name not in names:
+        available_names = set(local_names) | set(remote_names)
+        if available_names and model_name not in available_names:
             await interaction.response.send_message(
                 f"`{model_name}` は現在のモデル一覧に見つかりませんでした。\n"
                 "先に `/model_list` で確認してください。",

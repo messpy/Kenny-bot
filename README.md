@@ -268,7 +268,7 @@ Bot にメンション or リプライすると自動応答：
 - `/config_show`: 設定値を表示
 - `/config_set`: 設定値を更新
 - `/model_list`: 利用可能なモデル一覧を表示（ローカル / リモート）
-- `/model_change`: 利用モデルを切り替え
+- `/model_change`: 利用モデルを切り替え（リモート接続時は `-cloud` モデル名を使用）
 - `/minutes_start`: 議事録モードを開始
 - `/minutes_stop`: 議事録モードを停止して要約を作成
 - `/minutes_status`: 議事録モードの状態を表示
