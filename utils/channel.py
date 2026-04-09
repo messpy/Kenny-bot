@@ -7,7 +7,7 @@ from typing import Optional
 import discord
 from discord.utils import get as get_discord_obj
 
-from .config import CHANNEL_NAMES
+from .app_constants import CHANNEL_NAMES
 
 
 logger = logging.getLogger(__name__)

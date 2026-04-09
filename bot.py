@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.config import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
+from utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
 from ai.runner import OllamaRunner, OllamaConfig
 from ai.chat import ChatMemory, ChatService, ChatConfig
 from ai.client import OllamaClientService, OllamaClientConfig, create_ollama_client
@@ -27,6 +27,7 @@ from utils.meeting_minutes import MeetingMinutesManager
 from utils.event_logger import send_event_log
 from utils.runtime_settings import get_settings
 from utils.voice_recv_patch import apply_voice_recv_resilience_patch
+from utils.ai_progress import AIProgressTracker
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class MyBot(commands.Bot):
 
         # Spam Guard（設定から読み込み）
         settings = get_settings()
+        ai_concurrency = min(2, max(1, int(settings.get("security.ai_max_concurrency", 2))))
         self.spam_guard = SpamGuard(
             SpamPolicy(
                 max_msgs=max(1, int(settings.get("security.spam.max_msgs", 5))),
@@ -54,6 +56,7 @@ class MyBot(commands.Bot):
             )
         )
         self.meeting_minutes = MeetingMinutesManager()
+        self.ai_progress_tracker = AIProgressTracker(ai_concurrency)
 
         # AI: Ollama（2つの方法を用意）
         # 方法1: subprocess/asyncio ベース（旧）

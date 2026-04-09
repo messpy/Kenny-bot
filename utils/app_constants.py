@@ -1,0 +1,21 @@
+CHANNEL_NAME_MEMBER_EVENTS = "member-events"
+CHANNEL_NAME_VOICE_EVENTS = "voice-events"
+CHANNEL_NAME_OTHER_LOG = "other-log"
+CHANNEL_NAME_BOT_LOG = "bot-log"
+
+CHANNEL_NAMES = {
+    "member": CHANNEL_NAME_MEMBER_EVENTS,
+    "voice": CHANNEL_NAME_VOICE_EVENTS,
+    "other": CHANNEL_NAME_OTHER_LOG,
+    "bot": CHANNEL_NAME_BOT_LOG,
+}
+
+MOD_PANEL_CHANNEL_ID = 1005826751391342663
+GLOBAL_MEETING_LOG_CHANNEL_ID = 1005826751391342663
+
+VIOLATION_LEVELS = {
+    "warning": "警告",
+    "mute": "タイムアウト (30分)",
+    "kick": "キック",
+    "ban": "バン",
+}

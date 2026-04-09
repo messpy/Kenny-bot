@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
+from utils.paths import KNOWLEDGE_DIR
 
 
 @dataclass
@@ -114,7 +115,7 @@ def _static_chunks() -> list[RagChunk]:
                 "Bot はメンションや Bot への返信で会話応答できます。"
                 "DM でもそのまま会話できます。"
                 "会話時は本人履歴、チャンネル履歴、意味的に近い過去発言を状況に応じて使い分けます。"
-                "README と data/chat_rag.md/json/toml のローカル知識も参照できます。"
+                "README と knowledge/chat_rag.md/json/toml のローカル知識も参照できます。"
                 "最新情報が必要で web search が使える構成なら、必要時だけ web search/web fetch を使います。"
             ),
         ),
@@ -132,7 +133,8 @@ def _static_chunks() -> list[RagChunk]:
             title="ゲーム",
             body=(
                 "人狼役職配布は /game mode:人狼役職配布 です。"
-                "人狼だけが DM のリアクションで襲撃対象を選びます。"
+                "人狼には霊媒師も含まれ、夜行動と昼投票は DM のリアクションで進みます。"
+                "騎士は同じ相手を連続で護衛できません。"
                 "あいうえおバトルは /game mode:あいうえおバトル で、1人から開始できます。"
                 "お題は DM で送信し、ひらがなのみ7文字以下、小文字や濁点や半濁点やーも使えます。"
             ),
@@ -170,11 +172,22 @@ def _static_chunks() -> list[RagChunk]:
 class LocalRAG:
     def __init__(self, root: Path):
         self.root = root
-        self._extra_paths = [
-            self.root / "data" / "chat_rag.md",
-            self.root / "data" / "chat_rag.json",
-            self.root / "data" / "chat_rag.toml",
-        ]
+        self._extra_paths = self._resolve_extra_paths()
+
+    def _resolve_extra_paths(self) -> list[Path]:
+        knowledge_root = self.root / KNOWLEDGE_DIR
+        legacy_root = self.root / "data"
+        paths: list[Path] = []
+        for name in ("chat_rag.md", "chat_rag.json", "chat_rag.toml"):
+            knowledge_path = knowledge_root / name
+            legacy_path = legacy_root / name
+            if knowledge_path.exists():
+                paths.append(knowledge_path)
+            elif legacy_path.exists():
+                paths.append(legacy_path)
+            else:
+                paths.append(knowledge_path)
+        return paths
 
     def _load_chunks(self, *, capability_only: bool = False) -> list[RagChunk]:
         chunks = _static_chunks()

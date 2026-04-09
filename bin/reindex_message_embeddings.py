@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ai.client import create_ollama_client
 from utils.message_vector_store import MessageVectorStore
+from utils.paths import MESSAGE_LOG_DIR, MESSAGE_VECTOR_DB_PATH
 from utils.runtime_settings import get_settings
 
 
@@ -27,8 +28,8 @@ def _iter_message_logs(root: Path) -> list[tuple[int, int, Path]]:
 
 def main() -> int:
     settings = get_settings()
-    logs_root = Path("data") / "message_logs"
-    vector_db = logs_root / "message_vectors.sqlite3"
+    logs_root = MESSAGE_LOG_DIR
+    vector_db = MESSAGE_VECTOR_DB_PATH
     model = str(settings.get("ollama.model_embedding", "embeddinggemma"))
     batch_size = 32
 

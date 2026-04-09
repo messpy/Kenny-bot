@@ -7,8 +7,10 @@ from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 from typing import Any
+import shutil
 
 import yaml
+from utils.paths import LEGACY_RUNTIME_SETTINGS_PATH, RUNTIME_SETTINGS_PATH
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -213,7 +215,11 @@ class SettingsStore:
             return deepcopy(self._data["global"])
 
 
-SETTINGS_PATH = Path("data") / "bot_settings.yaml"
+if not RUNTIME_SETTINGS_PATH.exists() and LEGACY_RUNTIME_SETTINGS_PATH.exists():
+    RUNTIME_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(LEGACY_RUNTIME_SETTINGS_PATH, RUNTIME_SETTINGS_PATH)
+
+SETTINGS_PATH = RUNTIME_SETTINGS_PATH
 _STORE = SettingsStore(SETTINGS_PATH)
 
 

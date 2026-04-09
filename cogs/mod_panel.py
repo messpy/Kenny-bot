@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands
 
 from guards.spam_guard import SpamGuard
-from utils.config import MOD_PANEL_CHANNEL_ID
+from utils.app_constants import MOD_PANEL_CHANNEL_ID
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List
 
-from utils.config import MESSAGE_LOG_DIR
+from utils.paths import MESSAGE_LOG_DIR
 from utils.runtime_settings import get_settings
 
 logger = logging.getLogger(__name__)

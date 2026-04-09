@@ -34,7 +34,8 @@ class ChannelCountdown:
         *,
         key: str,
         channel: discord.abc.Messageable,
-        base_text: str,
+        base_text: str = "",
+        text_factory: Callable[[int], str] | None = None,
         mention_user_id: int | None = None,
         start_seconds: int = 1,
     ) -> None:
@@ -44,6 +45,7 @@ class ChannelCountdown:
                 key=key,
                 channel=channel,
                 base_text=base_text,
+                text_factory=text_factory,
                 mention_user_id=mention_user_id,
                 start_seconds=start_seconds,
             )
@@ -118,13 +120,15 @@ class ChannelCountdown:
         key: str,
         channel: discord.abc.Messageable,
         base_text: str,
+        text_factory: Callable[[int], str] | None,
         mention_user_id: int | None,
         start_seconds: int,
     ) -> None:
         prefix = f"<@{mention_user_id}> " if mention_user_id else ""
         elapsed = max(1, int(start_seconds))
+        text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
         msg = await channel.send(
-            f"{prefix}{base_text} {self._format_elapsed(elapsed)}",
+            f"{prefix}{text}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
         self._messages[key] = msg
@@ -132,8 +136,9 @@ class ChannelCountdown:
             while True:
                 await asyncio.sleep(1)
                 elapsed += 1
+                text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
                 await msg.edit(
-                    content=f"{prefix}{base_text} {self._format_elapsed(elapsed)}",
+                    content=f"{prefix}{text}",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
         except asyncio.CancelledError:
