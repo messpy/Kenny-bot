@@ -43,80 +43,10 @@
 - ✅ 通話の文字起こし/要約
 - ✅ 通話文字起こしは Google Speech-to-Text を優先し、失敗時は faster-whisper にフォールバック
 
-## 📁 ディレクトリ構造
+## 📁 ドキュメント
 
-```
-project_refactored/
-├── bin/
-│   ├── __init__.py
-│   ├── run.py                    # エントリーポイント
-│   ├── reindex_message_embeddings.py  # 履歴の embedding 再インデックス
-│   └── start_voicevox.sh         # VOICEVOX 起動補助
-├── utils/
-│   ├── __init__.py
-│   ├── config.py                 # 定数・設定（一元管理）
-│   ├── env.py                    # 環境変数管理
-│   ├── logger.py                 # ロギング設定
-│   ├── channel.py                # チャンネル解決
-│   ├── text.py                   # テキスト処理
-│   ├── event_logger.py           # event log 送信
-│   ├── runtime_settings.py       # 実行時設定
-│   ├── command_catalog.py        # Slash command メタ情報
-│   ├── countdown.py              # カウントダウン表示共通処理
-│   ├── local_rag.py              # README / chat_rag.* のローカルRAG
-│   ├── live_info.py              # 外部情報参照補助
-│   ├── meeting_minutes.py        # 議事録管理
-│   ├── message_store.py          # メッセージ履歴管理
-│   ├── message_vector_store.py   # semantic memory 用 SQLite ストア
-│   ├── build_info.py             # ビルド情報読み出し
-│   ├── single_instance.py        # 多重起動防止
-│   └── voice_recv_patch.py       # 音声受信まわりの補助
-├── guards/
-│   ├── __init__.py
-│   ├── spam_guard.py             # スパム検出・違反レベル管理
-│   └── mod_actions.py            # 処罰実行（削除、タイムアウト、キック、バン）
-├── ai/
-│   ├── __init__.py
-│   ├── runner.py                 # Ollama 実行（subprocess ベース）
-│   ├── chat.py                   # 会話メモリ・サービス
-│   ├── client.py                 # Ollama Client API（HTTP ベース）
-│   ├── search.py                 # Web 検索・要約
-│   ├── google_speech.py          # Google Speech-to-Text
-│   └── genimg.py                 # 画像生成補助
-├── cogs/
-│   ├── __init__.py
-│   ├── base.py                   # BaseCog（ユーティリティ）
-│   ├── audit_logger.py           # 監査ログ（リアクション / slash / 設定変更）
-│   ├── voice_logger.py           # VC イベント
-│   ├── member_logger.py          # メンバーイベント
-│   ├── message_logger.py         # メッセージ＆会話＆スパム
-│   ├── mod_panel.py              # モデレーションパネル
-│   ├── slash_commands.py         # 主要 slash command 群
-│   ├── game_commands.py          # ゲーム機能（人狼 / ワードウルフ等）
-│   ├── reaction_roles.py         # リアクションロール
-│   └── tts_reader.py             # VOICEVOX 読み上げ
-├── commands/
-│   ├── __init__.py
-│   ├── ping.py
-│   └── action_commands.py
-├── data/
-│   ├── bot_settings.yaml         # ランタイム設定
-│   ├── build_info.json           # build 情報
-│   ├── chat_rag.md               # 会話専用の追加RAG
-│   ├── wordwolf_pairs.json       # ワードウルフ用語ペア
-│   ├── message_logs/             # 会話履歴JSONとベクトルDB
-│   └── meeting_audio_debug/      # 議事録デバッグ音声
-├── systemd/
-│   ├── kennybot.service          # Bot サービス unit
-│   └── kennybot-voicevox.service # VOICEVOX 用 unit
-├── bot.py                        # Bot メインクラス
-├── docker-compose.yml            # Bot / Ollama / VOICEVOX 構成
-├── Dockerfile                    # コンテナビルド定義
-├── pyproject.toml                # 依存関係定義
-├── uv.lock                       # lock file
-├── .env.example                  # 環境変数テンプレート
-└── README.md                     # このファイル
-```
+- 設計書と構成方針は [doc/system-design.md](/home/kennypi/work/Kenny-bot/doc/system-design.md) を参照
+- ドキュメント運用ルールは [doc/README.md](/home/kennypi/work/Kenny-bot/doc/README.md) を参照
 
 ## 🚀 セットアップ
 
