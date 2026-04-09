@@ -9,7 +9,5 @@ class PingCog(commands.Cog):
 
     @commands.command(name="ping")
     async def ping(self, ctx: commands.Context):
-        """Bot の応答速度を確認"""
-        # 【実装例】
-        # latency を表示
-        pass
+        latency_ms = round(self.bot.latency * 1000)
+        await ctx.send(f"Pong! {latency_ms}ms")

@@ -196,7 +196,7 @@ class OllamaClientService:
         )
 
     def has_web_tools(self) -> bool:
-        if webduck_ollama is not None and callable(getattr(webduck_ollama, "web_search", None)):
+        if webduck_ollama is not None:
             return True
         has_methods = callable(getattr(self.client, "web_search", None)) and callable(getattr(self.client, "web_fetch", None))
         return has_methods and bool(self.config.api_key or os.getenv("OLLAMA_API_KEY"))
@@ -269,13 +269,13 @@ class OllamaClientService:
 
     def web_search(self, query: str, max_results: int = 3) -> str:
         """Search the web for up-to-date information."""
-        if webduck_ollama is not None and callable(getattr(webduck_ollama, "web_search", None)):
+        if webduck_ollama is not None:
             try:
                 response = webduck_ollama.web_search(query)
                 return self._format_web_search_response(response) or str(response)
             except Exception as err:
                 logger.exception("webduck web_search failed")
-                return f"web_search failed: {err}"
+                logger.info("Falling back to Ollama client web_search")
         tool = getattr(self.client, "web_search", None)
         if not callable(tool):
             raise RuntimeError("web_search is not available in the current Ollama client")
