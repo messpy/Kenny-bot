@@ -14,6 +14,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+try:
+    from webduck import ollama as webduck_ollama
+except ImportError:
+    webduck_ollama = None
+
 
 class OllamaClientConfig:
     """Ollama Client 設定"""
@@ -191,6 +196,8 @@ class OllamaClientService:
         )
 
     def has_web_tools(self) -> bool:
+        if webduck_ollama is not None and callable(getattr(webduck_ollama, "web_search", None)):
+            return True
         has_methods = callable(getattr(self.client, "web_search", None)) and callable(getattr(self.client, "web_fetch", None))
         return has_methods and bool(self.config.api_key or os.getenv("OLLAMA_API_KEY"))
 
@@ -262,6 +269,13 @@ class OllamaClientService:
 
     def web_search(self, query: str, max_results: int = 3) -> str:
         """Search the web for up-to-date information."""
+        if webduck_ollama is not None and callable(getattr(webduck_ollama, "web_search", None)):
+            try:
+                response = webduck_ollama.web_search(query)
+                return self._format_web_search_response(response) or str(response)
+            except Exception as err:
+                logger.exception("webduck web_search failed")
+                return f"web_search failed: {err}"
         tool = getattr(self.client, "web_search", None)
         if not callable(tool):
             raise RuntimeError("web_search is not available in the current Ollama client")
@@ -274,6 +288,13 @@ class OllamaClientService:
 
     def web_fetch(self, url: str) -> str:
         """Fetch the contents of a web page by URL."""
+        if webduck_ollama is not None and callable(getattr(webduck_ollama, "web_fetch", None)):
+            try:
+                response = webduck_ollama.web_fetch(url)
+                return self._format_web_fetch_response(response) or str(response)
+            except Exception as err:
+                logger.exception("webduck web_fetch failed")
+                return f"web_fetch failed: {err}"
         tool = getattr(self.client, "web_fetch", None)
         if not callable(tool):
             raise RuntimeError("web_fetch is not available in the current Ollama client")
