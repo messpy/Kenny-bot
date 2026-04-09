@@ -1,0 +1,9 @@
+{
+  "name": "kennybot-external-recorder",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "eris": "github:CraigChat/dysnomia#cd792c8ee75970bb44d33baafb6c6ff7123e86f9",
+    "opusscript": "^0.1.1"
+  }
+}

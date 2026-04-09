@@ -78,6 +78,7 @@ cd project_refactored
 ### 3. 依存関係のインストール
 ```bash
 uv sync
+npm install --prefix external_recorder
 ```
 
 ### 4. 環境変数の設定

@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates git \
+    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates git nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
@@ -17,6 +17,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
 COPY . .
+
+RUN npm install --prefix /app/external_recorder
 
 RUN chmod +x /app/bot.sh /app/bin/start_voicevox.sh
 

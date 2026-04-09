@@ -80,7 +80,7 @@ class MeetingMinutesManager:
     """議事録セッション管理"""
 
     _AUDIO_DEBUG_DIR = Path("data") / "meeting_audio_debug"
-    _EXTERNAL_RECORDER_DIR = Path("/home/kennypi/work/Kenny-Dbot")
+    _EXTERNAL_RECORDER_DIR = Path(__file__).resolve().parents[1] / "external_recorder"
     _EXTERNAL_RECORDER_SCRIPT = _EXTERNAL_RECORDER_DIR / "helper_record.mjs"
     _MOONSHINE_PYTHON_CANDIDATES = (
         Path("/home/kennypi/work/voicechat/.moonshine-pi-venv/bin/python"),
