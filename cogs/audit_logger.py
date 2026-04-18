@@ -199,3 +199,31 @@ class AuditLogger(commands.Cog):
             description=f"サーバー `{after.name}` の設定が更新されました。",
             fields=changes[:8],
         )
+
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User | discord.Member) -> None:
+        await send_event_log(
+            self.bot,
+            guild=guild,
+            level="warning",
+            title="メンバーBAN",
+            description="メンバーが BAN されました。",
+            fields=[
+                ("ユーザー", f"{user} ({user.id})", False),
+                ("サーバー", f"{guild.name} ({guild.id})", False),
+            ],
+        )
+
+    @commands.Cog.listener()
+    async def on_member_unban(self, guild: discord.Guild, user: discord.User) -> None:
+        await send_event_log(
+            self.bot,
+            guild=guild,
+            level="info",
+            title="メンバーBAN解除",
+            description="メンバーの BAN が解除されました。",
+            fields=[
+                ("ユーザー", f"{user} ({user.id})", False),
+                ("サーバー", f"{guild.name} ({guild.id})", False),
+            ],
+        )

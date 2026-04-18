@@ -60,7 +60,7 @@ global:
   voice:
     log_private_channels: false
   logging:
-    event_channel_id: 0
+    event_channel_id: 1005826751391342663
     event_channel_name: kennybot-log
   keyword_reactions:
     いいね: 👍
