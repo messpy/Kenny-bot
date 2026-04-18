@@ -1014,25 +1014,6 @@ class MessageLogger(BaseCog):
         return False
 
     async def _handle_dm_message(self, msg: discord.Message) -> None:
-        # DMアクティビティをイベントログに記録
-        author_name = (
-            msg.author.display_name
-            if hasattr(msg.author, "display_name")
-            else msg.author.name
-        )
-        user_content = (msg.content or "").strip()
-        await send_event_log(
-            self.bot,
-            guild=None,
-            level="info",
-            title="DM 受信",
-            description=f"{msg.author.mention} からDMを受信しました",
-            fields=[
-                ("ユーザー", f"{author_name} ({msg.author.id})", False),
-                ("内容", user_content[:500] if user_content else "(empty)", False),
-            ],
-        )
-
         # 総合ログに記録
         log_user_message(msg)
 
@@ -1043,8 +1024,6 @@ class MessageLogger(BaseCog):
             text,
             self._cfg_int("security.max_user_message_chars", 1200),
         )
-
-        await self._log_ai_input_event(msg, text=text, title="DM AI 入力")
 
         if self._is_runtime_model_query(text):
             await self._send_runtime_model_reply(
@@ -1392,31 +1371,6 @@ class MessageLogger(BaseCog):
         if len(text) <= limit:
             return text
         return text[:limit] + "\n...(省略)..."
-
-    async def _log_ai_input_event(
-        self,
-        msg: discord.Message,
-        *,
-        text: str,
-        title: str = "AI 入力",
-    ) -> None:
-        await send_event_log(
-            self.bot,
-            guild=msg.guild,
-            level="info",
-            title=title,
-            description="AI 応答対象のユーザー入力を受信しました。",
-            fields=[
-                ("ユーザー", f"{msg.author} ({msg.author.id})", False),
-                (
-                    "チャンネル",
-                    f"{getattr(msg.channel, 'name', 'DM')} ({getattr(msg.channel, 'id', 0)})",
-                    False,
-                ),
-                ("メッセージID", str(msg.id), True),
-                ("内容", self._truncate_event_text(text), False),
-            ],
-        )
 
     async def _log_ai_output_event(
         self,
@@ -1892,8 +1846,6 @@ class MessageLogger(BaseCog):
             text,
             self._cfg_int("security.max_user_message_chars", 1200),
         )
-
-        await self._log_ai_input_event(msg, text=text)
 
         lowered = text.lower()
         start_words = ("議事録開始", "議事録スタート", "minutes start", "start minutes")
