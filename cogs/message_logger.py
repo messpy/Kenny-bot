@@ -1044,6 +1044,10 @@ class MessageLogger(BaseCog):
             self._cfg_int("security.max_user_message_chars", 1200),
         )
 
+        if self._is_runtime_model_query(text):
+            await self._send_runtime_model_reply(msg.channel)
+            return
+
         if self._is_capability_query(text):
             await self._answer_capability_query(msg.channel, text)
             return
@@ -1386,6 +1390,19 @@ class MessageLogger(BaseCog):
             "利用可能なモデルは `/model_list`、変更は `/model_change` で確認できます。"
         )
 
+    async def _send_runtime_model_reply(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        mention: str | None = None,
+    ) -> None:
+        prefix = f"{mention}\n" if mention else ""
+        await self._send_chunked_text(
+            channel,
+            self._get_runtime_model_info(),
+            prefix=prefix,
+        )
+
     def _search_vrchat_world(
         self,
         keyword: str,
@@ -1468,12 +1485,7 @@ class MessageLogger(BaseCog):
             return
         progress_key = f"ai-progress:{channel_id}:capability:{mention or 'anon'}"
         if self._is_runtime_model_query(query):
-            prefix = f"{mention}\n" if mention else ""
-            await self._send_chunked_text(
-                channel,
-                self._get_runtime_model_info(),
-                prefix=prefix,
-            )
+            await self._send_runtime_model_reply(channel, mention=mention)
             return
 
         normalized_query = (query or "").replace("きのう", "機能")
@@ -1840,6 +1852,14 @@ class MessageLogger(BaseCog):
             return
 
         # 機能説明/最新更新の問い合わせはローカルRAG + git log を文脈に回答
+        if self._is_runtime_model_query(text):
+            await self._send_runtime_model_reply(
+                msg.channel,
+                mention=msg.author.mention,
+            )
+            await self.bot.process_commands(msg)
+            return
+
         if self._is_capability_query(text):
             await self._answer_capability_query(
                 msg.channel, text, mention=msg.author.mention
