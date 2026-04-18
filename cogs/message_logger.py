@@ -28,6 +28,7 @@ from utils.countdown import ChannelCountdown
 from utils.message_vector_store import MessageVectorStore
 from utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
 from utils.paths import MESSAGE_VECTOR_DB_PATH
+from utils.message_logger import log_user_message, log_ai_output, log_system_event
 from cogs.base import BaseCog
 from utils.channel import resolve_log_channel
 from utils.text import (
@@ -38,6 +39,7 @@ from utils.text import (
     strip_ansi_and_ctrl,
 )
 from utils.prompts import get_prompt
+from utils.vrchat_world import format_vrchat_world_text, search_vrchat_worlds
 from guards.spam_guard import SpamGuard
 from guards.mod_actions import ModActions
 
@@ -47,10 +49,13 @@ JST = timezone(timedelta(hours=9))
 URL_RE = re.compile(r"https?://[^\s)>\"]+")
 
 import random
+
 _settings = get_settings()
 
 
-def get_user_display_name(user_id: int, user_name: str, nicknames: dict[int, str]) -> tuple[str, bool]:
+def get_user_display_name(
+    user_id: int, user_name: str, nicknames: dict[int, str]
+) -> tuple[str, bool]:
     """
     ユーザーの表示名を取得（あだながあれば時々使う）
 
@@ -246,9 +251,16 @@ class MessageLogger(BaseCog):
             )
         )
 
-    def _context_target_candidates(self, msg: discord.Message) -> dict[str, tuple[int, str]]:
+    def _context_target_candidates(
+        self, msg: discord.Message
+    ) -> dict[str, tuple[int, str]]:
         targets: dict[str, tuple[int, str]] = {
-            "author": (msg.author.id, getattr(msg.author, "display_name", None) or msg.author.name or str(msg.author.id))
+            "author": (
+                msg.author.id,
+                getattr(msg.author, "display_name", None)
+                or msg.author.name
+                or str(msg.author.id),
+            )
         }
         if (
             msg.reference
@@ -259,7 +271,9 @@ class MessageLogger(BaseCog):
             if not reply_author.bot and reply_author.id != msg.author.id:
                 targets["replied_user"] = (
                     reply_author.id,
-                    getattr(reply_author, "display_name", None) or reply_author.name or str(reply_author.id),
+                    getattr(reply_author, "display_name", None)
+                    or reply_author.name
+                    or str(reply_author.id),
                 )
         mention_index = 1
         for member in msg.mentions:
@@ -284,7 +298,13 @@ class MessageLogger(BaseCog):
         guild_id = msg.guild.id if msg.guild else 0
         channel_id = msg.channel.id
         user_id = msg.author.id
-        store = MessageStore(guild_id, channel_id)
+        guild_name = msg.guild.name if msg.guild else "DM"
+        channel_name = (
+            msg.channel.name if hasattr(msg.channel, "name") else str(msg.channel.id)
+        )
+        store = MessageStore(
+            guild_id, channel_id, guild_name=guild_name, channel_name=channel_name
+        )
         user_lines = self._cfg_int("chat.user_history_lines", 24)
         channel_lines = self._cfg_int("chat.channel_history_lines", 16)
         target_candidates = self._context_target_candidates(msg)
@@ -296,7 +316,9 @@ class MessageLogger(BaseCog):
         def get_member_history(target: str = "author", lines: int = user_lines) -> str:
             """Get recent messages for a specific candidate user in this conversation."""
             target_key = (target or "author").strip().lower()
-            target_info = target_candidates.get(target_key) or target_candidates["author"]
+            target_info = (
+                target_candidates.get(target_key) or target_candidates["author"]
+            )
             lines = max(1, min(int(lines or user_lines), max(1, user_lines)))
             return store.get_recent_context_for_user(target_info[0], lines=lines)
 
@@ -316,7 +338,11 @@ class MessageLogger(BaseCog):
             if not messages:
                 return ""
 
-            if msg.reference and msg.reference.resolved and isinstance(msg.reference.resolved, discord.Message):
+            if (
+                msg.reference
+                and msg.reference.resolved
+                and isinstance(msg.reference.resolved, discord.Message)
+            ):
                 reference_id = msg.reference.resolved.id
                 chain: list[dict] = []
                 for item in messages:
@@ -335,16 +361,22 @@ class MessageLogger(BaseCog):
                 return store.format_messages(deduped[-lines:])
             return store.format_messages(messages[-lines:])
 
-        def get_semantic_history(scope: str = "channel", k: int = 6, target: str = "author") -> str:
+        def get_semantic_history(
+            scope: str = "channel", k: int = 6, target: str = "author"
+        ) -> str:
             """Search semantically related messages from the channel or a specific user."""
             return f"scope={scope}, k={k}, target={target}"
 
-        def get_local_knowledge(query: str = "", limit: int = 4, capability_only: bool = False) -> str:
+        def get_local_knowledge(
+            query: str = "", limit: int = 4, capability_only: bool = False
+        ) -> str:
             """Get relevant bot-local documentation from README and custom RAG files."""
             lookup = (query or text or "").strip()
             if not lookup:
                 lookup = text
-            return self._get_local_knowledge(lookup, limit=limit, capability_only=capability_only, max_chars=2200)
+            return self._get_local_knowledge(
+                lookup, limit=limit, capability_only=capability_only, max_chars=2200
+            )
 
         planner_messages = [
             {
@@ -362,6 +394,7 @@ class MessageLogger(BaseCog):
                     "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
                     "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
                     "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
+                    "Use _search_vrchat_world when the user wants VRChat world search results.\n"
                     "You may call multiple tools if needed. If the message is self-contained, call no tools."
                 ),
             },
@@ -386,7 +419,18 @@ class MessageLogger(BaseCog):
                 model=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
                 messages=planner_messages,
                 stream=False,
-                tools=[get_recent_turns, get_reply_chain, get_user_history, get_member_history, get_channel_history, get_semantic_history, get_local_knowledge, self._get_bot_game_catalog, self._get_bot_command_catalog],
+                tools=[
+                    get_recent_turns,
+                    get_reply_chain,
+                    get_user_history,
+                    get_member_history,
+                    get_channel_history,
+                    get_semantic_history,
+                    get_local_knowledge,
+                    self._get_bot_game_catalog,
+                    self._get_bot_command_catalog,
+                    self._search_vrchat_world,
+                ],
             )
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
@@ -396,28 +440,56 @@ class MessageLogger(BaseCog):
                 name, args = self._normalize_tool_call(call)
                 requested_lines = args.get("lines")
                 if name == "get_user_history":
-                    body = get_user_history(requested_lines if isinstance(requested_lines, int) else user_lines)
+                    body = get_user_history(
+                        requested_lines
+                        if isinstance(requested_lines, int)
+                        else user_lines
+                    )
                     if body:
-                        blocks.append((f"このユーザーの最近の発言 {user_lines} 件以内", body))
+                        blocks.append(
+                            (f"このユーザーの最近の発言 {user_lines} 件以内", body)
+                        )
                 elif name == "get_recent_turns":
-                    body = get_recent_turns(requested_lines if isinstance(requested_lines, int) else 6)
+                    body = get_recent_turns(
+                        requested_lines if isinstance(requested_lines, int) else 6
+                    )
                     if body:
                         blocks.append(("このチャンネルの直近会話", body))
                 elif name == "get_reply_chain":
-                    body = get_reply_chain(requested_lines if isinstance(requested_lines, int) else 4)
+                    body = get_reply_chain(
+                        requested_lines if isinstance(requested_lines, int) else 4
+                    )
                     if body:
                         blocks.append(("直前の会話チェーン", body))
                 elif name == "get_member_history":
                     target = str(args.get("target") or "author")
                     target_key = target.strip().lower()
-                    body = get_member_history(target=target_key, lines=requested_lines if isinstance(requested_lines, int) else user_lines)
-                    target_info = target_candidates.get(target_key) or target_candidates["author"]
+                    body = get_member_history(
+                        target=target_key,
+                        lines=requested_lines
+                        if isinstance(requested_lines, int)
+                        else user_lines,
+                    )
+                    target_info = (
+                        target_candidates.get(target_key) or target_candidates["author"]
+                    )
                     if body:
-                        blocks.append((f"{target_info[1]} の最近の発言 {user_lines} 件以内", body))
+                        blocks.append(
+                            (f"{target_info[1]} の最近の発言 {user_lines} 件以内", body)
+                        )
                 elif name == "get_channel_history":
-                    body = get_channel_history(requested_lines if isinstance(requested_lines, int) else channel_lines)
+                    body = get_channel_history(
+                        requested_lines
+                        if isinstance(requested_lines, int)
+                        else channel_lines
+                    )
                     if body:
-                        blocks.append((f"このチャンネル全体の最近の発言 {channel_lines} 件以内", body))
+                        blocks.append(
+                            (
+                                f"このチャンネル全体の最近の発言 {channel_lines} 件以内",
+                                body,
+                            )
+                        )
                 elif name == "get_semantic_history":
                     scope = str(args.get("scope") or "channel")
                     target = str(args.get("target") or "author")
@@ -426,9 +498,21 @@ class MessageLogger(BaseCog):
                     if not query_embedding:
                         continue
                     scope_value = scope.strip().lower()
-                    limit = max(1, min(int(k if isinstance(k, int) else self._cfg_int("chat.semantic_history_k", 6)), 12))
+                    limit = max(
+                        1,
+                        min(
+                            int(
+                                k
+                                if isinstance(k, int)
+                                else self._cfg_int("chat.semantic_history_k", 6)
+                            ),
+                            12,
+                        ),
+                    )
                     target_key = target.strip().lower()
-                    target_info = target_candidates.get(target_key) or target_candidates["author"]
+                    target_info = (
+                        target_candidates.get(target_key) or target_candidates["author"]
+                    )
                     rows = await asyncio.to_thread(
                         self._vector_store.semantic_search,
                         guild_id=guild_id,
@@ -461,9 +545,20 @@ class MessageLogger(BaseCog):
                     if body:
                         blocks.append(("Bot ゲーム一覧", body))
                 elif name == "_get_bot_command_catalog":
-                    body = self._get_bot_command_catalog(str(args.get("category") or ""))
+                    body = self._get_bot_command_catalog(
+                        str(args.get("category") or "")
+                    )
                     if body:
                         blocks.append(("Bot コマンド一覧", body))
+                elif name == "_search_vrchat_world":
+                    body = self._search_vrchat_world(
+                        keyword=str(args.get("keyword") or text or ""),
+                        count=int(args.get("count") or 5),
+                        author=str(args.get("author") or ""),
+                        tag=str(args.get("tag") or ""),
+                    )
+                    if body:
+                        blocks.append(("VRChat ワールド検索結果", body))
         except Exception:
             logger.exception("Failed to resolve chat context via tool calling")
 
@@ -523,14 +618,19 @@ class MessageLogger(BaseCog):
             if not tool_calls:
                 answer = self._extract_message_content(response)
                 if answer and source_urls:
-                    logger.info("Appending source URLs to response: %s", source_urls[:8])
+                    logger.info(
+                        "Appending source URLs to response: %s", source_urls[:8]
+                    )
                     refs = "\n".join(f"- {url}" for url in source_urls[:8])
                     answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
                 return answer
 
             async def execute_tool_call(call: object) -> tuple[dict, list[str]]:
                 name, args = self._normalize_tool_call(call)
-                tool_fn = next((tool for tool in tools if getattr(tool, "__name__", "") == name), None)
+                tool_fn = next(
+                    (tool for tool in tools if getattr(tool, "__name__", "") == name),
+                    None,
+                )
                 if tool_fn is None:
                     return (
                         {
@@ -573,10 +673,17 @@ class MessageLogger(BaseCog):
                     found_urls,
                 )
 
-            results = await asyncio.gather(*(execute_tool_call(call) for call in tool_calls))
+            results = await asyncio.gather(
+                *(execute_tool_call(call) for call in tool_calls)
+            )
             for tool_message, found_urls in results:
                 working_messages.append(tool_message)
-                last_tool_outputs.append((str(tool_message.get("tool_name") or ""), str(tool_message.get("content") or "")))
+                last_tool_outputs.append(
+                    (
+                        str(tool_message.get("tool_name") or ""),
+                        str(tool_message.get("content") or ""),
+                    )
+                )
                 for url in found_urls:
                     if url not in source_urls:
                         source_urls.append(url)
@@ -603,11 +710,9 @@ class MessageLogger(BaseCog):
                     text = text[:300] + "..."
                 tool_summaries.append(f"- {tool_name}: {text}")
             if successful_searches:
-                retry_prompt = (
-                    get_prompt("chat", "tool_retry_prompt").format(
-                        user_request=user_request or "指定なし",
-                        search_results=chr(10).join(successful_searches[:2]),
-                    )
+                retry_prompt = get_prompt("chat", "tool_retry_prompt").format(
+                    user_request=user_request or "指定なし",
+                    search_results=chr(10).join(successful_searches[:2]),
                 )
                 try:
                     answer = strip_ansi_and_ctrl(
@@ -622,18 +727,18 @@ class MessageLogger(BaseCog):
                         ).strip()
                     )
                 except Exception:
-                    logger.exception("Failed to synthesize answer from web_search fallback")
+                    logger.exception(
+                        "Failed to synthesize answer from web_search fallback"
+                    )
                     answer = ""
                 if not answer:
-                    answer = (
-                        "外部検索結果をもとに回答します。\n\n"
-                        + "\n\n".join(successful_searches[:2])
+                    answer = "外部検索結果をもとに回答します。\n\n" + "\n\n".join(
+                        successful_searches[:2]
                     )
             elif tool_summaries:
                 answer = (
                     "外部情報の取得は試しましたが、回答文をうまく生成できませんでした。\n"
-                    "取得結果:\n"
-                    + "\n".join(tool_summaries)
+                    "取得結果:\n" + "\n".join(tool_summaries)
                 )
         if answer and source_urls:
             logger.info("Appending source URLs to response: %s", source_urls[:8])
@@ -641,7 +746,9 @@ class MessageLogger(BaseCog):
             answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
         return answer
 
-    async def _run_ollama_text(self, model: str, prompt: str, *, timeout_sec: int | None = None) -> str | None:
+    async def _run_ollama_text(
+        self, model: str, prompt: str, *, timeout_sec: int | None = None
+    ) -> str | None:
         effective_timeout = timeout_sec
         if effective_timeout is None or effective_timeout <= 0:
             effective_timeout = self._cfg_int("ollama.timeout_sec", 180)
@@ -687,7 +794,9 @@ class MessageLogger(BaseCog):
             for _ in range(240):
                 ready = await asyncio.to_thread(self._is_model_available, model)
                 if ready:
-                    await channel.send(f"{mention}\nモデル `{model}` の準備が完了しました。もう一度話しかけてください。")
+                    await channel.send(
+                        f"{mention}\nモデル `{model}` の準備が完了しました。もう一度話しかけてください。"
+                    )
                     return
                 await asyncio.sleep(15)
         finally:
@@ -720,14 +829,19 @@ class MessageLogger(BaseCog):
         return out
 
     def _is_kenny_chat(self, msg: discord.Message) -> bool:
-        return isinstance(msg.channel, discord.TextChannel) and msg.channel.name == "kenny-chat"
+        return (
+            isinstance(msg.channel, discord.TextChannel)
+            and msg.channel.name == "kenny-chat"
+        )
 
     def _initial_of(self, member: discord.abc.User) -> str:
         name = ""
         if isinstance(member, discord.Member):
             name = member.display_name or member.name or ""
         else:
-            name = member.display_name if hasattr(member, "display_name") else member.name
+            name = (
+                member.display_name if hasattr(member, "display_name") else member.name
+            )
         name = (name or "").strip()
         return name[0].upper() if name else "?"
 
@@ -791,9 +905,9 @@ class MessageLogger(BaseCog):
             "group_match",
         )
         bot_keys = ("kennybot", "kenny bot", "このbot", "あなた", "君", "お前")
-        return (
-            any(key in normalized for key in capability_keys)
-            or (any(key in normalized for key in game_keys) and any(key in normalized for key in bot_keys))
+        return any(key in normalized for key in capability_keys) or (
+            any(key in normalized for key in game_keys)
+            and any(key in normalized for key in bot_keys)
         )
 
     def _sanitize_for_prompt(self, text: str, max_len: int) -> str:
@@ -821,7 +935,9 @@ class MessageLogger(BaseCog):
         if not query:
             return ""
         limit = max(1, min(int(limit or 4), 6))
-        chunks = self._local_rag.retrieve(query, limit=limit, capability_only=capability_only)
+        chunks = self._local_rag.retrieve(
+            query, limit=limit, capability_only=capability_only
+        )
         blocks: list[str] = []
         for chunk in chunks:
             body = chunk.body.strip()
@@ -834,7 +950,9 @@ class MessageLogger(BaseCog):
         return "ぽっぷこーんきめら" in normalize_keyword_match_text(text or "")
 
     async def _send_letter_file(self, msg: discord.Message, answer: str) -> None:
-        display_name = (getattr(msg.author, "display_name", None) or msg.author.name or "user").strip() or "user"
+        display_name = (
+            getattr(msg.author, "display_name", None) or msg.author.name or "user"
+        ).strip() or "user"
         filename = f"{display_name}への手紙.txt"
         payload = io.BytesIO(answer.encode("utf-8"))
         discord_file = discord.File(payload, filename=filename)
@@ -854,6 +972,28 @@ class MessageLogger(BaseCog):
         return False
 
     async def _handle_dm_message(self, msg: discord.Message) -> None:
+        # DMアクティビティをイベントログに記録
+        author_name = (
+            msg.author.display_name
+            if hasattr(msg.author, "display_name")
+            else msg.author.name
+        )
+        user_content = (msg.content or "").strip()
+        await send_event_log(
+            self.bot,
+            guild=None,
+            level="info",
+            title="DM 受信",
+            description=f"{msg.author.mention} からDMを受信しました",
+            fields=[
+                ("ユーザー", f"{author_name} ({msg.author.id})", False),
+                ("内容", user_content[:500] if user_content else "(empty)", False),
+            ],
+        )
+
+        # 総合ログに記録
+        log_user_message(msg)
+
         text = normalize_user_text(msg.content or "")
         if not text:
             return
@@ -870,9 +1010,20 @@ class MessageLogger(BaseCog):
             await msg.channel.send("少し待ってから送ってください。")
             return
 
-        store = MessageStore(0, msg.channel.id)
-        user_name = msg.author.display_name if hasattr(msg.author, "display_name") else msg.author.name
-        store.add_message(user_name or str(msg.author.id), text, msg.id, author_id=msg.author.id)
+        store = MessageStore(
+            0,
+            msg.channel.id,
+            guild_name="DM",
+            channel_name=f"DM:{msg.author.name}",
+        )
+        user_name = (
+            msg.author.display_name
+            if hasattr(msg.author, "display_name")
+            else msg.author.name
+        )
+        store.add_message(
+            user_name or str(msg.author.id), text, msg.id, author_id=msg.author.id
+        )
         self._schedule_message_index(
             guild_id=0,
             channel_id=msg.channel.id,
@@ -890,7 +1041,11 @@ class MessageLogger(BaseCog):
         if not history_context:
             history_lines = self._cfg_int("chat.history_lines", 100)
             history_text = store.get_recent_context(lines=history_lines)
-            history_context = HISTORY_CONTEXT_TEMPLATE.format(history=history_text) if history_text else ""
+            history_context = (
+                HISTORY_CONTEXT_TEMPLATE.format(history=history_text)
+                if history_text
+                else ""
+            )
         external_context = ""
         if self._live_info.needs_external_context(text):
             external_context = self._build_external_context_text(
@@ -898,9 +1053,12 @@ class MessageLogger(BaseCog):
             )
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_name or str(msg.author.id),
-            history_context=history_context + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
+            history_context=history_context
+            + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
             user_message=text,
-            max_response_length_prompt=self._cfg_int("chat.max_response_length_prompt", 500),
+            max_response_length_prompt=self._cfg_int(
+                "chat.max_response_length_prompt", 500
+            ),
         )
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
@@ -911,7 +1069,9 @@ class MessageLogger(BaseCog):
                 key=progress_key,
                 channel=msg.channel,
                 mention_user_id=msg.author.id,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(ticket, elapsed),
+                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed
+                ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
             try:
@@ -932,6 +1092,15 @@ class MessageLogger(BaseCog):
             bot_id = self.bot.user.id if self.bot.user else 0
             store.add_message(bot_name, answer, msg.id, author_id=bot_id)
             await msg.channel.send(answer)
+
+            # 総合ログにAI応答を記録
+            log_ai_output(
+                msg.author,
+                response=answer,
+                model=model_name,
+                msg=msg,
+            )
+
             await send_event_log(
                 self.bot,
                 level="success",
@@ -942,10 +1111,21 @@ class MessageLogger(BaseCog):
                     ("チャンネル", str(msg.channel.id), True),
                     ("メッセージID", str(msg.id), True),
                     ("応答文字数", str(len(answer)), True),
+                    ("応答内容", answer[:500], False),
                 ],
             )
         except Exception as e:
             logger.exception("DM AI response failed")
+
+            # エラーも総合ログに記録
+            log_ai_output(
+                msg.author,
+                response="",
+                model=model_name,
+                msg=msg,
+                error=str(e)[:200],
+            )
+
             await send_event_log(
                 self.bot,
                 level="error",
@@ -970,28 +1150,36 @@ class MessageLogger(BaseCog):
                     )
                 )
             else:
-                await msg.channel.send(f"内部エラーが発生しました。\n```\n{str(e)[:180]}\n```")
+                await msg.channel.send(
+                    f"内部エラーが発生しました。\n```\n{str(e)[:180]}\n```"
+                )
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 
-    async def _handle_spam_violation(self, msg: discord.Message, content: str, level: str, violation_count: int) -> None:
+    async def _handle_spam_violation(
+        self, msg: discord.Message, content: str, level: str, violation_count: int
+    ) -> None:
         await ModActions.delete_message(msg, f"スパム（レベル: {level}）")
 
-        member = msg.author if isinstance(msg.author, discord.Member) else await msg.guild.fetch_member(msg.author.id)
+        member = (
+            msg.author
+            if isinstance(msg.author, discord.Member)
+            else await msg.guild.fetch_member(msg.author.id)
+        )
         punishment_result = ""
         if member and level != "warning":
             action_result = await ModActions.execute_level(
-                self.bot,
-                msg.guild,
-                member,
-                level
+                self.bot, msg.guild, member, level
             )
             if action_result.success:
                 punishment_result = f"✅ 処罰実行: {action_result.action}"
                 if action_result.detail:
                     punishment_result += f"\n{action_result.detail[:140]}"
             else:
-                detail = action_result.detail or "権限・ロール階層・対象状態を確認してください。"
+                detail = (
+                    action_result.detail
+                    or "権限・ロール階層・対象状態を確認してください。"
+                )
                 punishment_result = f"❌ 処罰実行失敗: {level}\n理由: {detail[:140]}"
 
         spam_log_msg = await send_event_log(
@@ -1001,8 +1189,16 @@ class MessageLogger(BaseCog):
             title="🚨 スパム検出",
             description=f"ユーザー {msg.author.mention} のスパムを検出しました。",
             fields=[
-                ("ユーザー情報", f"名前: {msg.author.display_name or msg.author.name}\nID: {msg.author.id}", False),
-                ("削除内容", f"```{content[:200]}{'...' if len(content) > 200 else ''}```", False),
+                (
+                    "ユーザー情報",
+                    f"名前: {msg.author.display_name or msg.author.name}\nID: {msg.author.id}",
+                    False,
+                ),
+                (
+                    "削除内容",
+                    f"```{content[:200]}{'...' if len(content) > 200 else ''}```",
+                    False,
+                ),
                 ("違反情報", f"レベル: **{level}**\n違反回数: {violation_count}", True),
                 ("処罰", punishment_result if punishment_result else "警告のみ", True),
             ],
@@ -1019,7 +1215,11 @@ class MessageLogger(BaseCog):
                 f"現在のレベル: **{level}** (違反 {violation_count} 回)\n"
                 "⚠️ 継続するとキックやバンの対象になります。"
             )
-            await msg.channel.send(warn_msg, delete_after=15, allowed_mentions=discord.AllowedMentions.none())
+            await msg.channel.send(
+                warn_msg,
+                delete_after=15,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     def _read_readme_excerpt(self, max_chars: int = 6000) -> str:
         try:
@@ -1068,7 +1268,14 @@ class MessageLogger(BaseCog):
 
     def _is_update_query(self, text: str) -> bool:
         normalized = normalize_keyword_match_text(text or "")
-        keys = ("最新更新", "更新内容", "アップデート", "変更点", "changelog", "更新履歴")
+        keys = (
+            "最新更新",
+            "更新内容",
+            "アップデート",
+            "変更点",
+            "changelog",
+            "更新履歴",
+        )
         return any(key in normalized for key in keys)
 
     def _build_command_catalog_context(self) -> str:
@@ -1076,9 +1283,13 @@ class MessageLogger(BaseCog):
         for section in HELP_SECTIONS:
             blocks.append(f"[HELP / {section.title}]\n" + "\n".join(section.lines))
 
-        commands_by_category: dict[str, list[str]] = {category: [] for category in COMMAND_CATEGORY_ORDER}
+        commands_by_category: dict[str, list[str]] = {
+            category: [] for category in COMMAND_CATEGORY_ORDER
+        }
         for meta in SLASH_COMMANDS.values():
-            commands_by_category.setdefault(meta.category, []).append(f"/{meta.name}: {meta.description}")
+            commands_by_category.setdefault(meta.category, []).append(
+                f"/{meta.name}: {meta.description}"
+            )
         for category in COMMAND_CATEGORY_ORDER:
             lines = commands_by_category.get(category, [])
             if lines:
@@ -1094,9 +1305,13 @@ class MessageLogger(BaseCog):
                 continue
             blocks.append(f"[HELP / {section.title}]\n" + "\n".join(section.lines))
 
-        commands_by_category: dict[str, list[str]] = {name: [] for name in COMMAND_CATEGORY_ORDER}
+        commands_by_category: dict[str, list[str]] = {
+            name: [] for name in COMMAND_CATEGORY_ORDER
+        }
         for meta in SLASH_COMMANDS.values():
-            commands_by_category.setdefault(meta.category, []).append(f"/{meta.name}: {meta.description}")
+            commands_by_category.setdefault(meta.category, []).append(
+                f"/{meta.name}: {meta.description}"
+            )
         for name in COMMAND_CATEGORY_ORDER:
             if wanted and wanted not in name:
                 continue
@@ -1121,6 +1336,28 @@ class MessageLogger(BaseCog):
             "/group_match: リアクション参加で2人組/3人組を自動作成\n"
         )
 
+    def _search_vrchat_world(
+        self,
+        keyword: str,
+        count: int = 5,
+        author: str = "",
+        tag: str = "",
+    ) -> str:
+        """Search VRChat worlds using the existing api/vrchat implementation."""
+        query = (keyword or "").strip()
+        if not query:
+            return "keyword is required"
+        safe_count = max(1, min(int(count or 5), 10))
+        formatter, worlds = search_vrchat_worlds(
+            query,
+            safe_count,
+            (author or "").strip() or None,
+            (tag or "").strip() or None,
+        )
+        if not worlds:
+            return "該当するワールドが見つかりませんでした。"
+        return format_vrchat_world_text(formatter, worlds, max_len=5000)
+
     def _build_rag_context(
         self,
         query: str,
@@ -1129,7 +1366,9 @@ class MessageLogger(BaseCog):
         capability_only: bool = False,
         body_limit: int | None = 1200,
     ) -> str:
-        chunks = self._local_rag.retrieve(query, limit=limit, capability_only=capability_only)
+        chunks = self._local_rag.retrieve(
+            query, limit=limit, capability_only=capability_only
+        )
         blocks: list[str] = []
         for chunk in chunks:
             body = chunk.body.strip()
@@ -1167,11 +1406,15 @@ class MessageLogger(BaseCog):
             await channel.send(content)
             first = False
 
-    async def _answer_capability_query(self, channel: discord.abc.Messageable, query: str, mention: str | None = None) -> None:
+    async def _answer_capability_query(
+        self, channel: discord.abc.Messageable, query: str, mention: str | None = None
+    ) -> None:
         channel_id = getattr(channel, "id", 0)
         if self._is_ai_channel_rate_limited(channel_id):
             prefix = f"{mention}\n" if mention else ""
-            await channel.send(f"{prefix}このチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。")
+            await channel.send(
+                f"{prefix}このチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。"
+            )
             return
         progress_key = f"ai-progress:{channel_id}:capability:{mention or 'anon'}"
 
@@ -1195,7 +1438,11 @@ class MessageLogger(BaseCog):
             ]
             if block
         )
-        updates = self._format_git_updates(count=4) if self._is_update_query(normalized_query) else ""
+        updates = (
+            self._format_git_updates(count=4)
+            if self._is_update_query(normalized_query)
+            else ""
+        )
         prompt = get_prompt("chat", "capability_prompt").format(
             query=normalized_query,
             rag_context=rag_context,
@@ -1207,7 +1454,9 @@ class MessageLogger(BaseCog):
             await self._ai_progress_countdowns.start_countup(
                 key=progress_key,
                 channel=channel,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(ticket, elapsed),
+                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed
+                ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
             try:
@@ -1217,7 +1466,10 @@ class MessageLogger(BaseCog):
                 )
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
-            answer = strip_ansi_and_ctrl((answer or "").strip()) or "関連資料から回答を作れませんでした。"
+            answer = (
+                strip_ansi_and_ctrl((answer or "").strip())
+                or "関連資料から回答を作れませんでした。"
+            )
             prefix = f"{mention}\n" if mention else ""
             await self._send_chunked_text(channel, answer, prefix=prefix)
         except Exception as e:
@@ -1246,7 +1498,9 @@ class MessageLogger(BaseCog):
                         )
                     )
             else:
-                await channel.send(f"{prefix}機能説明の生成に失敗しました。\n```{str(e)[:180]}```")
+                await channel.send(
+                    f"{prefix}機能説明の生成に失敗しました。\n```{str(e)[:180]}```"
+                )
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 
@@ -1262,10 +1516,19 @@ class MessageLogger(BaseCog):
         return targets
 
     async def _handle_kenny_chat_bridge(self, msg: discord.Message) -> bool:
+        # クロスサーバーコラー生 成 成 を無効化（セキュリティのため）
+        if not bool(_settings.get("kenny_chat.cross_server_bridge", False)):
+            return False
+
         content = (msg.content or "").strip()
         if bool(_settings.get("kenny_chat.block_invite_and_mass_mention", True)):
             lowered = content.lower()
-            if "@everyone" in lowered or "@here" in lowered or "discord.gg/" in lowered or "discordapp.com/invite/" in lowered:
+            if (
+                "@everyone" in lowered
+                or "@here" in lowered
+                or "discord.gg/" in lowered
+                or "discordapp.com/invite/" in lowered
+            ):
                 try:
                     await msg.delete()
                 except Exception:
@@ -1305,7 +1568,9 @@ class MessageLogger(BaseCog):
         mirrors: list[tuple[int, int]] = []
         for target in self._bridge_targets(msg.channel):
             try:
-                sent = await target.send(text, allowed_mentions=discord.AllowedMentions.none())
+                sent = await target.send(
+                    text, allowed_mentions=discord.AllowedMentions.none()
+                )
                 mirrors.append((target.id, sent.id))
                 self._kenny_chat_reverse[sent.id] = msg.id
             except Exception as e:
@@ -1401,7 +1666,12 @@ class MessageLogger(BaseCog):
         if not mentioned_bot and not is_reply_to_bot:
             # メッセージを履歴に記録
             user_name = msg.author.display_name or msg.author.name or str(msg.author.id)
-            store = MessageStore(msg.guild.id, msg.channel.id)
+            store = MessageStore(
+                msg.guild.id,
+                msg.channel.id,
+                guild_name=msg.guild.name,
+                channel_name=msg.channel.name,
+            )
             store.add_message(user_name, content, msg.id, author_id=msg.author.id)
             self._schedule_message_index(
                 guild_id=msg.guild.id,
@@ -1427,7 +1697,11 @@ class MessageLogger(BaseCog):
                             fields=[
                                 ("キーワード", keyword, True),
                                 ("絵文字", emoji, True),
-                                ("チャンネル", f"{msg.channel.name} ({msg.channel.id})", False),
+                                (
+                                    "チャンネル",
+                                    f"{msg.channel.name} ({msg.channel.id})",
+                                    False,
+                                ),
                                 ("メッセージID", str(msg.id), True),
                             ],
                         )
@@ -1455,8 +1729,14 @@ class MessageLogger(BaseCog):
 
         # メンション経由の議事録開始
         if any(w in lowered for w in start_words):
-            if not isinstance(msg.author, discord.Member) or not msg.author.voice or not isinstance(msg.author.voice.channel, discord.VoiceChannel):
-                await msg.channel.send(f"{msg.author.mention}\nVCに参加してから議事録を開始してください。")
+            if (
+                not isinstance(msg.author, discord.Member)
+                or not msg.author.voice
+                or not isinstance(msg.author.voice.channel, discord.VoiceChannel)
+            ):
+                await msg.channel.send(
+                    f"{msg.author.mention}\nVCに参加してから議事録を開始してください。"
+                )
                 await self.bot.process_commands(msg)
                 return
 
@@ -1465,7 +1745,17 @@ class MessageLogger(BaseCog):
                 guild=msg.guild,
                 voice_channel=msg.author.voice.channel,
                 started_by_id=msg.author.id,
-                announce_channel_id=msg.channel.id if isinstance(msg.channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread)) else None,
+                announce_channel_id=msg.channel.id
+                if isinstance(
+                    msg.channel,
+                    (
+                        discord.TextChannel,
+                        discord.VoiceChannel,
+                        discord.StageChannel,
+                        discord.Thread,
+                    ),
+                )
+                else None,
             )
             await msg.channel.send(f"{msg.author.mention}\n{info}")
             await self.bot.process_commands(msg)
@@ -1480,7 +1770,9 @@ class MessageLogger(BaseCog):
                 mention_user_id=msg.author.id,
             )
             if not result:
-                await msg.channel.send(f"{msg.author.mention}\n現在、進行中の議事録はありません。")
+                await msg.channel.send(
+                    f"{msg.author.mention}\n現在、進行中の議事録はありません。"
+                )
                 await self.bot.process_commands(msg)
                 return
 
@@ -1491,14 +1783,18 @@ class MessageLogger(BaseCog):
 
         # 機能説明/最新更新の問い合わせはローカルRAG + git log を文脈に回答
         if self._is_capability_query(text):
-            await self._answer_capability_query(msg.channel, text, mention=msg.author.mention)
+            await self._answer_capability_query(
+                msg.channel, text, mention=msg.author.mention
+            )
             await self.bot.process_commands(msg)
             return
 
         # ユーザー名を取得
         user = msg.author
         user_name = user.display_name or user.name or str(user.id)
-        user_display, used_nickname = get_user_display_name(user.id, user_name, self._cfg_nicknames())
+        user_display, used_nickname = get_user_display_name(
+            user.id, user_name, self._cfg_nicknames()
+        )
 
         # スパム対策（AI 呼び出しレート制限）
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
@@ -1526,7 +1822,12 @@ class MessageLogger(BaseCog):
         # =========================
         # メッセージ履歴を保存・取得
         # =========================
-        store = MessageStore(msg.guild.id, msg.channel.id)
+        store = MessageStore(
+            msg.guild.id,
+            msg.channel.id,
+            guild_name=msg.guild.name,
+            channel_name=msg.channel.name,
+        )
         store.add_message(user_name, text, msg.id, author_id=msg.author.id)
         self._schedule_message_index(
             guild_id=msg.guild.id,
@@ -1560,9 +1861,12 @@ class MessageLogger(BaseCog):
         # =========================
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_display,
-            history_context=history_context + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
+            history_context=history_context
+            + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
             user_message=text,
-            max_response_length_prompt=self._cfg_int("chat.max_response_length_prompt", 500),
+            max_response_length_prompt=self._cfg_int(
+                "chat.max_response_length_prompt", 500
+            ),
         )
         today_local = datetime.now(JST)
         absolute_date = today_local.strftime("%Y-%m-%d")
@@ -1577,7 +1881,9 @@ class MessageLogger(BaseCog):
                 key=progress_key,
                 channel=msg.channel,
                 mention_user_id=msg.author.id,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(ticket, elapsed),
+                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed
+                ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
             try:
@@ -1588,11 +1894,17 @@ class MessageLogger(BaseCog):
                             self._get_local_knowledge,
                             self._get_bot_game_catalog,
                             self._get_bot_command_catalog,
+                            self._search_vrchat_world,
                             self.bot.ollama_client.web_search,
                             self.bot.ollama_client.web_fetch,
                         ]
                     else:
-                        tools = [self._get_local_knowledge, self._get_bot_game_catalog, self._get_bot_command_catalog]
+                        tools = [
+                            self._get_local_knowledge,
+                            self._get_bot_game_catalog,
+                            self._get_bot_command_catalog,
+                            self._search_vrchat_world,
+                        ]
                     answer = await self._run_ollama_chat_with_tools(
                         model=model_name,
                         messages=[
@@ -1605,8 +1917,16 @@ class MessageLogger(BaseCog):
                             {
                                 "role": "user",
                                 "content": (
-                                    (f"[必須: 最新情報として扱う。回答に日付 {absolute_date} を明記すること]\n" if requires_current_lookup else "")
-                                    + ("[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n" if requires_bot_capability_grounding else "")
+                                    (
+                                        f"[必須: 最新情報として扱う。回答に日付 {absolute_date} を明記すること]\n"
+                                        if requires_current_lookup
+                                        else ""
+                                    )
+                                    + (
+                                        "[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n"
+                                        if requires_bot_capability_grounding
+                                        else ""
+                                    )
                                     + prompt
                                 ),
                             },
@@ -1649,7 +1969,9 @@ class MessageLogger(BaseCog):
             if self._should_send_letter_file(text):
                 await self._send_letter_file(msg, answer)
             else:
-                await msg.channel.send(final_message, allowed_mentions=discord.AllowedMentions.none())
+                await msg.channel.send(
+                    final_message, allowed_mentions=discord.AllowedMentions.none()
+                )
             await send_event_log(
                 self.bot,
                 guild=msg.guild,

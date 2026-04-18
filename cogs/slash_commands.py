@@ -29,6 +29,7 @@ from utils.command_catalog import (
 from utils.event_logger import send_event_log
 from utils.countdown import ChannelCountdown
 from utils.runtime_settings import get_settings
+from utils.vrchat_world import format_vrchat_world_lines, search_vrchat_worlds
 from ai.client import create_ollama_client
 from utils.prompts import get_prompt
 
@@ -53,6 +54,7 @@ MINUTES_STOP_META = get_slash_command_meta("minutes_stop")
 MINUTES_STATUS_META = get_slash_command_meta("minutes_status")
 TIMER_META = get_slash_command_meta("timer")
 GROUP_MATCH_META = get_slash_command_meta("group_match")
+VRCHAT_WORLD_META = get_slash_command_meta("vrchat_world")
 
 
 @dataclass
@@ -573,6 +575,55 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name=VRCHAT_WORLD_META.name, description=VRCHAT_WORLD_META.description)
+    @app_commands.checks.cooldown(1, 10.0)
+    @app_commands.describe(
+        keyword="検索キーワード",
+        count="取得件数",
+        author="作者名で部分一致フィルタ",
+        tag="タグで絞り込み",
+    )
+    async def vrchat_world(
+        self,
+        interaction: discord.Interaction,
+        keyword: str,
+        count: app_commands.Range[int, 1, 10] | None = None,
+        author: str | None = None,
+        tag: str | None = None,
+    ):
+        search_keyword = keyword.strip()
+        if not search_keyword:
+            await interaction.response.send_message("検索キーワードを指定してください。", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        try:
+            formatter, worlds = await asyncio.to_thread(
+                search_vrchat_worlds,
+                search_keyword,
+                int(count or 5),
+                author.strip() if author else None,
+                tag.strip() if tag else None,
+            )
+        except Exception as e:
+            logger.exception("VRChat world search failed")
+            await interaction.followup.send(
+                f"VRChat ワールド検索に失敗しました: {str(e)[:300]}",
+                ephemeral=True,
+            )
+            return
+
+        if not worlds:
+            await interaction.followup.send("該当するワールドが見つかりませんでした。")
+            return
+
+        lines = format_vrchat_world_lines(formatter, worlds)
+        message = "\n".join(lines)
+        if len(message) > 1900:
+            message = message[:1900] + "\n..."
+        await interaction.followup.send(message)
+
     @app_commands.command(name=BOT_INFO_META.name, description=BOT_INFO_META.description)
     async def slash_bot_info(self, interaction: discord.Interaction):
         now = discord.utils.utcnow()
@@ -842,11 +893,23 @@ class SlashCommands(commands.Cog):
 
     def _normalize_model_name_for_target(self, target: str, model_name: str) -> str:
         normalized = (model_name or "").strip()
+        if normalized.lower().startswith("gemini"):
+            return normalized
         remote_host = os.getenv("OLLAMA_HOST")
         if target != "embedding" and remote_host and not self._is_local_host(remote_host):
             if normalized and not normalized.endswith("-cloud"):
                 normalized += "-cloud"
         return normalized
+
+    def _list_gemini_models(self) -> list[str]:
+        if not ((os.getenv("GEMINI_API_KEY") or "").strip() or (os.getenv("GOOGLE_API_KEY") or "").strip()):
+            return []
+        return [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+        ]
 
     def _list_models_for_host(self, host: str | None) -> list[str]:
         client = create_ollama_client(host=host)
@@ -878,9 +941,13 @@ class SlashCommands(commands.Cog):
 
     def _list_local_models(self) -> list[str]:
         try:
-            return self._list_local_models_via_cli()
+            names = self._list_local_models_via_cli()
         except Exception:
-            return self._list_remote_models_via_tags_api("http://127.0.0.1:11434")
+            names = self._list_remote_models_via_tags_api("http://127.0.0.1:11434")
+        for gemini_name in self._list_gemini_models():
+            if gemini_name not in names:
+                names.append(gemini_name)
+        return names
 
     def _list_remote_models_via_tags_api(self, host: str) -> list[str]:
         base = (host or "").rstrip("/")
@@ -940,6 +1007,11 @@ class SlashCommands(commands.Cog):
             except Exception as e:
                 remote_body = f"取得失敗: `{str(e)[:200]}`"
             sections.append(f"リモート ({remote_host}):\n{remote_body}")
+
+        gemini_names = self._list_gemini_models()
+        if gemini_names:
+            gemini_body = "\n".join(f"- `{name}`" for name in gemini_names)
+            sections.append(f"Gemini:\n{gemini_body}")
 
         await interaction.followup.send("\n\n".join(sections), ephemeral=True)
 

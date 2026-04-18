@@ -185,6 +185,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="リアクション参加で2人組/3人組を自動作成",
         category="ゲーム・ユーティリティ",
     ),
+    "vrchat_world": SlashCommandMeta(
+        name="vrchat_world",
+        description="VRChat のワールドを検索",
+        category="ゲーム・ユーティリティ",
+    ),
 }
 
 

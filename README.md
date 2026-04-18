@@ -42,6 +42,7 @@
 - ✅ VOICEVOX 読み上げ
 - ✅ 通話の文字起こし/要約
 - ✅ 通話文字起こしは Google Speech-to-Text を優先し、失敗時は faster-whisper にフォールバック
+- ✅ VRChat ワールド検索（`api/vrchat` の既存実装を利用）
 
 ## 📁 ドキュメント
 
@@ -64,6 +65,7 @@ docker compose up -d --build
 この構成では `bot` から `ollama` と `voicevox` に Compose 内部ネットワークで接続するため、ホスト側ポートは公開しません。つまりホスト上の 11434 や 50021 と競合しません。
 
 利用可能なモデル一覧は `/model_list`、切替は `/model_change` で確認・変更できます。
+Gemini の API キーを設定している場合は、`gemini-2.5-flash` などの Gemini モデルも `/model_change` で選べます。
 
 ### 1. 前提条件
 - Python 3.13+
@@ -99,6 +101,11 @@ DISCORD_TOKEN=your_discord_bot_token_here
 # リモート Ollama の場合
 OLLAMA_HOST=https://ollama.example.com
 OLLAMA_API_KEY=your_api_key_here
+
+# Gemini を使う場合
+GEMINI_API_KEY=your_gemini_api_key
+# または
+# GOOGLE_API_KEY=your_google_api_key
 
 # ローカル Ollama で semantic memory を使う場合
 # OLLAMA_HOST=http://127.0.0.1:11434
@@ -216,6 +223,29 @@ Bot にメンション or リプライすると自動応答：
 - `/timer`: タイマーを開始
 - `/vc_control`: VC 操作パネルを作成
 - `/group_match`: 2人組 / 3人組を自動作成
+- `/vrchat_world`: VRChat のワールドを検索
+
+`/vrchat_world` は `api/vrchat/getVrcWorld.py` の `VRChatStaffBot` をそのまま利用します。認証は `api/vrchat` 側の既存 `.env` と保存済み cookie を前提にしています。
+
+使い方:
+- 基本形: `/vrchat_world keyword:<検索語>`
+- `count`: 任意。取得件数。`1` から `10`
+- `author`: 任意。作者名で部分一致フィルタ
+- `tag`: 任意。タグで絞り込み
+
+使用例:
+- `/vrchat_world keyword:Japan`
+- `/vrchat_world keyword:sunset count:3`
+- `/vrchat_world keyword:chill author:keito`
+- `/vrchat_world keyword:club tag:featured`
+
+返ってくる内容:
+- ワールド名
+- 作者
+- 現在人数 / 定員
+- Quest 対応
+- タグ
+- VRChat のワールド URL
 
 ### 追加 RAG ファイル
 

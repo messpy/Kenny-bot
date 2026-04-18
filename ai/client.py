@@ -4,8 +4,10 @@
 import logging
 import os
 from threading import Lock
-from typing import Optional
+from typing import Iterator, Optional
 from urllib.parse import urlparse
+
+import requests
 
 try:
     from ollama import Client, ResponseError
@@ -13,6 +15,16 @@ except ImportError:
     raise ImportError("ollama が必要です。pip install ollama を実行してください。")
 
 logger = logging.getLogger(__name__)
+_GEMINI_API_BASE = os.getenv(
+    "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
+).rstrip("/")
+_KNOWN_GEMINI_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-embedding-001",
+)
 
 try:
     from webduck import ollama as webduck_ollama
@@ -77,6 +89,112 @@ class OllamaClientService:
         self._pull_lock = Lock()
         self._ensured_models: set[str] = set()
         self._embed_disabled = False
+        self._http = requests.Session()
+
+    def _gemini_api_key(self) -> str:
+        return (
+            os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
+        ).strip()
+
+    def _is_gemini_model(self, model: str) -> bool:
+        value = (model or "").strip().lower()
+        return value.startswith("gemini") or value.startswith("models/gemini")
+
+    def _gemini_model_name(self, model: str) -> str:
+        value = (model or "").strip()
+        if value.startswith("models/"):
+            return value
+        return f"models/{value}"
+
+    def _build_gemini_prompt_from_messages(self, messages: list[dict]) -> str:
+        lines: list[str] = []
+        for item in messages:
+            role = str(item.get("role") or "user").strip().lower()
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "system":
+                lines.append(f"[System]\n{content}")
+            elif role == "assistant":
+                lines.append(f"[Assistant]\n{content}")
+            elif role == "tool":
+                tool_name = str(item.get("tool_name") or "tool")
+                lines.append(f"[Tool:{tool_name}]\n{content}")
+            else:
+                lines.append(f"[User]\n{content}")
+        return "\n\n".join(lines).strip()
+
+    def _extract_gemini_text(self, response: dict) -> str:
+        candidates = response.get("candidates", [])
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            parts = content.get("parts") or []
+            texts: list[str] = []
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = str(part.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+            if texts:
+                return "\n".join(texts).strip()
+        return ""
+
+    def _gemini_generation_config(self, format: Optional[str | dict] = None) -> dict:
+        if format == "json":
+            return {"responseMimeType": "application/json"}
+        return {}
+
+    def _gemini_generate_content(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        stream: bool = False,
+        format: Optional[str | dict] = None,
+        **kwargs,
+    ):
+        api_key = self._gemini_api_key()
+        if not api_key:
+            raise RuntimeError("Gemini を使うには GEMINI_API_KEY か GOOGLE_API_KEY が必要です。")
+
+        prompt = self._build_gemini_prompt_from_messages(messages)
+        if not prompt:
+            return {"message": {"role": "assistant", "content": ""}}
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ]
+        }
+        generation_config = self._gemini_generation_config(format=format)
+        if generation_config:
+            payload["generationConfig"] = generation_config
+
+        timeout = kwargs.pop("timeout", None) or 60
+        url = f"{_GEMINI_API_BASE}/{self._gemini_model_name(model)}:generateContent"
+        response = self._http.post(
+            url,
+            params={"key": api_key},
+            json=payload,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        text = self._extract_gemini_text(data)
+        normalized = {"message": {"role": "assistant", "content": text}}
+        if stream:
+            def _single_chunk() -> Iterator[dict]:
+                yield normalized
+            return _single_chunk()
+        return normalized
 
     def _is_model_missing_error(self, err: Exception) -> bool:
         if not isinstance(err, ResponseError):
@@ -135,6 +253,14 @@ class OllamaClientService:
         format: Optional[str | dict] = None,
         **kwargs,
     ):
+        if self._is_gemini_model(model):
+            return self._gemini_generate_content(
+                model=model,
+                messages=messages,
+                stream=stream,
+                format=format,
+                **kwargs,
+            )
         try:
             return self.client.chat(
                 model=model,
@@ -196,6 +322,7 @@ class OllamaClientService:
         )
 
     def has_web_tools(self) -> bool:
+        # Gemini requests are routed directly via REST and do not expose local web tools here.
         if webduck_ollama is not None:
             return True
         has_methods = callable(getattr(self.client, "web_search", None)) and callable(getattr(self.client, "web_fetch", None))
@@ -211,20 +338,23 @@ class OllamaClientService:
         self.client.pull(model=model, stream=False)
 
     def list_model_names(self) -> list[str]:
+        names: list[str] = []
         try:
             response = self.client.list()
             models = response.get("models", []) if isinstance(response, dict) else []
-            names: list[str] = []
             for item in models:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get("model") or item.get("name") or "").strip()
                 if name and name not in names:
                     names.append(name)
-            return names
         except Exception:
             logger.exception("Failed to list Ollama models")
-            return []
+        if self._gemini_api_key():
+            for model in _KNOWN_GEMINI_MODELS:
+                if model not in names:
+                    names.append(model)
+        return names
 
     def _format_web_search_response(self, response: object) -> str:
         results = []
