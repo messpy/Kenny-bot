@@ -1769,6 +1769,7 @@ class SlashCommands(commands.Cog):
                 ("チャンネル", str(interaction.channel_id), True),
                 ("エラー", str(error)[:1000], False),
             ],
+            source_channel_id=interaction.channel_id,
         )
         text = f"コマンド実行に失敗しました: {error}"
         try:

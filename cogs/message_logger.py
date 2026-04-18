@@ -1205,32 +1205,6 @@ class MessageLogger(BaseCog):
                 )
                 punishment_result = f"❌ 処罰実行失敗: {level}\n理由: {detail[:140]}"
 
-        spam_log_msg = await send_event_log(
-            self.bot,
-            guild=msg.guild,
-            level="error",
-            title="🚨 スパム検出",
-            description=f"ユーザー {msg.author.mention} のスパムを検出しました。",
-            fields=[
-                (
-                    "ユーザー情報",
-                    f"名前: {msg.author.display_name or msg.author.name}\nID: {msg.author.id}",
-                    False,
-                ),
-                (
-                    "削除内容",
-                    f"```{content[:200]}{'...' if len(content) > 200 else ''}```",
-                    False,
-                ),
-                ("違反情報", f"レベル: **{level}**\n違反回数: {violation_count}", True),
-                ("処罰", punishment_result if punishment_result else "警告のみ", True),
-            ],
-            footer=f"チャンネル: {msg.channel.name}",
-            source_channel_id=msg.channel.id,
-        )
-        if spam_log_msg is not None:
-            await spam_log_msg.add_reaction("🔄")
-
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
         if guard.should_warn(msg.author.id):
             warn_msg = (
@@ -1818,24 +1792,6 @@ class MessageLogger(BaseCog):
                 if normalize_keyword_match_text(str(keyword)) in normalized_content:
                     try:
                         await msg.add_reaction(emoji)
-                        await send_event_log(
-                            self.bot,
-                            guild=msg.guild,
-                            level="info",
-                            title="キーワードリアクション",
-                            description=f"{msg.author.mention} のメッセージにリアクションを付与しました。",
-                            fields=[
-                                ("キーワード", keyword, True),
-                                ("絵文字", emoji, True),
-                                (
-                                    "チャンネル",
-                                    f"{msg.channel.name} ({msg.channel.id})",
-                                    False,
-                                ),
-                                ("メッセージID", str(msg.id), True),
-                            ],
-                            source_channel_id=msg.channel.id,
-                        )
                     except Exception as e:
                         logger.debug(f"Reaction failed: {e}")
 
