@@ -662,6 +662,7 @@ class MessageLogger(BaseCog):
                                 ("チャンネルID", str(channel_id or 0), True),
                                 ("引数", str(args)[:1000], False),
                             ],
+                            source_channel_id=channel_id,
                         )
                         found_urls = self._extract_urls(result_text)
                 except Exception as e:
@@ -1225,6 +1226,7 @@ class MessageLogger(BaseCog):
                 ("処罰", punishment_result if punishment_result else "警告のみ", True),
             ],
             footer=f"チャンネル: {msg.channel.name}",
+            source_channel_id=msg.channel.id,
         )
         if spam_log_msg is not None:
             await spam_log_msg.add_reaction("🔄")
@@ -1405,6 +1407,7 @@ class MessageLogger(BaseCog):
             title=title,
             description=description,
             fields=fields,
+            source_channel_id=getattr(msg.channel, "id", 0),
         )
 
     async def _send_runtime_model_reply(
@@ -1599,6 +1602,9 @@ class MessageLogger(BaseCog):
                     ("クエリ", query[:1000], False),
                     ("エラー", str(e)[:1000], False),
                 ],
+                source_channel_id=getattr(source_msg.channel, "id", 0)
+                if source_msg
+                else getattr(channel, "id", 0),
             )
             if isinstance(e, asyncio.TimeoutError):
                 await channel.send(f"{prefix}モデル準備中です。完了したら通知します。")
@@ -1828,6 +1834,7 @@ class MessageLogger(BaseCog):
                                 ),
                                 ("メッセージID", str(msg.id), True),
                             ],
+                            source_channel_id=msg.channel.id,
                         )
                     except Exception as e:
                         logger.debug(f"Reaction failed: {e}")

@@ -77,9 +77,12 @@ async def send_event_log(
     level: str = "info",
     fields: Iterable[tuple[str, str, bool]] | None = None,
     footer: str | None = None,
+    source_channel_id: int | None = None,
 ) -> discord.Message | None:
     channel = await resolve_event_log_channel(bot, guild)
     if channel is None:
+        return None
+    if source_channel_id is not None and int(source_channel_id) == int(getattr(channel, "id", 0)):
         return None
 
     embed = discord.Embed(
