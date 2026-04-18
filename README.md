@@ -131,12 +131,13 @@ python bin/run.py
 
 ### モデル設定（runtime settings）
 
-```python
-# data/bot_settings.yaml
-OLLAMA_MODEL_DEFAULT = "gpt-oss:120b"
-OLLAMA_MODEL_CHAT = "gpt-oss:120b"
-OLLAMA_MODEL_SUMMARY = "gpt-oss:120b"
-OLLAMA_MODEL_EMBEDDING = "embeddinggemma"
+```yaml
+global:
+  ollama:
+    model_default: gemini-2.5-flash
+    model_chat: mistral-large-3:675b-cloud
+    model_summary: gpt-oss:120b
+    model_embedding: embeddinggemma
 ```
 
 ### キーワードリアクション
@@ -145,7 +146,6 @@ OLLAMA_MODEL_EMBEDDING = "embeddinggemma"
 # utils/config.py
 KEYWORD_REACTIONS = {
     "いいね": "👍",
-    "草": "😂",
     "天才": "🧠",
     "かわいい": "💕",
     # 自由に追加可能
@@ -175,7 +175,7 @@ CHAT_SEMANTIC_HISTORY_K = 6
 ### モデレーションパネルチャンネル
 
 ```python
-# utils/config.py
+# utils/app_constants.py
 MOD_PANEL_CHANNEL_ID = 1005826751391342663
 ```
 
@@ -384,8 +384,8 @@ Error: model 'tinyllama' not found
 # モデルをインストール
 ollama pull gpt-oss:120b
 
-# config.py で正しいモデル名を設定
-OLLAMA_MODEL_DEFAULT = "gpt-oss:120b"
+# config/bot_settings.yaml で正しいモデル名を設定
+# 例: global.ollama.model_default: gemini-2.5-flash
 ```
 
 ### 認証エラー（リモート Ollama）
