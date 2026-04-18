@@ -901,6 +901,10 @@ class MessageLogger(BaseCog):
                 "今",
                 "いま",
                 "現在",
+                "使用",
+                "利用",
+                "使用中",
+                "利用中",
                 "使ってる",
                 "使っている",
                 "つかっている",
@@ -912,6 +916,9 @@ class MessageLogger(BaseCog):
                 "通常会話",
                 "デフォルト",
                 "既定",
+                "何",
+                "どれ",
+                "教えて",
             )
         )
         return any(key in normalized for key in model_keys) and any(
@@ -1372,18 +1379,11 @@ class MessageLogger(BaseCog):
         )
 
     def _get_runtime_model_info(self) -> str:
-        """Get the bot's current configured runtime model settings."""
+        """Get the user-facing current chat model without exposing internal settings."""
         default_model = self._cfg_str("ollama.model_default", "gpt-oss:120b")
-        summary_model = self._cfg_str("ollama.model_summary", "gpt-oss:120b")
-        embedding_model = self._cfg_str("ollama.model_embedding", "embeddinggemma")
-        provider = "Gemini" if default_model.startswith("gemini-") else "Ollama"
         return (
-            "[現在のモデル設定]\n"
-            f"- 通常会話: {default_model}\n"
-            f"- 要約: {summary_model}\n"
-            f"- 埋め込み: {embedding_model}\n"
-            f"- 通常会話の提供元: {provider}\n"
-            "- この値は runtime settings の現在値です。"
+            f"今チャットで使っているモデルは `{default_model}` です。\n"
+            "利用可能なモデルは `/model_list`、変更は `/model_change` で確認できます。"
         )
 
     def _search_vrchat_world(
