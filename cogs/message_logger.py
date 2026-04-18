@@ -394,6 +394,7 @@ class MessageLogger(BaseCog):
                     "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
                     "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
                     "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
+                    "Use _get_runtime_model_info when the user asks which model is currently configured or being used.\n"
                     "Use _search_vrchat_world when the user wants VRChat world search results.\n"
                     "You may call multiple tools if needed. If the message is self-contained, call no tools."
                 ),
@@ -429,6 +430,7 @@ class MessageLogger(BaseCog):
                     get_local_knowledge,
                     self._get_bot_game_catalog,
                     self._get_bot_command_catalog,
+                    self._get_runtime_model_info,
                     self._search_vrchat_world,
                 ],
             )
@@ -540,6 +542,10 @@ class MessageLogger(BaseCog):
                     )
                     if body:
                         blocks.append(("Bot ローカル資料", body))
+                elif name == "_get_runtime_model_info":
+                    body = self._get_runtime_model_info()
+                    if body:
+                        blocks.append(("現在のモデル設定", body))
                 elif name == "_get_bot_game_catalog":
                     body = self._get_bot_game_catalog()
                     if body:
@@ -882,6 +888,35 @@ class MessageLogger(BaseCog):
             "help",
         )
         return any(k in t for k in keys)
+
+    def _is_runtime_model_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        model_keys = tuple(
+            normalize_keyword_match_text(key)
+            for key in ("model", "モデル", "aiモデル", "使用モデル", "利用モデル")
+        )
+        current_keys = tuple(
+            normalize_keyword_match_text(key)
+            for key in (
+                "今",
+                "いま",
+                "現在",
+                "使ってる",
+                "使っている",
+                "つかっている",
+                "使って",
+                "使う",
+                "使われている",
+                "チャットで",
+                "会話で",
+                "通常会話",
+                "デフォルト",
+                "既定",
+            )
+        )
+        return any(key in normalized for key in model_keys) and any(
+            key in normalized for key in current_keys
+        )
 
     def _is_bot_capability_or_game_query(self, text: str) -> bool:
         normalized = normalize_keyword_match_text(text or "")
@@ -1336,6 +1371,21 @@ class MessageLogger(BaseCog):
             "/group_match: リアクション参加で2人組/3人組を自動作成\n"
         )
 
+    def _get_runtime_model_info(self) -> str:
+        """Get the bot's current configured runtime model settings."""
+        default_model = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+        summary_model = self._cfg_str("ollama.model_summary", "gpt-oss:120b")
+        embedding_model = self._cfg_str("ollama.model_embedding", "embeddinggemma")
+        provider = "Gemini" if default_model.startswith("gemini-") else "Ollama"
+        return (
+            "[現在のモデル設定]\n"
+            f"- 通常会話: {default_model}\n"
+            f"- 要約: {summary_model}\n"
+            f"- 埋め込み: {embedding_model}\n"
+            f"- 通常会話の提供元: {provider}\n"
+            "- この値は runtime settings の現在値です。"
+        )
+
     def _search_vrchat_world(
         self,
         keyword: str,
@@ -1417,6 +1467,14 @@ class MessageLogger(BaseCog):
             )
             return
         progress_key = f"ai-progress:{channel_id}:capability:{mention or 'anon'}"
+        if self._is_runtime_model_query(query):
+            prefix = f"{mention}\n" if mention else ""
+            await self._send_chunked_text(
+                channel,
+                self._get_runtime_model_info(),
+                prefix=prefix,
+            )
+            return
 
         normalized_query = (query or "").replace("きのう", "機能")
         rag_context = "\n\n".join(
@@ -1894,6 +1952,7 @@ class MessageLogger(BaseCog):
                             self._get_local_knowledge,
                             self._get_bot_game_catalog,
                             self._get_bot_command_catalog,
+                            self._get_runtime_model_info,
                             self._search_vrchat_world,
                             self.bot.ollama_client.web_search,
                             self.bot.ollama_client.web_fetch,
@@ -1903,6 +1962,7 @@ class MessageLogger(BaseCog):
                             self._get_local_knowledge,
                             self._get_bot_game_catalog,
                             self._get_bot_command_catalog,
+                            self._get_runtime_model_info,
                             self._search_vrchat_world,
                         ]
                     answer = await self._run_ollama_chat_with_tools(

@@ -1,6 +1,6 @@
 global:
   ollama:
-    model_default: gpt-oss:120b
+    model_default: gemini-2.5-flash
     model_chat: mistral-large-3:675b-cloud
     model_summary: gpt-oss:120b
     model_embedding: embeddinggemma
@@ -23,6 +23,7 @@ global:
   kenny_chat:
     cooldown_seconds: 12
     block_invite_and_mass_mention: true
+    cross_server_bridge: false
   security:
     ai_max_concurrency: 2
     ai_channel_cooldown_seconds: 4
@@ -48,6 +49,14 @@ global:
     translation_target_language: ja
     realtime_translation_interval_sec: 20
     realtime_translation_min_audio_bytes: 24000
+  recorder:
+    default_format: flac
+    max_minutes: 180
+    silence_timeout_seconds: 15
+    max_tracks: 10000
+    auto_cook_formats:
+    - flac
+    - mix
   voice:
     log_private_channels: false
   logging:

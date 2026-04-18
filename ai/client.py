@@ -3,8 +3,9 @@
 
 import logging
 import os
+import inspect
 from threading import Lock
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional, get_args, get_origin
 from urllib.parse import urlparse
 
 import requests
@@ -126,6 +127,107 @@ class OllamaClientService:
                 lines.append(f"[User]\n{content}")
         return "\n\n".join(lines).strip()
 
+    def _gemini_schema_type(self, annotation: object) -> str:
+        origin = get_origin(annotation)
+        if origin is not None:
+            args = [arg for arg in get_args(annotation) if arg is not type(None)]
+            if args:
+                return self._gemini_schema_type(args[0])
+        if annotation is int:
+            return "INTEGER"
+        if annotation is float:
+            return "NUMBER"
+        if annotation is bool:
+            return "BOOLEAN"
+        if annotation in {list, tuple}:
+            return "ARRAY"
+        return "STRING"
+
+    def _gemini_function_declaration(self, tool: object) -> dict[str, Any]:
+        name = str(getattr(tool, "__name__", "") or "").strip()
+        if not name:
+            raise ValueError("tool name is required")
+        doc = inspect.getdoc(tool) or f"Call tool `{name}`."
+        signature = inspect.signature(tool)
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for param_name, param in signature.parameters.items():
+            if param.kind not in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }:
+                continue
+            schema: dict[str, Any] = {
+                "type": self._gemini_schema_type(param.annotation),
+                "description": f"Parameter `{param_name}` for tool `{name}`.",
+            }
+            properties[param_name] = schema
+            if param.default is inspect._empty:
+                required.append(param_name)
+        declaration: dict[str, Any] = {
+            "name": name,
+            "description": doc[:1024],
+            "parameters": {
+                "type": "OBJECT",
+                "properties": properties,
+            },
+        }
+        if required:
+            declaration["parameters"]["required"] = required
+        return declaration
+
+    def _gemini_tools_payload(self, tools: list[object]) -> list[dict[str, Any]]:
+        declarations: list[dict[str, Any]] = []
+        for tool in tools:
+            try:
+                declarations.append(self._gemini_function_declaration(tool))
+            except Exception:
+                logger.exception("Failed to convert tool for Gemini: %s", tool)
+        return [{"functionDeclarations": declarations}] if declarations else []
+
+    def _gemini_contents_from_messages(
+        self, messages: list[dict]
+    ) -> tuple[list[dict[str, Any]], str]:
+        contents: list[dict[str, Any]] = []
+        system_lines: list[str] = []
+        for item in messages:
+            role = str(item.get("role") or "user").strip().lower()
+            if role == "system":
+                content = str(item.get("content") or "").strip()
+                if content:
+                    system_lines.append(content)
+                continue
+
+            gemini_content = item.get("gemini_content")
+            if isinstance(gemini_content, dict):
+                contents.append(dict(gemini_content))
+                continue
+
+            content = str(item.get("content") or "").strip()
+            if role == "assistant":
+                if content:
+                    contents.append({"role": "model", "parts": [{"text": content}]})
+                continue
+            if role == "tool":
+                tool_name = str(item.get("tool_name") or "tool")
+                contents.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": tool_name,
+                                    "response": {"result": content},
+                                }
+                            }
+                        ],
+                    }
+                )
+                continue
+            if content:
+                contents.append({"role": "user", "parts": [{"text": content}]})
+        return contents, "\n\n".join(system_lines).strip()
+
     def _extract_gemini_text(self, response: dict) -> str:
         candidates = response.get("candidates", [])
         for candidate in candidates:
@@ -143,6 +245,33 @@ class OllamaClientService:
             if texts:
                 return "\n".join(texts).strip()
         return ""
+
+    def _extract_gemini_tool_calls(self, response: dict) -> list[dict[str, Any]]:
+        candidates = response.get("candidates", [])
+        calls: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            parts = content.get("parts") or []
+            for index, part in enumerate(parts):
+                if not isinstance(part, dict):
+                    continue
+                function_call = part.get("functionCall") or {}
+                name = str(function_call.get("name") or "").strip()
+                if not name:
+                    continue
+                args = function_call.get("args") or {}
+                call: dict[str, Any] = {
+                    "id": f"gemini-call-{index}",
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args if isinstance(args, dict) else {},
+                    },
+                }
+                calls.append(call)
+        return calls
 
     def _gemini_generation_config(self, format: Optional[str | dict] = None) -> dict:
         if format == "json":
@@ -162,21 +291,20 @@ class OllamaClientService:
         if not api_key:
             raise RuntimeError("Gemini を使うには GEMINI_API_KEY か GOOGLE_API_KEY が必要です。")
 
-        prompt = self._build_gemini_prompt_from_messages(messages)
-        if not prompt:
+        tools = list(kwargs.pop("tools", []) or [])
+        contents, system_instruction = self._gemini_contents_from_messages(messages)
+        if not contents and not system_instruction:
             return {"message": {"role": "assistant", "content": ""}}
 
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}],
-                }
-            ]
-        }
+        payload: dict[str, Any] = {"contents": contents}
+        if system_instruction:
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         generation_config = self._gemini_generation_config(format=format)
         if generation_config:
             payload["generationConfig"] = generation_config
+        gemini_tools = self._gemini_tools_payload(tools)
+        if gemini_tools:
+            payload["tools"] = gemini_tools
 
         timeout = kwargs.pop("timeout", None) or 60
         url = f"{_GEMINI_API_BASE}/{self._gemini_model_name(model)}:generateContent"
@@ -189,7 +317,18 @@ class OllamaClientService:
         response.raise_for_status()
         data = response.json()
         text = self._extract_gemini_text(data)
-        normalized = {"message": {"role": "assistant", "content": text}}
+        candidates = data.get("candidates") or []
+        first_content = {}
+        if candidates and isinstance(candidates[0], dict):
+            first_content = dict(candidates[0].get("content") or {})
+        normalized = {
+            "message": {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": self._extract_gemini_tool_calls(data),
+                "gemini_content": first_content,
+            }
+        }
         if stream:
             def _single_chunk() -> Iterator[dict]:
                 yield normalized
