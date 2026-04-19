@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from utils.runtime_settings import get_settings
+
 try:
     from ollama import Client, ResponseError
 except ImportError:
@@ -19,9 +21,7 @@ logger = logging.getLogger(__name__)
 _GEMINI_API_BASE = os.getenv(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 ).rstrip("/")
-_OLLAMA_FALLBACK_MODEL = (
-    os.getenv("OLLAMA_FALLBACK_MODEL", "gpt-oss:120b").strip() or "gpt-oss:120b"
-)
+_OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
 _KNOWN_GEMINI_MODELS = (
     "gemini-2.5-flash",
     "gemini-2.5-pro",
@@ -322,24 +322,94 @@ class OllamaClientService:
         except requests.HTTPError as err:
             status_code = getattr(err.response, "status_code", None)
             if status_code == 429:
-                fallback_client = self._local_fallback_client or self.client
-                fallback_model = _OLLAMA_FALLBACK_MODEL
+                settings = get_settings()
+                fallback_models: list[str] = []
+                for candidate in (
+                    _OLLAMA_FALLBACK_MODEL,
+                    str(settings.get("ollama.model_chat", "") or "").strip(),
+                    str(settings.get("ollama.model_summary", "") or "").strip(),
+                    str(settings.get("ollama.model_default", "") or "").strip(),
+                ):
+                    if not candidate or self._is_gemini_model(candidate):
+                        continue
+                    if candidate not in fallback_models:
+                        fallback_models.append(candidate)
                 logger.warning(
-                    "Gemini rate limited for model %s; falling back to Ollama model %s",
+                    "Gemini rate limited for model %s; falling back to Ollama models %s",
                     model,
-                    fallback_model,
+                    ", ".join(fallback_models),
                 )
-                try:
-                    return fallback_client.chat(
-                        model=fallback_model,
-                        messages=messages,
-                        stream=stream,
-                        format=format,
-                        **kwargs,
-                    )
-                except Exception:
-                    logger.exception("Ollama fallback failed after Gemini rate limit")
-                    raise
+                last_error: Exception | None = None
+                fallback_clients = [self.client]
+                if self._local_fallback_client is not None:
+                    fallback_clients.append(self._local_fallback_client)
+                for fallback_client in fallback_clients:
+                    for fallback_model in fallback_models:
+                        try:
+                            if fallback_client is self._local_fallback_client:
+                                return self._try_local_chat_fallback(
+                                    model=fallback_model,
+                                    messages=messages,
+                                    stream=stream,
+                                    format=format,
+                                    **kwargs,
+                                )
+                            return fallback_client.chat(
+                                model=fallback_model,
+                                messages=messages,
+                                stream=stream,
+                                format=format,
+                                **kwargs,
+                            )
+                        except Exception as fallback_err:
+                            last_error = fallback_err
+                            if self._is_model_missing_error(fallback_err):
+                                logger.warning(
+                                    "Ollama fallback model '%s' not found on current client; pulling and retrying",
+                                    fallback_model,
+                                )
+                                try:
+                                    self._ensure_model_available_on_client(
+                                        fallback_client, fallback_model
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to pull Ollama fallback model '%s'",
+                                        fallback_model,
+                                    )
+                                    continue
+                                try:
+                                    if fallback_client is self._local_fallback_client:
+                                        return self._try_local_chat_fallback(
+                                            model=fallback_model,
+                                            messages=messages,
+                                            stream=stream,
+                                            format=format,
+                                            **kwargs,
+                                        )
+                                    return fallback_client.chat(
+                                        model=fallback_model,
+                                        messages=messages,
+                                        stream=stream,
+                                        format=format,
+                                        **kwargs,
+                                    )
+                                except Exception as retry_err:
+                                    last_error = retry_err
+                                    logger.exception(
+                                        "Retry after pulling Ollama fallback model '%s' failed",
+                                        fallback_model,
+                                    )
+                                    continue
+                            logger.exception(
+                                "Ollama fallback model '%s' failed after Gemini rate limit",
+                                fallback_model,
+                            )
+                            continue
+                logger.exception("Ollama fallback failed after Gemini rate limit")
+                if last_error is not None:
+                    raise last_error
+                raise
             raise
         data = response.json()
         text = self._extract_gemini_text(data)
@@ -383,6 +453,14 @@ class OllamaClientService:
             self.client.pull(model=model, stream=False)
             self._ensured_models.add(model)
 
+    def _ensure_model_available_on_client(self, client: Client, model: str) -> None:
+        if client is self.client:
+            self._ensure_model_available(model)
+            return
+        local_model = self._normalize_local_fallback_model(model)
+        logger.info("Model '%s' not found on fallback client. Pulling via Ollama.", local_model)
+        client.pull(model=local_model, stream=False)
+
     def _normalize_local_fallback_model(self, model: str) -> str:
         value = (model or "").strip()
         if value.endswith("-cloud"):
@@ -402,13 +480,26 @@ class OllamaClientService:
             raise RuntimeError("local fallback client is not available")
         local_model = self._normalize_local_fallback_model(model)
         logger.warning("Falling back to local Ollama model '%s' after remote failure", local_model)
-        return self._local_fallback_client.chat(
-            model=local_model,
-            messages=messages,
-            stream=stream,
-            format=format,
-            **kwargs,
-        )
+        try:
+            return self._local_fallback_client.chat(
+                model=local_model,
+                messages=messages,
+                stream=stream,
+                format=format,
+                **kwargs,
+            )
+        except Exception as err:
+            if self._is_model_missing_error(err):
+                logger.info("Local fallback model '%s' not found. Pulling via Ollama.", local_model)
+                self._local_fallback_client.pull(model=local_model, stream=False)
+                return self._local_fallback_client.chat(
+                    model=local_model,
+                    messages=messages,
+                    stream=stream,
+                    format=format,
+                    **kwargs,
+                )
+            raise
 
     def _chat_with_auto_pull(
         self,

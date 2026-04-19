@@ -240,7 +240,8 @@ flowchart TD
 - `send_event_log()` はボット由来の操作ログに限定し、`source_channel_id` が統一ログチャンネルと一致する場合は送信しない
 - 通常メッセージ由来の反応や監査ログは統一ログへ流さず、必要なものだけ `send_event_log()` 経由で通知する
 - 外部依存の失敗は、可能であればフォールバックする
-- Gemini の `generateContent` が 429 / クォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` か既定の Ollama モデルへ切り替える
+- Gemini の `generateContent` が 429 / クォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` と `ollama.model_chat` / `ollama.model_summary` を順に試して Ollama へ切り替える
+- チャンネル固有の説明は `data/channel_rag/<channel_id>/chat_rag.md` に保存し、会話応答のローカル知識として参照する
 
 ## 10. ディレクトリ方針
 
@@ -256,6 +257,7 @@ flowchart TD
 - `src/` は将来の整理先として残し、移行する場合は段階的に行う
 - 既存コードは無理に一括移行せず、変更対象に近い単位で段階移行する
 - import パス、起動スクリプト、テスト手順を壊さないことを優先する
+- チャンネル知識は `data/channel_rag/<channel_id>/chat_rag.md` を直接編集して追加する
 
 ### 10.3 想定移行イメージ
 

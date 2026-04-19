@@ -370,13 +370,23 @@ class MessageLogger(BaseCog):
         def get_local_knowledge(
             query: str = "", limit: int = 4, capability_only: bool = False
         ) -> str:
-            """Get relevant bot-local documentation from README and custom RAG files."""
+            """Get relevant bot-local and channel-specific documentation from RAG files."""
             lookup = (query or text or "").strip()
             if not lookup:
                 lookup = text
             return self._get_local_knowledge(
-                lookup, limit=limit, capability_only=capability_only, max_chars=2200
+                lookup,
+                limit=limit,
+                capability_only=capability_only,
+                max_chars=2200,
+                channel_id=channel_id,
             )
+
+        channel_profile_block = self._build_channel_profile_block(
+            channel_id=channel_id,
+            limit=4,
+            max_chars=1800,
+        )
 
         planner_messages = [
             {
@@ -392,10 +402,13 @@ class MessageLogger(BaseCog):
                     "Use get_semantic_history only when topical similarity matters more than strict recency.\n"
                     "Avoid get_semantic_history for very short replies such as numbers, yes/no, which one, this/that, or direct answers to the bot's previous message.\n"
                     "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
+                    "Use get_local_knowledge when the user asks about channel rules, channel FAQ, channel procedures, or any channel-specific knowledge that has been added to RAG.\n"
                     "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
                     "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
                     "Use _get_runtime_model_info when the user asks which model is currently configured or being used.\n"
                     "Use _search_vrchat_world when the user wants VRChat world search results.\n"
+                    "When a channel profile is available, treat it as the authoritative description of that channel.\n"
+                    "Do not let older generic replies override the channel profile.\n"
                     "You may call multiple tools if needed. If the message is self-contained, call no tools."
                 ),
             },
@@ -412,6 +425,10 @@ class MessageLogger(BaseCog):
                 ),
             },
         ]
+        if channel_profile_block:
+            planner_messages[0]["content"] = (
+                f"{channel_profile_block}\n\n" + str(planner_messages[0]["content"])
+            )
 
         blocks: list[tuple[str, str]] = []
         try:
@@ -582,6 +599,9 @@ class MessageLogger(BaseCog):
                 body = self._vector_store.format_results(rows)
                 if body:
                     blocks.append(("このチャンネルの意味的に近い過去発言", body))
+
+        if channel_profile_block:
+            blocks.insert(0, ("このチャンネルの正式プロフィール", channel_profile_block))
 
         return self._build_history_context(blocks)
 
@@ -965,6 +985,51 @@ class MessageLogger(BaseCog):
         blocks = [f"[{item.label}]\n{item.body}" for item in contexts]
         return "\n\n".join(blocks)
 
+    def _get_channel_knowledge(
+        self,
+        *,
+        channel_id: int | None,
+        limit: int = 4,
+        max_chars: int = 1200,
+    ) -> str:
+        if not channel_id:
+            return ""
+        chunks = self._local_rag.retrieve(
+            "",
+            limit=max(1, min(int(limit or 4), 6)),
+            channel_id=channel_id,
+            channel_only=True,
+        )
+        blocks: list[str] = []
+        for chunk in chunks:
+            body = chunk.body.strip()
+            if max_chars > 0 and len(body) > max_chars:
+                body = body[:max_chars] + "\n...(省略)..."
+            blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
+        return "\n\n".join(blocks)
+
+    def _build_channel_profile_block(
+        self,
+        *,
+        channel_id: int | None,
+        limit: int = 4,
+        max_chars: int = 1800,
+    ) -> str:
+        knowledge = self._get_channel_knowledge(
+            channel_id=channel_id,
+            limit=limit,
+            max_chars=max_chars,
+        )
+        if not knowledge:
+            return ""
+        return (
+            "[このチャンネルの正式プロフィール]\n"
+            "以下はこのチャンネルの前提です。一般テンプレート、古い assistant 発言、"
+            "推測よりも優先して扱ってください。\n"
+            "この内容と矛盾する場合は、こちらを正としてください。\n\n"
+            f"{knowledge}"
+        )
+
     def _get_local_knowledge(
         self,
         query: str,
@@ -972,13 +1037,17 @@ class MessageLogger(BaseCog):
         *,
         capability_only: bool = False,
         max_chars: int = 1200,
+        channel_id: int | None = None,
     ) -> str:
         query = (query or "").strip()
         if not query:
             return ""
         limit = max(1, min(int(limit or 4), 6))
         chunks = self._local_rag.retrieve(
-            query, limit=limit, capability_only=capability_only
+            query,
+            limit=limit,
+            capability_only=capability_only,
+            channel_id=channel_id,
         )
         blocks: list[str] = []
         for chunk in chunks:
@@ -1055,7 +1124,12 @@ class MessageLogger(BaseCog):
             return
 
         if self._is_capability_query(text):
-            await self._answer_capability_query(msg.channel, text, source_msg=msg)
+            await self._answer_capability_query(
+                msg.channel,
+                text,
+                source_msg=msg,
+                channel_id=msg.channel.id,
+            )
             return
 
         if self._is_ai_channel_rate_limited(msg.channel.id):
@@ -1506,11 +1580,22 @@ class MessageLogger(BaseCog):
         *,
         capability_only: bool = False,
         body_limit: int | None = 1200,
+        channel_id: int | None = None,
     ) -> str:
+        channel_knowledge = self._get_channel_knowledge(
+            channel_id=channel_id,
+            limit=4,
+            max_chars=body_limit or 1200,
+        )
         chunks = self._local_rag.retrieve(
-            query, limit=limit, capability_only=capability_only
+            query,
+            limit=limit,
+            capability_only=capability_only,
+            channel_id=channel_id,
         )
         blocks: list[str] = []
+        if channel_knowledge:
+            blocks.append(f"[このチャンネルの固定メモ]\n{channel_knowledge}")
         for chunk in chunks:
             body = chunk.body.strip()
             if body_limit is not None and len(body) > body_limit:
@@ -1553,8 +1638,10 @@ class MessageLogger(BaseCog):
         query: str,
         mention: str | None = None,
         source_msg: discord.Message | None = None,
+        *,
+        channel_id: int | None = None,
     ) -> None:
-        channel_id = getattr(channel, "id", 0)
+        channel_id = int(channel_id or getattr(channel, "id", 0))
         if self._is_ai_channel_rate_limited(channel_id):
             prefix = f"{mention}\n" if mention else ""
             await channel.send(
@@ -1572,6 +1659,11 @@ class MessageLogger(BaseCog):
             return
 
         normalized_query = (query or "").replace("きのう", "機能")
+        channel_profile_block = self._build_channel_profile_block(
+            channel_id=channel_id,
+            limit=4,
+            max_chars=1800,
+        )
         rag_context = "\n\n".join(
             block
             for block in [
@@ -1581,12 +1673,14 @@ class MessageLogger(BaseCog):
                     limit=12,
                     capability_only=True,
                     body_limit=None,
+                    channel_id=channel_id,
                 ),
                 self._build_rag_context(
                     normalized_query,
                     limit=6,
                     capability_only=False,
                     body_limit=None,
+                    channel_id=channel_id,
                 ),
             ]
             if block
@@ -1597,6 +1691,7 @@ class MessageLogger(BaseCog):
             else ""
         )
         prompt = get_prompt("chat", "capability_prompt").format(
+            channel_profile_block=channel_profile_block,
             query=normalized_query,
             rag_context=rag_context,
             updates_block=(f"[最新更新(git log)]\n{updates}\n" if updates else ""),
@@ -1981,6 +2076,7 @@ class MessageLogger(BaseCog):
                 text,
                 mention=msg.author.mention,
                 source_msg=msg,
+                channel_id=msg.channel.id,
             )
             await self.bot.process_commands(msg)
             return
@@ -2070,6 +2166,11 @@ class MessageLogger(BaseCog):
         requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+        channel_profile_block = self._build_channel_profile_block(
+            channel_id=msg.channel.id,
+            limit=4,
+            max_chars=1800,
+        )
         ticket = await self.bot.ai_progress_tracker.create_ticket()
 
         try:
@@ -2110,6 +2211,7 @@ class MessageLogger(BaseCog):
                                 "role": "system",
                                 "content": get_prompt("chat", "system_message").format(
                                     absolute_date=absolute_date,
+                                    channel_profile_block=channel_profile_block,
                                 ),
                             },
                             {

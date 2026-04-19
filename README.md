@@ -66,7 +66,7 @@ docker compose up -d --build
 
 利用可能なモデル一覧は `/model_list`、切替は `/model_change` で確認・変更できます。
 Gemini の API キーを設定している場合は、`gemini-2.5-flash` などの Gemini モデルも `/model_change` で選べます。
-Gemini 側が `429` やクォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` か既定の `gpt-oss:120b` にフォールバックします。
+Gemini 側が `429` やクォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` と `ollama.model_chat` / `ollama.model_summary` などの Ollama 設定を順に試してフォールバックします。
 
 ### 1. 前提条件
 - Python 3.13+
@@ -109,7 +109,7 @@ GEMINI_API_KEY=your_gemini_api_key
 # GOOGLE_API_KEY=your_google_api_key
 
 # Gemini のレート制限時に落とす Ollama モデル
-OLLAMA_FALLBACK_MODEL=gpt-oss:120b
+OLLAMA_FALLBACK_MODEL=mistral-large-3:675b-cloud  # 例
 
 # ローカル Ollama で semantic memory を使う場合
 # OLLAMA_HOST=http://127.0.0.1:11434
@@ -200,6 +200,7 @@ Bot にメンション or リプライすると自動応答：
 - ✅ 時刻付き履歴を含める（「xx時にこんなこと言ってた」を記憶）
 - ✅ 同じサーバー内でユーザー ID で個人を識別
 - ✅ README や `knowledge/chat_rag.md/json/toml` の内容を参照して Bot 自身の仕様説明に回答可能
+- ✅ チャンネル固有の説明文を `data/channel_rag/<channel_id>/chat_rag.md` に蓄積して会話応答へ反映可能
 - ✅ web search が使える構成では最新情報を検索して回答可能
 - ✅ DM でも同様に会話可能
 
@@ -253,13 +254,25 @@ Bot にメンション or リプライすると自動応答：
 
 ### 追加 RAG ファイル
 
-Bot 固有の説明、サーバー運用メモ、FAQ を別ファイルで持たせたい場合は次を使えます。
+Bot 固有の説明、チャンネル運用メモを別ファイルで持たせたい場合は次を使えます。
 
 - `knowledge/chat_rag.md`
 - `knowledge/chat_rag.json`
 - `knowledge/chat_rag.toml`
+- `data/channel_rag/<channel_id>/chat_rag.md`
 
 まずは `knowledge/chat_rag.md` を使うのが一番簡単です。README と同様に会話中のローカル知識として参照されます。
+チャンネル固有の説明をそのまま書くなら `data/channel_rag/<channel_id>/chat_rag.md` が向いています。
+
+### 旧データの移行
+
+古い `data/server_rag/` が残っている場合は、次のスクリプトで `data/channel_rag/` に写せます。
+
+```bash
+python bin/migrate_channel_rag.py
+```
+
+この移行はファイル構造をそのままコピーします。実際のチャンネル ID に合わせた整理は、必要なら `data/channel_rag/<channel_id>/` を手で調整してください。
 
 ### semantic memory の再インデックス
 
@@ -386,7 +399,7 @@ Error: model 'tinyllama' not found
 **解決：**
 ```bash
 # モデルをインストール
-ollama pull gpt-oss:120b
+ollama pull mistral-large-3:675b-cloud  # 例
 
 # config/bot_settings.yaml で正しいモデル名を設定
 # 例: global.ollama.model_default: gemini-2.5-flash

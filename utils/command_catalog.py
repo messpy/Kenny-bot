@@ -38,6 +38,14 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
         ),
     ),
     HelpSection(
+        title="チャンネル知識",
+        lines=(
+            "- チャンネル固有のQ&Aを `data/channel_rag/<channel_id>/faq.json` に蓄積可能",
+            "- 追加したQ&Aはそのチャンネルのメンション応答や機能説明の文脈で参照される",
+            "- 直接ファイルを編集して管理する",
+        ),
+    ),
+    HelpSection(
         title="議事録機能",
         lines=(
             "- VC参加者が `/minutes_start` で開始",
@@ -68,6 +76,7 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
 COMMAND_CATEGORY_ORDER: tuple[str, ...] = (
     "基本",
     "要約・設定",
+    "ナレッジ",
     "議事録",
     "ロール",
     "読み上げ",
