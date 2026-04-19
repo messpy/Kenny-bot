@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from utils.paths import KNOWLEDGE_DIR, SERVER_RAG_DIR
+from utils.paths import CHANNEL_RAG_DIR, KNOWLEDGE_DIR
 
 
 @dataclass
@@ -205,28 +205,26 @@ class LocalRAG:
                 paths.append(knowledge_path)
         return paths
 
-    def _guild_extra_paths(self, guild_id: int | None) -> list[Path]:
-        if not guild_id:
+    def _channel_extra_paths(self, channel_id: int | None) -> list[Path]:
+        if not channel_id:
             return []
         paths: list[Path] = []
-        global_root = self.root / SERVER_RAG_DIR / str(guild_id)
-        legacy_root = self.root / KNOWLEDGE_DIR / "guilds" / str(guild_id)
-        for root in (global_root, legacy_root):
-            for name in ("faq.json", "faq.md", "chat_rag.md", "chat_rag.json", "chat_rag.toml"):
-                path = root / name
-                if path.exists():
-                    paths.append(path)
+        channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
+        for name in ("faq.json", "faq.md", "chat_rag.md", "chat_rag.json", "chat_rag.toml"):
+            path = channel_root / name
+            if path.exists():
+                paths.append(path)
         return paths
 
     def _load_chunks(
         self,
         *,
         capability_only: bool = False,
-        guild_id: int | None = None,
-        guild_only: bool = False,
+        channel_id: int | None = None,
+        channel_only: bool = False,
     ) -> list[RagChunk]:
-        chunks = [] if guild_only else _static_chunks()
-        if not guild_only:
+        chunks = [] if channel_only else _static_chunks()
+        if not channel_only:
             readme = self.root / "README.md"
             if readme.exists():
                 try:
@@ -236,7 +234,7 @@ class LocalRAG:
                     chunks.extend(readme_chunks)
                 except Exception:
                     pass
-        for path in self._guild_extra_paths(guild_id):
+        for path in self._channel_extra_paths(channel_id):
             if not path.exists():
                 continue
             try:
@@ -245,15 +243,16 @@ class LocalRAG:
                     chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
             except Exception:
                 pass
-        for path in self._global_extra_paths:
-            if not path.exists():
-                continue
-            try:
-                extra_chunks = _load_extra_rag_file(path)
-                for chunk in extra_chunks:
-                    chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
-            except Exception:
-                pass
+        if not channel_only:
+            for path in self._global_extra_paths:
+                if not path.exists():
+                    continue
+                try:
+                    extra_chunks = _load_extra_rag_file(path)
+                    for chunk in extra_chunks:
+                        chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
+                except Exception:
+                    pass
         return chunks
 
     def retrieve(
@@ -262,14 +261,14 @@ class LocalRAG:
         limit: int = 4,
         *,
         capability_only: bool = False,
-        guild_id: int | None = None,
-        guild_only: bool = False,
+        channel_id: int | None = None,
+        channel_only: bool = False,
     ) -> list[RagChunk]:
         tokens = set(_tokenize(query))
         chunks = self._load_chunks(
             capability_only=capability_only,
-            guild_id=guild_id,
-            guild_only=guild_only,
+            channel_id=channel_id,
+            channel_only=channel_only,
         )
         if not tokens:
             return chunks[:limit]
@@ -292,10 +291,10 @@ class LocalRAG:
             return top
         return chunks[:limit]
 
-    def append_guild_qa(
+    def append_channel_qa(
         self,
         *,
-        guild_id: int,
+        channel_id: int,
         question: str,
         answer: str,
         tags: list[str] | None = None,
@@ -308,9 +307,9 @@ class LocalRAG:
         if not answer:
             raise ValueError("answer is required")
 
-        guild_root = self.root / SERVER_RAG_DIR / str(guild_id)
-        guild_root.mkdir(parents=True, exist_ok=True)
-        faq_path = guild_root / "faq.json"
+        channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
+        channel_root.mkdir(parents=True, exist_ok=True)
+        faq_path = channel_root / "faq.json"
         entries: list[dict[str, object]] = []
         if faq_path.exists():
             try:
@@ -339,3 +338,11 @@ class LocalRAG:
             encoding="utf-8",
         )
         return faq_path
+
+    def append_guild_qa(self, **kwargs: object) -> Path:
+        channel_id = kwargs.pop("channel_id", None)
+        if channel_id is None:
+            channel_id = kwargs.pop("guild_id", None)
+        if channel_id is None:
+            raise TypeError("channel_id is required")
+        return self.append_channel_qa(channel_id=int(channel_id), **kwargs)  # type: ignore[arg-type]

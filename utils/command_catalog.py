@@ -38,10 +38,10 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
         ),
     ),
     HelpSection(
-        title="サーバー知識",
+        title="チャンネル知識",
         lines=(
-            "- サーバー固有のQ&AをRAGとして蓄積可能",
-            "- 追加したQ&Aはメンション応答や機能説明の文脈で参照される",
+            "- チャンネル固有のQ&AをRAGとして蓄積可能",
+            "- 追加したQ&Aはそのチャンネルのメンション応答や機能説明の文脈で参照される",
             "- `/server_qa_add` と `/server_qa_search` で管理できる",
         ),
     ),
@@ -126,12 +126,12 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
     ),
     "server_qa_add": SlashCommandMeta(
         name="server_qa_add",
-        description="このサーバー向けのQ&AをRAGに追加",
+        description="このチャンネル向けのQ&AをRAGに追加",
         category="ナレッジ",
     ),
     "server_qa_search": SlashCommandMeta(
         name="server_qa_search",
-        description="このサーバー向けRAGを検索",
+        description="このチャンネル向けRAGを検索",
         category="ナレッジ",
     ),
     "minutes_start": SlashCommandMeta(

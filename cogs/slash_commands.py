@@ -1083,25 +1083,26 @@ class SlashCommands(commands.Cog):
         answer: str,
         tags: str | None = None,
     ):
-        if interaction.guild is None:
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+        if interaction.channel is None:
+            await interaction.response.send_message("チャンネル内で実行してください。", ephemeral=True)
             return
         try:
             tag_list = [part.strip() for part in (tags or "").split(",") if part.strip()]
-            path = self._local_rag.append_guild_qa(
-                guild_id=interaction.guild.id,
+            path = self._local_rag.append_channel_qa(
+                channel_id=interaction.channel.id,
                 question=question,
                 answer=answer,
                 tags=tag_list,
                 metadata={
                     "author_id": getattr(interaction.user, "id", 0),
                     "author_name": str(interaction.user),
-                    "source": "server_qa_add",
+                    "source": "channel_qa_add",
+                    "channel_id": interaction.channel.id,
                     "created_at": discord.utils.utcnow().isoformat(),
                 },
             )
         except Exception as e:
-            logger.exception("Failed to add server QA")
+            logger.exception("Failed to add channel QA")
             await interaction.response.send_message(
                 f"登録に失敗しました: `{str(e)[:200]}`",
                 ephemeral=True,
@@ -1109,7 +1110,7 @@ class SlashCommands(commands.Cog):
             return
 
         await interaction.response.send_message(
-            f"このサーバーのRAGにQ&Aを追加しました。\n- 質問: {question}\n- 保存先: `{path}`",
+            f"このチャンネルのRAGにQ&Aを追加しました。\n- 質問: {question}\n- 保存先: `{path}`",
             ephemeral=True,
         )
 
@@ -1120,8 +1121,8 @@ class SlashCommands(commands.Cog):
         interaction: discord.Interaction,
         query: str,
     ):
-        if interaction.guild is None:
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+        if interaction.channel is None:
+            await interaction.response.send_message("チャンネル内で実行してください。", ephemeral=True)
             return
         query = query.strip()
         if not query:
@@ -1131,11 +1132,11 @@ class SlashCommands(commands.Cog):
             chunks = self._local_rag.retrieve(
                 query,
                 limit=4,
-                guild_id=interaction.guild.id,
-                guild_only=True,
+                channel_id=interaction.channel.id,
+                channel_only=True,
             )
         except Exception as e:
-            logger.exception("Failed to search server QA")
+            logger.exception("Failed to search channel QA")
             await interaction.response.send_message(
                 f"検索に失敗しました: `{str(e)[:200]}`",
                 ephemeral=True,
@@ -1143,7 +1144,7 @@ class SlashCommands(commands.Cog):
             return
 
         if not chunks:
-            await interaction.response.send_message("該当するサーバー知識が見つかりませんでした。", ephemeral=True)
+            await interaction.response.send_message("該当するチャンネル知識が見つかりませんでした。", ephemeral=True)
             return
 
         lines: list[str] = [f"**検索結果:** `{query}`"]
