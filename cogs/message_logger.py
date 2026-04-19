@@ -382,6 +382,15 @@ class MessageLogger(BaseCog):
                 channel_id=channel_id,
             )
 
+        channel_knowledge = self._get_channel_knowledge(
+            channel_id=channel_id,
+            limit=4,
+            max_chars=1800,
+        )
+        channel_knowledge_block = (
+            f"[このチャンネルの固定メモ]\n{channel_knowledge}" if channel_knowledge else ""
+        )
+
         planner_messages = [
             {
                 "role": "system",
@@ -417,6 +426,10 @@ class MessageLogger(BaseCog):
                 ),
             },
         ]
+        if channel_knowledge_block:
+            planner_messages[1]["content"] = (
+                f"{channel_knowledge_block}\n\n" + str(planner_messages[1]["content"])
+            )
 
         blocks: list[tuple[str, str]] = []
         try:
@@ -587,6 +600,9 @@ class MessageLogger(BaseCog):
                 body = self._vector_store.format_results(rows)
                 if body:
                     blocks.append(("このチャンネルの意味的に近い過去発言", body))
+
+        if channel_knowledge_block:
+            blocks.insert(0, ("このチャンネルの固定メモ", channel_knowledge_block))
 
         return self._build_history_context(blocks)
 
@@ -968,6 +984,29 @@ class MessageLogger(BaseCog):
         if not contexts:
             return ""
         blocks = [f"[{item.label}]\n{item.body}" for item in contexts]
+        return "\n\n".join(blocks)
+
+    def _get_channel_knowledge(
+        self,
+        *,
+        channel_id: int | None,
+        limit: int = 4,
+        max_chars: int = 1200,
+    ) -> str:
+        if not channel_id:
+            return ""
+        chunks = self._local_rag.retrieve(
+            "",
+            limit=max(1, min(int(limit or 4), 6)),
+            channel_id=channel_id,
+            channel_only=True,
+        )
+        blocks: list[str] = []
+        for chunk in chunks:
+            body = chunk.body.strip()
+            if max_chars > 0 and len(body) > max_chars:
+                body = body[:max_chars] + "\n...(省略)..."
+            blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
         return "\n\n".join(blocks)
 
     def _get_local_knowledge(
@@ -1522,6 +1561,11 @@ class MessageLogger(BaseCog):
         body_limit: int | None = 1200,
         channel_id: int | None = None,
     ) -> str:
+        channel_knowledge = self._get_channel_knowledge(
+            channel_id=channel_id,
+            limit=4,
+            max_chars=body_limit or 1200,
+        )
         chunks = self._local_rag.retrieve(
             query,
             limit=limit,
@@ -1529,6 +1573,8 @@ class MessageLogger(BaseCog):
             channel_id=channel_id,
         )
         blocks: list[str] = []
+        if channel_knowledge:
+            blocks.append(f"[このチャンネルの固定メモ]\n{channel_knowledge}")
         for chunk in chunks:
             body = chunk.body.strip()
             if body_limit is not None and len(body) > body_limit:
