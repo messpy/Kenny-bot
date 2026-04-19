@@ -1173,12 +1173,15 @@ class MessageLogger(BaseCog):
             prefix = f"{mention}\n" if mention else ""
             await self._send_chunked_text(channel, answer, prefix=prefix)
             if source_msg is not None:
-                await self._log_ai_output_event(
+                await self._log_bot_activity_event(
                     source_msg,
+                    kind="メンション",
+                    processing="場所説明",
                     output_text=answer,
                     input_text=query,
-                    title="AI サーバー説明応答",
+                    title="Bot 会話ログ",
                     description="サーバー・チャンネル・ワールドの説明に応答しました。",
+                    model_name=model_name,
                 )
         except Exception as e:
             prefix = f"{mention}\n" if mention else ""
@@ -1252,25 +1255,11 @@ class MessageLogger(BaseCog):
         return False
 
     async def _handle_dm_message(self, msg: discord.Message) -> None:
-        # DMアクティビティをイベントログに記録
         author_name = (
             msg.author.display_name
             if hasattr(msg.author, "display_name")
             else msg.author.name
         )
-        user_content = (msg.content or "").strip()
-        await send_event_log(
-            self.bot,
-            guild=None,
-            level="info",
-            title="DM 受信",
-            description=f"{msg.author.mention} からDMを受信しました",
-            fields=[
-                ("ユーザー", f"{author_name} ({msg.author.id})", False),
-                ("内容", user_content[:500] if user_content else "(empty)", False),
-            ],
-        )
-
         # 総合ログに記録
         log_user_message(msg)
 
@@ -1282,11 +1271,10 @@ class MessageLogger(BaseCog):
             self._cfg_int("security.max_user_message_chars", 1200),
         )
 
-        await self._log_ai_input_event(msg, text=text, title="DM AI 入力")
-
         if self._is_runtime_model_query(text):
             await self._send_runtime_model_reply(
                 msg.channel,
+                mention=msg.author.mention,
                 source_msg=msg,
                 input_text=text,
             )
@@ -1296,6 +1284,7 @@ class MessageLogger(BaseCog):
             await self._answer_capability_query(
                 msg.channel,
                 text,
+                mention=msg.author.mention,
                 source_msg=msg,
                 channel_id=msg.channel.id,
             )
@@ -1303,6 +1292,16 @@ class MessageLogger(BaseCog):
 
         if self._is_ai_channel_rate_limited(msg.channel.id):
             await msg.channel.send("少し待ってから送ってください。")
+            await self._log_bot_activity_event(
+                msg,
+                kind="DM",
+                processing="DM 会話",
+                input_text=text,
+                output_text="少し待ってから送ってください。",
+                level="warning",
+                title="Bot 会話ログ",
+                description="DM の応答を間隔制限で見送りました。",
+            )
             return
 
         store = MessageStore(
@@ -1396,12 +1395,15 @@ class MessageLogger(BaseCog):
                 msg=msg,
             )
 
-            await self._log_ai_output_event(
+            await self._log_bot_activity_event(
                 msg,
-                output_text=answer,
+                kind="DM",
+                processing="DM 会話",
                 input_text=text,
-                title="DM AI 応答成功",
-                description="DM の AI 応答を送信しました。",
+                output_text=answer,
+                model_name=model_name,
+                title="Bot 会話ログ",
+                description="DM の会話応答を送信しました。",
             )
         except Exception as e:
             logger.exception("DM AI response failed")
@@ -1415,13 +1417,16 @@ class MessageLogger(BaseCog):
                 error=str(e)[:200],
             )
 
-            await self._log_ai_output_event(
+            await self._log_bot_activity_event(
                 msg,
+                kind="DM",
+                processing="DM 会話",
                 level="error",
-                title="DM AI 応答失敗",
+                title="Bot 会話ログ",
                 description="DM の AI 応答処理中にエラーが発生しました。",
                 input_text=text,
                 error_text=str(e),
+                model_name=model_name,
             )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
@@ -1636,6 +1641,50 @@ class MessageLogger(BaseCog):
             return text
         return text[:limit] + "\n...(省略)..."
 
+    def _format_activity_location(self, msg: discord.Message) -> str:
+        if msg.guild is None:
+            return f"DM ({getattr(msg.channel, 'id', 0)})"
+        return f"{msg.guild.name} ({msg.guild.id}) / #{getattr(msg.channel, 'name', 'unknown')} ({getattr(msg.channel, 'id', 0)})"
+
+    async def _log_bot_activity_event(
+        self,
+        msg: discord.Message,
+        *,
+        kind: str,
+        processing: str,
+        input_text: str = "",
+        output_text: str = "",
+        level: str = "info",
+        title: str = "Bot 会話ログ",
+        description: str = "Bot 関連の会話処理を記録しました。",
+        error_text: str = "",
+        model_name: str = "",
+    ) -> None:
+        fields: list[tuple[str, str, bool]] = [
+            ("種別", kind, True),
+            ("送信者", f"{msg.author} ({msg.author.id})", False),
+            ("場所", self._format_activity_location(msg), False),
+            ("メッセージID", str(msg.id), True),
+            ("処理", self._truncate_event_text(processing), False),
+        ]
+        if input_text:
+            fields.append(("入力", self._truncate_event_text(input_text), False))
+        if output_text:
+            fields.append(("返信", self._truncate_event_text(output_text), False))
+        if model_name:
+            fields.append(("モデル", self._truncate_event_text(model_name), True))
+        if error_text:
+            fields.append(("エラー", self._truncate_event_text(error_text), False))
+        await send_event_log(
+            self.bot,
+            guild=msg.guild,
+            level=level,
+            title=title,
+            description=description,
+            fields=fields,
+            source_channel_id=getattr(msg.channel, "id", None),
+        )
+
     async def _log_ai_input_event(
         self,
         msg: discord.Message,
@@ -1712,12 +1761,15 @@ class MessageLogger(BaseCog):
             prefix=prefix,
         )
         if source_msg is not None:
-            await self._log_ai_output_event(
+            await self._log_bot_activity_event(
                 source_msg,
-                output_text=answer,
+                kind="メンション",
+                processing="モデル確認",
                 input_text=input_text,
-                title="AI 応答",
+                output_text=answer,
+                title="Bot 会話ログ",
                 description="モデル問い合わせへ応答しました。",
+                model_name=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
             )
 
     def _search_vrchat_world(
@@ -1892,12 +1944,15 @@ class MessageLogger(BaseCog):
             prefix = f"{mention}\n" if mention else ""
             await self._send_chunked_text(channel, answer, prefix=prefix)
             if source_msg is not None:
-                await self._log_ai_output_event(
+                await self._log_bot_activity_event(
                     source_msg,
-                    output_text=answer,
+                    kind="メンション",
+                    processing="機能説明",
                     input_text=query,
-                    title="AI 機能説明応答",
+                    output_text=answer,
+                    title="Bot 会話ログ",
                     description="Bot の機能説明または更新情報へ応答しました。",
+                    model_name=model_name,
                 )
         except Exception as e:
             prefix = f"{mention}\n" if mention else ""
@@ -1929,13 +1984,16 @@ class MessageLogger(BaseCog):
                     f"{prefix}機能説明の生成に失敗しました。\n```{str(e)[:180]}```"
                 )
             if source_msg is not None:
-                await self._log_ai_output_event(
+                await self._log_bot_activity_event(
                     source_msg,
+                    kind="メンション",
+                    processing="機能説明",
                     level="error",
-                    title="AI 機能説明応答失敗",
+                    title="Bot 会話ログ",
                     description="Bot の機能説明または更新情報の応答に失敗しました。",
                     input_text=query,
                     error_text=str(e),
+                    model_name=model_name,
                 )
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
@@ -2170,8 +2228,6 @@ class MessageLogger(BaseCog):
             self._cfg_int("security.max_user_message_chars", 1200),
         )
 
-        await self._log_ai_input_event(msg, text=text)
-
         lowered = text.lower()
         start_words = ("議事録開始", "議事録スタート", "minutes start", "start minutes")
         stop_words = ("議事録停止", "議事録終了", "minutes stop", "stop minutes")
@@ -2207,6 +2263,15 @@ class MessageLogger(BaseCog):
                 else None,
             )
             await msg.channel.send(f"{msg.author.mention}\n{info}")
+            await self._log_bot_activity_event(
+                msg,
+                kind="メンション",
+                processing="議事録開始",
+                input_text=text,
+                output_text=info,
+                title="Bot 会話ログ",
+                description="議事録開始を実行しました。",
+            )
             await self.bot.process_commands(msg)
             return
 
@@ -2222,11 +2287,29 @@ class MessageLogger(BaseCog):
                 await msg.channel.send(
                     f"{msg.author.mention}\n現在、進行中の議事録はありません。"
                 )
+                await self._log_bot_activity_event(
+                    msg,
+                    kind="メンション",
+                    processing="議事録停止",
+                    input_text=text,
+                    output_text="現在、進行中の議事録はありません。",
+                    title="Bot 会話ログ",
+                    description="進行中の議事録がなかったため停止できませんでした。",
+                )
                 await self.bot.process_commands(msg)
                 return
 
             embed = self.bot.meeting_minutes.build_result_embed(msg.guild, result)  # type: ignore[attr-defined]
             await msg.channel.send(content=msg.author.mention, embed=embed)
+            await self._log_bot_activity_event(
+                msg,
+                kind="メンション",
+                processing="議事録停止",
+                input_text=text,
+                output_text="議事録を停止しました。",
+                title="Bot 会話ログ",
+                description="議事録停止を実行しました。",
+            )
             await self.bot.process_commands(msg)
             return
 
@@ -2456,23 +2539,29 @@ class MessageLogger(BaseCog):
                 await msg.channel.send(
                     final_message, allowed_mentions=discord.AllowedMentions.none()
                 )
-            await self._log_ai_output_event(
+            await self._log_bot_activity_event(
                 msg,
-                output_text=answer,
+                kind="メンション",
+                processing="通常会話",
                 input_text=text,
-                title="AI 応答成功",
+                output_text=answer,
+                model_name=model_name,
+                title="Bot 会話ログ",
                 description="メンションまたはリプライへの AI 応答を送信しました。",
             )
 
         except Exception as e:
             logger.exception("AI response failed")
-            await self._log_ai_output_event(
+            await self._log_bot_activity_event(
                 msg,
+                kind="メンション",
+                processing="通常会話",
                 level="error",
-                title="AI 応答失敗",
+                title="Bot 会話ログ",
                 description="メンションまたはリプライへの AI 応答に失敗しました。",
                 input_text=text,
                 error_text=str(e),
+                model_name=model_name,
             )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
@@ -2489,22 +2578,7 @@ class MessageLogger(BaseCog):
                         model=model_name,
                     )
                 )
-                await self.bot.process_commands(msg)
                 return
-            error_msg = str(e)
-
-            # エラーメッセージを詳しく表示
-            if "401" in error_msg or "unauthorized" in error_msg.lower():
-                detail = "Ollama 認証エラー: API キー設定を確認してください。"
-            elif "prompt:latest" in str(e):
-                detail = "モデル「prompt:latest」が見つかりません。ollama list で確認してください。"
-            else:
-                detail = f"詳細: {error_msg[:100]}"
-
-            await msg.channel.send(
-                f"{msg.author.mention}\n内部エラーが発生しました。\n```\n{detail}\n```",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 

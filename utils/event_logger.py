@@ -79,8 +79,6 @@ async def send_event_log(
     footer: str | None = None,
     source_channel_id: int | None = None,
 ) -> discord.Message | None:
-    if source_channel_id is None:
-        return None
     channel = await resolve_event_log_channel(bot, guild)
     if channel is None:
         return None

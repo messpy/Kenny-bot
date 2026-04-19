@@ -87,6 +87,7 @@ class AuditLogger(commands.Cog):
                 ("チャンネル", _fmt_channel(interaction.channel) if isinstance(interaction.channel, discord.abc.GuildChannel) else str(getattr(interaction.channel, 'id', 'DM')), False),
                 ("オプション", option_text or "[]", False),
             ],
+            source_channel_id=interaction.channel_id,
         )
 
     @commands.Cog.listener()
