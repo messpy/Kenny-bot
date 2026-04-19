@@ -382,13 +382,10 @@ class MessageLogger(BaseCog):
                 channel_id=channel_id,
             )
 
-        channel_knowledge = self._get_channel_knowledge(
+        channel_profile_block = self._build_channel_profile_block(
             channel_id=channel_id,
             limit=4,
             max_chars=1800,
-        )
-        channel_knowledge_block = (
-            f"[このチャンネルの固定メモ]\n{channel_knowledge}" if channel_knowledge else ""
         )
 
         planner_messages = [
@@ -410,6 +407,8 @@ class MessageLogger(BaseCog):
                     "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
                     "Use _get_runtime_model_info when the user asks which model is currently configured or being used.\n"
                     "Use _search_vrchat_world when the user wants VRChat world search results.\n"
+                    "When a channel profile is available, treat it as the authoritative description of that channel.\n"
+                    "Do not let older generic replies override the channel profile.\n"
                     "You may call multiple tools if needed. If the message is self-contained, call no tools."
                 ),
             },
@@ -426,9 +425,9 @@ class MessageLogger(BaseCog):
                 ),
             },
         ]
-        if channel_knowledge_block:
-            planner_messages[1]["content"] = (
-                f"{channel_knowledge_block}\n\n" + str(planner_messages[1]["content"])
+        if channel_profile_block:
+            planner_messages[0]["content"] = (
+                f"{channel_profile_block}\n\n" + str(planner_messages[0]["content"])
             )
 
         blocks: list[tuple[str, str]] = []
@@ -601,8 +600,8 @@ class MessageLogger(BaseCog):
                 if body:
                     blocks.append(("このチャンネルの意味的に近い過去発言", body))
 
-        if channel_knowledge_block:
-            blocks.insert(0, ("このチャンネルの固定メモ", channel_knowledge_block))
+        if channel_profile_block:
+            blocks.insert(0, ("このチャンネルの正式プロフィール", channel_profile_block))
 
         return self._build_history_context(blocks)
 
@@ -1008,6 +1007,28 @@ class MessageLogger(BaseCog):
                 body = body[:max_chars] + "\n...(省略)..."
             blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
         return "\n\n".join(blocks)
+
+    def _build_channel_profile_block(
+        self,
+        *,
+        channel_id: int | None,
+        limit: int = 4,
+        max_chars: int = 1800,
+    ) -> str:
+        knowledge = self._get_channel_knowledge(
+            channel_id=channel_id,
+            limit=limit,
+            max_chars=max_chars,
+        )
+        if not knowledge:
+            return ""
+        return (
+            "[このチャンネルの正式プロフィール]\n"
+            "以下はこのチャンネルの前提です。一般テンプレート、古い assistant 発言、"
+            "推測よりも優先して扱ってください。\n"
+            "この内容と矛盾する場合は、こちらを正としてください。\n\n"
+            f"{knowledge}"
+        )
 
     def _get_local_knowledge(
         self,
@@ -1638,6 +1659,11 @@ class MessageLogger(BaseCog):
             return
 
         normalized_query = (query or "").replace("きのう", "機能")
+        channel_profile_block = self._build_channel_profile_block(
+            channel_id=channel_id,
+            limit=4,
+            max_chars=1800,
+        )
         rag_context = "\n\n".join(
             block
             for block in [
@@ -1665,6 +1691,7 @@ class MessageLogger(BaseCog):
             else ""
         )
         prompt = get_prompt("chat", "capability_prompt").format(
+            channel_profile_block=channel_profile_block,
             query=normalized_query,
             rag_context=rag_context,
             updates_block=(f"[最新更新(git log)]\n{updates}\n" if updates else ""),
@@ -2139,6 +2166,11 @@ class MessageLogger(BaseCog):
         requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+        channel_profile_block = self._build_channel_profile_block(
+            channel_id=msg.channel.id,
+            limit=4,
+            max_chars=1800,
+        )
         ticket = await self.bot.ai_progress_tracker.create_ticket()
 
         try:
@@ -2179,6 +2211,7 @@ class MessageLogger(BaseCog):
                                 "role": "system",
                                 "content": get_prompt("chat", "system_message").format(
                                     absolute_date=absolute_date,
+                                    channel_profile_block=channel_profile_block,
                                 ),
                             },
                             {
