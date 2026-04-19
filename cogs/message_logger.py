@@ -909,6 +909,43 @@ class MessageLogger(BaseCog):
         )
         return any(k in t for k in keys)
 
+    def _is_channel_profile_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        capability_terms = (
+            "機能",
+            "コマンド",
+            "できること",
+            "使い方",
+            "help",
+            "ゲーム",
+            "更新",
+            "変更点",
+            "アップデート",
+        )
+        if any(term in normalized for term in capability_terms):
+            return False
+        profile_terms = (
+            "サーバー",
+            "チャンネル",
+            "ワールド",
+            "このサーバー",
+            "このチャンネル",
+            "このワールド",
+            "ここ",
+            "この場所",
+            "何のやつ",
+            "なんのやつ",
+            "何する",
+            "何をする",
+            "どんな場所",
+            "用途",
+            "目的",
+            "概要",
+            "説明",
+            "何の場",
+        )
+        return any(term in normalized for term in profile_terms)
+
     def _is_runtime_model_query(self, text: str) -> bool:
         normalized = normalize_keyword_match_text(text or "")
         model_keys = tuple(
@@ -1029,6 +1066,95 @@ class MessageLogger(BaseCog):
             "この内容と矛盾する場合は、こちらを正としてください。\n\n"
             f"{knowledge}"
         )
+
+    async def _answer_channel_profile_query(
+        self,
+        channel: discord.abc.Messageable,
+        query: str,
+        mention: str | None = None,
+        source_msg: discord.Message | None = None,
+        *,
+        channel_id: int | None = None,
+    ) -> None:
+        channel_id = int(channel_id or getattr(channel, "id", 0))
+        if self._is_ai_channel_rate_limited(channel_id):
+            prefix = f"{mention}\n" if mention else ""
+            await channel.send(
+                f"{prefix}このチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。"
+            )
+            return
+
+        channel_profile_block = self._build_channel_profile_block(
+            channel_id=channel_id,
+            limit=6,
+            max_chars=2600,
+        )
+        if not channel_profile_block:
+            prefix = f"{mention}\n" if mention else ""
+            await channel.send(
+                f"{prefix}この場所の説明はまだ登録されていません。"
+            )
+            return
+
+        progress_key = f"ai-progress:{channel_id}:profile:{mention or 'anon'}"
+        ticket = await self.bot.ai_progress_tracker.create_ticket()
+        prompt = get_prompt("chat", "channel_profile_prompt").format(
+            query=query,
+            channel_profile_block=channel_profile_block,
+        )
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+
+        try:
+            await self._ai_progress_countdowns.start_countup(
+                key=progress_key,
+                channel=channel,
+                mention_user_id=0,
+                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed
+                ),
+            )
+            await self.bot.ai_progress_tracker.acquire(ticket)
+            try:
+                async with channel.typing():
+                    answer = await self._run_ollama_text(
+                        model=model_name,
+                        prompt=prompt,
+                    )
+            finally:
+                await self.bot.ai_progress_tracker.release(ticket)
+
+            answer = (
+                strip_ansi_and_ctrl((answer or "").strip())
+                or "この場所の説明を作れませんでした。"
+            )
+            prefix = f"{mention}\n" if mention else ""
+            await self._send_chunked_text(channel, answer, prefix=prefix)
+            if source_msg is not None:
+                await self._log_ai_output_event(
+                    source_msg,
+                    output_text=answer,
+                    input_text=query,
+                    title="AI サーバー説明応答",
+                    description="サーバー・チャンネル・ワールドの説明に応答しました。",
+                )
+        except Exception as e:
+            prefix = f"{mention}\n" if mention else ""
+            await send_event_log(
+                self.bot,
+                level="error",
+                title="サーバー説明生成失敗",
+                description="サーバー・チャンネル・ワールドの説明生成に失敗しました。",
+                fields=[
+                    ("チャンネル", str(channel_id), True),
+                    ("クエリ", query[:1000], False),
+                    ("エラー", str(e)[:1000], False),
+                ],
+            )
+            await channel.send(
+                f"{prefix}サーバー説明の生成に失敗しました。\n```{str(e)[:180]}```"
+            )
+        finally:
+            await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 
     def _get_local_knowledge(
         self,
@@ -2066,6 +2192,17 @@ class MessageLogger(BaseCog):
                 mention=msg.author.mention,
                 source_msg=msg,
                 input_text=text,
+            )
+            await self.bot.process_commands(msg)
+            return
+
+        if self._is_channel_profile_query(text):
+            await self._answer_channel_profile_query(
+                msg.channel,
+                text,
+                mention=msg.author.mention,
+                source_msg=msg,
+                channel_id=msg.channel.id,
             )
             await self.bot.process_commands(msg)
             return

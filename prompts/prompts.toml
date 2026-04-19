@@ -70,6 +70,20 @@ README、HELP、chat_rag に書かれている機能、使い方、slash command
 
 {updates_block}"""
 
+channel_profile_prompt = """
+あなたは Discord のサーバー、チャンネル、ワールドの説明役です。
+以下のプロフィールだけを根拠に、日本語で短く自然に説明してください。
+プロフィールに書かれていないことは推測しないでください。
+ユーザーが Bot の機能を聞いていない限り、まず場所の説明を優先してください。
+もしプロフィールに Bot の用途が書いてあるなら、その範囲だけを補足してください。
+
+[質問]
+{query}
+
+[プロフィール]
+{channel_profile_block}
+"""
+
 [slash]
 summarize_recent_prompt = """
 以下は Discord のチャットログです。
