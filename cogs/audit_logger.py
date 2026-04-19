@@ -6,6 +6,10 @@ import discord
 from discord.ext import commands
 
 from utils.event_logger import send_event_log
+from utils.runtime_settings import get_settings
+
+
+_settings = get_settings()
 
 
 def _fmt_channel(channel: discord.abc.GuildChannel | None) -> str:
@@ -71,6 +75,13 @@ class AuditLogger(commands.Cog):
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         if interaction.type is not discord.InteractionType.application_command:
             return
+        if interaction.guild and interaction.channel_id is not None:
+            configured = _settings.get("logging.event_channel_id", 0, guild_id=interaction.guild.id)
+            try:
+                if int(str(configured).strip() or 0) == int(interaction.channel_id):
+                    return
+            except Exception:
+                pass
         guild = interaction.guild
         data = interaction.data if isinstance(interaction.data, dict) else {}
         name = str(data.get("name") or "unknown")
