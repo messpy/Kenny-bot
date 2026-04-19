@@ -49,14 +49,6 @@ global:
     translation_target_language: ja
     realtime_translation_interval_sec: 20
     realtime_translation_min_audio_bytes: 24000
-  recorder:
-    default_format: flac
-    max_minutes: 180
-    silence_timeout_seconds: 15
-    max_tracks: 10000
-    auto_cook_formats:
-    - flac
-    - mix
   voice:
     log_private_channels: false
   logging:
@@ -66,6 +58,7 @@ global:
     いいね: 👍
     ミュ: 🐈
     みゅ: 🐈
+    草: 😂
     天才: 🧠
     かわいい: 💕
     おはよう: ☀
@@ -84,6 +77,14 @@ global:
     weather_timeout_sec: 8
     holiday_timeout_sec: 8
   user_nicknames: {}
+  recorder:
+    default_format: flac
+    max_minutes: 180
+    silence_timeout_seconds: 15
+    max_tracks: 10000
+    auto_cook_formats:
+    - flac
+    - mix
   summarize_recent_default_minutes: 30
 guilds:
   '664237144600215581':

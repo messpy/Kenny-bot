@@ -662,7 +662,6 @@ class MessageLogger(BaseCog):
                                 ("チャンネルID", str(channel_id or 0), True),
                                 ("引数", str(args)[:1000], False),
                             ],
-                            source_channel_id=channel_id,
                         )
                         found_urls = self._extract_urls(result_text)
                 except Exception as e:
@@ -1015,6 +1014,25 @@ class MessageLogger(BaseCog):
         return False
 
     async def _handle_dm_message(self, msg: discord.Message) -> None:
+        # DMアクティビティをイベントログに記録
+        author_name = (
+            msg.author.display_name
+            if hasattr(msg.author, "display_name")
+            else msg.author.name
+        )
+        user_content = (msg.content or "").strip()
+        await send_event_log(
+            self.bot,
+            guild=None,
+            level="info",
+            title="DM 受信",
+            description=f"{msg.author.mention} からDMを受信しました",
+            fields=[
+                ("ユーザー", f"{author_name} ({msg.author.id})", False),
+                ("内容", user_content[:500] if user_content else "(empty)", False),
+            ],
+        )
+
         # 総合ログに記録
         log_user_message(msg)
 
@@ -1025,6 +1043,8 @@ class MessageLogger(BaseCog):
             text,
             self._cfg_int("security.max_user_message_chars", 1200),
         )
+
+        await self._log_ai_input_event(msg, text=text, title="DM AI 入力")
 
         if self._is_runtime_model_query(text):
             await self._send_runtime_model_reply(
@@ -1205,6 +1225,31 @@ class MessageLogger(BaseCog):
                 )
                 punishment_result = f"❌ 処罰実行失敗: {level}\n理由: {detail[:140]}"
 
+        spam_log_msg = await send_event_log(
+            self.bot,
+            guild=msg.guild,
+            level="error",
+            title="🚨 スパム検出",
+            description=f"ユーザー {msg.author.mention} のスパムを検出しました。",
+            fields=[
+                (
+                    "ユーザー情報",
+                    f"名前: {msg.author.display_name or msg.author.name}\nID: {msg.author.id}",
+                    False,
+                ),
+                (
+                    "削除内容",
+                    f"```{content[:200]}{'...' if len(content) > 200 else ''}```",
+                    False,
+                ),
+                ("違反情報", f"レベル: **{level}**\n違反回数: {violation_count}", True),
+                ("処罰", punishment_result if punishment_result else "警告のみ", True),
+            ],
+            footer=f"チャンネル: {msg.channel.name}",
+        )
+        if spam_log_msg is not None:
+            await spam_log_msg.add_reaction("🔄")
+
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
         if guard.should_warn(msg.author.id):
             warn_msg = (
@@ -1348,6 +1393,31 @@ class MessageLogger(BaseCog):
             return text
         return text[:limit] + "\n...(省略)..."
 
+    async def _log_ai_input_event(
+        self,
+        msg: discord.Message,
+        *,
+        text: str,
+        title: str = "AI 入力",
+    ) -> None:
+        await send_event_log(
+            self.bot,
+            guild=msg.guild,
+            level="info",
+            title=title,
+            description="AI 応答対象のユーザー入力を受信しました。",
+            fields=[
+                ("ユーザー", f"{msg.author} ({msg.author.id})", False),
+                (
+                    "チャンネル",
+                    f"{getattr(msg.channel, 'name', 'DM')} ({getattr(msg.channel, 'id', 0)})",
+                    False,
+                ),
+                ("メッセージID", str(msg.id), True),
+                ("内容", self._truncate_event_text(text), False),
+            ],
+        )
+
     async def _log_ai_output_event(
         self,
         msg: discord.Message,
@@ -1381,7 +1451,6 @@ class MessageLogger(BaseCog):
             title=title,
             description=description,
             fields=fields,
-            source_channel_id=getattr(msg.channel, "id", 0),
         )
 
     async def _send_runtime_model_reply(
@@ -1576,9 +1645,6 @@ class MessageLogger(BaseCog):
                     ("クエリ", query[:1000], False),
                     ("エラー", str(e)[:1000], False),
                 ],
-                source_channel_id=getattr(source_msg.channel, "id", 0)
-                if source_msg
-                else getattr(channel, "id", 0),
             )
             if isinstance(e, asyncio.TimeoutError):
                 await channel.send(f"{prefix}モデル準備中です。完了したら通知します。")
@@ -1757,7 +1823,11 @@ class MessageLogger(BaseCog):
         # =========================
         # メンション / リプライ判定
         # =========================
-        mentioned_bot = self.bot.user in msg.mentions if self.bot.user else False
+        mentioned_bot = (
+            any(member.id == self.bot.user.id for member in msg.mentions)
+            if self.bot.user
+            else False
+        )
         is_reply_to_bot = (
             msg.reference
             and msg.reference.resolved
@@ -1792,6 +1862,23 @@ class MessageLogger(BaseCog):
                 if normalize_keyword_match_text(str(keyword)) in normalized_content:
                     try:
                         await msg.add_reaction(emoji)
+                        await send_event_log(
+                            self.bot,
+                            guild=msg.guild,
+                            level="info",
+                            title="キーワードリアクション",
+                            description=f"{msg.author.mention} のメッセージにリアクションを付与しました。",
+                            fields=[
+                                ("キーワード", keyword, True),
+                                ("絵文字", emoji, True),
+                                (
+                                    "チャンネル",
+                                    f"{msg.channel.name} ({msg.channel.id})",
+                                    False,
+                                ),
+                                ("メッセージID", str(msg.id), True),
+                            ],
+                        )
                     except Exception as e:
                         logger.debug(f"Reaction failed: {e}")
 
@@ -1803,12 +1890,21 @@ class MessageLogger(BaseCog):
         # =========================
         text = normalize_user_text(content)
         if not text:
+            if mentioned_bot or is_reply_to_bot:
+                await msg.channel.send(
+                    f"{msg.author.mention}\nはい、どうしましたか？",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await self.bot.process_commands(msg)
+                return
             await self.bot.process_commands(msg)
             return
         text = self._sanitize_for_prompt(
             text,
             self._cfg_int("security.max_user_message_chars", 1200),
         )
+
+        await self._log_ai_input_event(msg, text=text)
 
         lowered = text.lower()
         start_words = ("議事録開始", "議事録スタート", "minutes start", "start minutes")

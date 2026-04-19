@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 _GEMINI_API_BASE = os.getenv(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 ).rstrip("/")
+_OLLAMA_FALLBACK_MODEL = (
+    os.getenv("OLLAMA_FALLBACK_MODEL", "gpt-oss:120b").strip() or "gpt-oss:120b"
+)
 _KNOWN_GEMINI_MODELS = (
     "gemini-2.5-flash",
     "gemini-2.5-pro",
@@ -314,7 +317,30 @@ class OllamaClientService:
             json=payload,
             timeout=timeout,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as err:
+            status_code = getattr(err.response, "status_code", None)
+            if status_code == 429:
+                fallback_client = self._local_fallback_client or self.client
+                fallback_model = _OLLAMA_FALLBACK_MODEL
+                logger.warning(
+                    "Gemini rate limited for model %s; falling back to Ollama model %s",
+                    model,
+                    fallback_model,
+                )
+                try:
+                    return fallback_client.chat(
+                        model=fallback_model,
+                        messages=messages,
+                        stream=stream,
+                        format=format,
+                        **kwargs,
+                    )
+                except Exception:
+                    logger.exception("Ollama fallback failed after Gemini rate limit")
+                    raise
+            raise
         data = response.json()
         text = self._extract_gemini_text(data)
         candidates = data.get("candidates") or []

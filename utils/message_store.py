@@ -18,14 +18,25 @@ _settings = get_settings()
 class MessageStore:
     """メッセージ履歴をJSON形式で保存・管理"""
 
-    def __init__(self, guild_id: int, channel_id: int):
+    def __init__(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        guild_name: str | None = None,
+        channel_name: str | None = None,
+    ):
         """
         Args:
             guild_id: ギルドID
             channel_id: チャンネルID
+            guild_name: ギルド名（互換用）
+            channel_name: チャンネル名（互換用）
         """
         self.guild_id = guild_id
         self.channel_id = channel_id
+        self.guild_name = guild_name
+        self.channel_name = channel_name
         self.log_file = MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
 
     def _load_messages(self) -> List[dict]:
