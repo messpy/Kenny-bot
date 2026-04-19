@@ -200,6 +200,7 @@ Bot にメンション or リプライすると自動応答：
 - ✅ 時刻付き履歴を含める（「xx時にこんなこと言ってた」を記憶）
 - ✅ 同じサーバー内でユーザー ID で個人を識別
 - ✅ README や `knowledge/chat_rag.md/json/toml` の内容を参照して Bot 自身の仕様説明に回答可能
+- ✅ サーバー固有の Q&A を `data/server_rag/<guild_id>/faq.json` に蓄積して会話応答へ反映可能
 - ✅ web search が使える構成では最新情報を検索して回答可能
 - ✅ DM でも同様に会話可能
 
@@ -213,6 +214,8 @@ Bot にメンション or リプライすると自動応答：
 - `/config_set`: 設定値を更新
 - `/model_list`: 利用可能なモデル一覧を表示（ローカル / リモート）
 - `/model_change`: 利用モデルを切り替え（リモート接続時は `-cloud` モデル名を使用）
+- `/server_qa_add`: このサーバー向けの Q&A を RAG に追加
+- `/server_qa_search`: このサーバー向けの RAG を検索
 - `/minutes_start`: 議事録モードを開始
 - `/minutes_stop`: 議事録モードを停止して要約を作成
 - `/minutes_status`: 議事録モードの状態を表示
@@ -258,8 +261,10 @@ Bot 固有の説明、サーバー運用メモ、FAQ を別ファイルで持た
 - `knowledge/chat_rag.md`
 - `knowledge/chat_rag.json`
 - `knowledge/chat_rag.toml`
+- `data/server_rag/<guild_id>/faq.json`
 
 まずは `knowledge/chat_rag.md` を使うのが一番簡単です。README と同様に会話中のローカル知識として参照されます。
+サーバーごとの Q&A を入れたい場合は `data/server_rag/<guild_id>/faq.json` に追加します。`/server_qa_add` を使うとこのファイルへ追記できます。
 
 ### semantic memory の再インデックス
 

@@ -14,6 +14,8 @@ Kenny Bot は Discord 上で自然な日本語で短く答える。
 このファイルは Kenny Bot の会話用の追加知識ベース。
 Bot の説明、サーバー内ルール、よくある質問、返答方針をここへ追記できる。
 必要なら `data/chat_rag.json` や `data/chat_rag.toml` を追加しても読み込む。
+サーバーごとに固有の Q&A を持たせたい場合は `data/server_rag/<guild_id>/faq.json` を使う。
+`/server_qa_add` で追加した内容はこの保存先に積まれる。
 
 ## 説明ルール
 Bot 自身の機能やコマンドの使い方を説明するときは、README とこのファイルに書いてある確認済み情報を優先する。

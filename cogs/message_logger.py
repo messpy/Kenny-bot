@@ -370,12 +370,16 @@ class MessageLogger(BaseCog):
         def get_local_knowledge(
             query: str = "", limit: int = 4, capability_only: bool = False
         ) -> str:
-            """Get relevant bot-local documentation from README and custom RAG files."""
+            """Get relevant bot-local and server-specific documentation from RAG files."""
             lookup = (query or text or "").strip()
             if not lookup:
                 lookup = text
             return self._get_local_knowledge(
-                lookup, limit=limit, capability_only=capability_only, max_chars=2200
+                lookup,
+                limit=limit,
+                capability_only=capability_only,
+                max_chars=2200,
+                guild_id=guild_id,
             )
 
         planner_messages = [
@@ -392,6 +396,7 @@ class MessageLogger(BaseCog):
                     "Use get_semantic_history only when topical similarity matters more than strict recency.\n"
                     "Avoid get_semantic_history for very short replies such as numbers, yes/no, which one, this/that, or direct answers to the bot's previous message.\n"
                     "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
+                    "Use get_local_knowledge when the user asks about server rules, server FAQ, server procedures, or any guild-specific knowledge that has been added to RAG.\n"
                     "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
                     "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
                     "Use _get_runtime_model_info when the user asks which model is currently configured or being used.\n"
@@ -972,13 +977,17 @@ class MessageLogger(BaseCog):
         *,
         capability_only: bool = False,
         max_chars: int = 1200,
+        guild_id: int | None = None,
     ) -> str:
         query = (query or "").strip()
         if not query:
             return ""
         limit = max(1, min(int(limit or 4), 6))
         chunks = self._local_rag.retrieve(
-            query, limit=limit, capability_only=capability_only
+            query,
+            limit=limit,
+            capability_only=capability_only,
+            guild_id=guild_id,
         )
         blocks: list[str] = []
         for chunk in chunks:
@@ -1506,9 +1515,13 @@ class MessageLogger(BaseCog):
         *,
         capability_only: bool = False,
         body_limit: int | None = 1200,
+        guild_id: int | None = None,
     ) -> str:
         chunks = self._local_rag.retrieve(
-            query, limit=limit, capability_only=capability_only
+            query,
+            limit=limit,
+            capability_only=capability_only,
+            guild_id=guild_id,
         )
         blocks: list[str] = []
         for chunk in chunks:
@@ -1581,12 +1594,14 @@ class MessageLogger(BaseCog):
                     limit=12,
                     capability_only=True,
                     body_limit=None,
+                    guild_id=guild_id if guild_id else None,
                 ),
                 self._build_rag_context(
                     normalized_query,
                     limit=6,
                     capability_only=False,
                     body_limit=None,
+                    guild_id=guild_id if guild_id else None,
                 ),
             ]
             if block

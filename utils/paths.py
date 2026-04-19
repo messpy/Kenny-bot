@@ -17,6 +17,8 @@ LOG_FILE = LOG_DIR / datetime.now().strftime("kennybot_%Y%m%d.log")
 MESSAGE_LOG_DIR = DATA_DIR / "message_logs"
 MESSAGE_LOG_DIR.mkdir(parents=True, exist_ok=True)
 MESSAGE_VECTOR_DB_PATH = MESSAGE_LOG_DIR / "message_vectors.sqlite3"
+SERVER_RAG_DIR = DATA_DIR / "server_rag"
+SERVER_RAG_DIR.mkdir(parents=True, exist_ok=True)
 ALL_MESSAGES_LOG = LOG_DIR / "messages.log"
 RUNTIME_SETTINGS_PATH = CONFIG_DIR / "bot_settings.yaml"
 LEGACY_RUNTIME_SETTINGS_PATH = DATA_DIR / "bot_settings.yaml"

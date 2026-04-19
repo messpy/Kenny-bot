@@ -38,6 +38,14 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
         ),
     ),
     HelpSection(
+        title="サーバー知識",
+        lines=(
+            "- サーバー固有のQ&AをRAGとして蓄積可能",
+            "- 追加したQ&Aはメンション応答や機能説明の文脈で参照される",
+            "- `/server_qa_add` と `/server_qa_search` で管理できる",
+        ),
+    ),
+    HelpSection(
         title="議事録機能",
         lines=(
             "- VC参加者が `/minutes_start` で開始",
@@ -68,6 +76,7 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
 COMMAND_CATEGORY_ORDER: tuple[str, ...] = (
     "基本",
     "要約・設定",
+    "ナレッジ",
     "議事録",
     "ロール",
     "読み上げ",
@@ -114,6 +123,16 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         name="model_change",
         description="Bot が使うモデルを切り替え",
         category="要約・設定",
+    ),
+    "server_qa_add": SlashCommandMeta(
+        name="server_qa_add",
+        description="このサーバー向けのQ&AをRAGに追加",
+        category="ナレッジ",
+    ),
+    "server_qa_search": SlashCommandMeta(
+        name="server_qa_search",
+        description="このサーバー向けRAGを検索",
+        category="ナレッジ",
     ),
     "minutes_start": SlashCommandMeta(
         name="minutes_start",
