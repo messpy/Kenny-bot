@@ -1254,15 +1254,6 @@ class MessageLogger(BaseCog):
         self._ai_channel_last[channel_id] = now
         return False
 
-    def _is_event_log_channel(self, msg: discord.Message) -> bool:
-        if msg.guild is None:
-            return False
-        configured = _settings.get("logging.event_channel_id", 0, guild_id=msg.guild.id)
-        try:
-            return int(str(configured).strip() or 0) == int(getattr(msg.channel, "id", 0))
-        except Exception:
-            return False
-
     async def _handle_dm_message(self, msg: discord.Message) -> None:
         author_name = (
             msg.author.display_name
@@ -2124,9 +2115,6 @@ class MessageLogger(BaseCog):
         if msg.guild is None:
             if not msg.author.bot:
                 await self._handle_dm_message(msg)
-            return
-
-        if self._is_event_log_channel(msg):
             return
 
         content = msg.content or ""
