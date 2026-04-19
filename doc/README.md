@@ -11,7 +11,7 @@
 ## 現在の文書
 
 - `system-design.md`: 全体構成、責務分割、主要フロー、移行方針
-- `knowledge/chat_rag.md`: 会話用のローカル知識とサーバー知識の運用メモ
+- `knowledge/chat_rag.md`: 会話用のローカル知識とチャンネル知識の運用メモ
 
 ## 追加ルール
 

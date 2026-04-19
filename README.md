@@ -214,8 +214,6 @@ Bot にメンション or リプライすると自動応答：
 - `/config_set`: 設定値を更新
 - `/model_list`: 利用可能なモデル一覧を表示（ローカル / リモート）
 - `/model_change`: 利用モデルを切り替え（リモート接続時は `-cloud` モデル名を使用）
-- `/server_qa_add`: このチャンネル向けの Q&A を RAG に追加
-- `/server_qa_search`: このチャンネル向けの RAG を検索
 - `/minutes_start`: 議事録モードを開始
 - `/minutes_stop`: 議事録モードを停止して要約を作成
 - `/minutes_status`: 議事録モードの状態を表示
@@ -256,7 +254,7 @@ Bot にメンション or リプライすると自動応答：
 
 ### 追加 RAG ファイル
 
-Bot 固有の説明、サーバー運用メモ、FAQ を別ファイルで持たせたい場合は次を使えます。
+Bot 固有の説明、チャンネル運用メモ、FAQ を別ファイルで持たせたい場合は次を使えます。
 
 - `knowledge/chat_rag.md`
 - `knowledge/chat_rag.json`
@@ -264,7 +262,17 @@ Bot 固有の説明、サーバー運用メモ、FAQ を別ファイルで持た
 - `data/channel_rag/<channel_id>/faq.json`
 
 まずは `knowledge/chat_rag.md` を使うのが一番簡単です。README と同様に会話中のローカル知識として参照されます。
-チャンネルごとの Q&A を入れたい場合は `data/channel_rag/<channel_id>/faq.json` に追加します。`/server_qa_add` を使うとこのファイルへ追記できます。
+チャンネルごとの Q&A を入れたい場合は `data/channel_rag/<channel_id>/faq.json` を直接編集します。
+
+### 旧データの移行
+
+古い `data/server_rag/` が残っている場合は、次のスクリプトで `data/channel_rag/` に写せます。
+
+```bash
+python bin/migrate_channel_rag.py
+```
+
+この移行はファイル構造をそのままコピーします。実際のチャンネル ID に合わせた整理は、必要なら `data/channel_rag/<channel_id>/` を手で調整してください。
 
 ### semantic memory の再インデックス
 

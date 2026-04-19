@@ -28,7 +28,6 @@ from utils.command_catalog import (
 )
 from utils.event_logger import send_event_log
 from utils.countdown import ChannelCountdown
-from utils.local_rag import LocalRAG
 from utils.runtime_settings import get_settings
 from utils.vrchat_world import format_vrchat_world_lines, search_vrchat_worlds
 from ai.client import create_ollama_client
@@ -47,8 +46,6 @@ CONFIG_SHOW_META = get_slash_command_meta("config_show")
 CONFIG_SET_META = get_slash_command_meta("config_set")
 MODEL_LIST_META = get_slash_command_meta("model_list")
 MODEL_CHANGE_META = get_slash_command_meta("model_change")
-SERVER_QA_ADD_META = get_slash_command_meta("server_qa_add")
-SERVER_QA_SEARCH_META = get_slash_command_meta("server_qa_search")
 REACTION_ROLE_SET_META = get_slash_command_meta("reaction_role_set")
 REACTION_ROLE_REMOVE_META = get_slash_command_meta("reaction_role_remove")
 REACTION_ROLE_LIST_META = get_slash_command_meta("reaction_role_list")
@@ -92,7 +89,6 @@ class SlashCommands(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._local_rag = LocalRAG(Path(__file__).resolve().parent.parent)
         self._started_at = discord.utils.utcnow()
         # message_id -> (seconds, title)
         self._timer_restart_templates: dict[int, tuple[int, str]] = {}
@@ -1068,95 +1064,6 @@ class SlashCommands(commands.Cog):
             f"`{key}` を `{model_name}` に設定しました。",
             ephemeral=True,
         )
-
-    @app_commands.command(name=SERVER_QA_ADD_META.name, description=SERVER_QA_ADD_META.description)
-    @checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        question="登録したい質問",
-        answer="その質問への回答",
-        tags="任意のタグ。カンマ区切り",
-    )
-    async def server_qa_add(
-        self,
-        interaction: discord.Interaction,
-        question: str,
-        answer: str,
-        tags: str | None = None,
-    ):
-        if interaction.channel is None:
-            await interaction.response.send_message("チャンネル内で実行してください。", ephemeral=True)
-            return
-        try:
-            tag_list = [part.strip() for part in (tags or "").split(",") if part.strip()]
-            path = self._local_rag.append_channel_qa(
-                channel_id=interaction.channel.id,
-                question=question,
-                answer=answer,
-                tags=tag_list,
-                metadata={
-                    "author_id": getattr(interaction.user, "id", 0),
-                    "author_name": str(interaction.user),
-                    "source": "channel_qa_add",
-                    "channel_id": interaction.channel.id,
-                    "created_at": discord.utils.utcnow().isoformat(),
-                },
-            )
-        except Exception as e:
-            logger.exception("Failed to add channel QA")
-            await interaction.response.send_message(
-                f"登録に失敗しました: `{str(e)[:200]}`",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            f"このチャンネルのRAGにQ&Aを追加しました。\n- 質問: {question}\n- 保存先: `{path}`",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name=SERVER_QA_SEARCH_META.name, description=SERVER_QA_SEARCH_META.description)
-    @app_commands.describe(query="検索語")
-    async def server_qa_search(
-        self,
-        interaction: discord.Interaction,
-        query: str,
-    ):
-        if interaction.channel is None:
-            await interaction.response.send_message("チャンネル内で実行してください。", ephemeral=True)
-            return
-        query = query.strip()
-        if not query:
-            await interaction.response.send_message("検索語を指定してください。", ephemeral=True)
-            return
-        try:
-            chunks = self._local_rag.retrieve(
-                query,
-                limit=4,
-                channel_id=interaction.channel.id,
-                channel_only=True,
-            )
-        except Exception as e:
-            logger.exception("Failed to search channel QA")
-            await interaction.response.send_message(
-                f"検索に失敗しました: `{str(e)[:200]}`",
-                ephemeral=True,
-            )
-            return
-
-        if not chunks:
-            await interaction.response.send_message("該当するチャンネル知識が見つかりませんでした。", ephemeral=True)
-            return
-
-        lines: list[str] = [f"**検索結果:** `{query}`"]
-        for chunk in chunks[:4]:
-            body = chunk.body.strip()
-            if len(body) > 450:
-                body = body[:450] + "\n...(省略)..."
-            lines.append(f"[{chunk.source} / {chunk.title}]\n{body}")
-        text = "\n\n".join(lines)
-        if len(text) > 1900:
-            text = text[:1900] + "\n...(省略)..."
-        await interaction.response.send_message(text, ephemeral=True)
 
     @app_commands.command(name=REACTION_ROLE_SET_META.name, description=REACTION_ROLE_SET_META.description)
     @checks.has_permissions(administrator=True)

@@ -40,9 +40,9 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
     HelpSection(
         title="チャンネル知識",
         lines=(
-            "- チャンネル固有のQ&AをRAGとして蓄積可能",
+            "- チャンネル固有のQ&Aを `data/channel_rag/<channel_id>/faq.json` に蓄積可能",
             "- 追加したQ&Aはそのチャンネルのメンション応答や機能説明の文脈で参照される",
-            "- `/server_qa_add` と `/server_qa_search` で管理できる",
+            "- 直接ファイルを編集して管理する",
         ),
     ),
     HelpSection(
@@ -123,16 +123,6 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         name="model_change",
         description="Bot が使うモデルを切り替え",
         category="要約・設定",
-    ),
-    "server_qa_add": SlashCommandMeta(
-        name="server_qa_add",
-        description="このチャンネル向けのQ&AをRAGに追加",
-        category="ナレッジ",
-    ),
-    "server_qa_search": SlashCommandMeta(
-        name="server_qa_search",
-        description="このチャンネル向けRAGを検索",
-        category="ナレッジ",
     ),
     "minutes_start": SlashCommandMeta(
         name="minutes_start",
