@@ -66,7 +66,7 @@ docker compose up -d --build
 
 利用可能なモデル一覧は `/model_list`、切替は `/model_change` で確認・変更できます。
 Gemini の API キーを設定している場合は、`gemini-2.5-flash` などの Gemini モデルも `/model_change` で選べます。
-Gemini 側が `429` やクォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` か既定の `gpt-oss:120b` にフォールバックします。
+Gemini 側が `429` やクォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` と `ollama.model_chat` / `ollama.model_summary` などの Ollama 設定を順に試してフォールバックします。
 
 ### 1. 前提条件
 - Python 3.13+
@@ -109,7 +109,7 @@ GEMINI_API_KEY=your_gemini_api_key
 # GOOGLE_API_KEY=your_google_api_key
 
 # Gemini のレート制限時に落とす Ollama モデル
-OLLAMA_FALLBACK_MODEL=gpt-oss:120b
+OLLAMA_FALLBACK_MODEL=mistral-large-3:675b-cloud  # 例
 
 # ローカル Ollama で semantic memory を使う場合
 # OLLAMA_HOST=http://127.0.0.1:11434
@@ -399,7 +399,7 @@ Error: model 'tinyllama' not found
 **解決：**
 ```bash
 # モデルをインストール
-ollama pull gpt-oss:120b
+ollama pull mistral-large-3:675b-cloud  # 例
 
 # config/bot_settings.yaml で正しいモデル名を設定
 # 例: global.ollama.model_default: gemini-2.5-flash

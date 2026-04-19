@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from utils.runtime_settings import get_settings
+
 try:
     from ollama import Client, ResponseError
 except ImportError:
@@ -19,9 +21,7 @@ logger = logging.getLogger(__name__)
 _GEMINI_API_BASE = os.getenv(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 ).rstrip("/")
-_OLLAMA_FALLBACK_MODEL = (
-    os.getenv("OLLAMA_FALLBACK_MODEL", "gpt-oss:120b").strip() or "gpt-oss:120b"
-)
+_OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
 _KNOWN_GEMINI_MODELS = (
     "gemini-2.5-flash",
     "gemini-2.5-pro",
@@ -322,24 +322,62 @@ class OllamaClientService:
         except requests.HTTPError as err:
             status_code = getattr(err.response, "status_code", None)
             if status_code == 429:
-                fallback_client = self._local_fallback_client or self.client
-                fallback_model = _OLLAMA_FALLBACK_MODEL
+                settings = get_settings()
+                fallback_models: list[str] = []
+                for candidate in (
+                    _OLLAMA_FALLBACK_MODEL,
+                    str(settings.get("ollama.model_chat", "") or "").strip(),
+                    str(settings.get("ollama.model_summary", "") or "").strip(),
+                    str(settings.get("ollama.model_default", "") or "").strip(),
+                ):
+                    if not candidate or self._is_gemini_model(candidate):
+                        continue
+                    if candidate not in fallback_models:
+                        fallback_models.append(candidate)
                 logger.warning(
-                    "Gemini rate limited for model %s; falling back to Ollama model %s",
+                    "Gemini rate limited for model %s; falling back to Ollama models %s",
                     model,
-                    fallback_model,
+                    ", ".join(fallback_models),
                 )
-                try:
-                    return fallback_client.chat(
-                        model=fallback_model,
-                        messages=messages,
-                        stream=stream,
-                        format=format,
-                        **kwargs,
-                    )
-                except Exception:
-                    logger.exception("Ollama fallback failed after Gemini rate limit")
-                    raise
+                last_error: Exception | None = None
+                fallback_clients = [self.client]
+                if self._local_fallback_client is not None:
+                    fallback_clients.append(self._local_fallback_client)
+                for fallback_client in fallback_clients:
+                    for fallback_model in fallback_models:
+                        try:
+                            if fallback_client is self._local_fallback_client:
+                                return self._try_local_chat_fallback(
+                                    model=fallback_model,
+                                    messages=messages,
+                                    stream=stream,
+                                    format=format,
+                                    **kwargs,
+                                )
+                            return fallback_client.chat(
+                                model=fallback_model,
+                                messages=messages,
+                                stream=stream,
+                                format=format,
+                                **kwargs,
+                            )
+                        except Exception as fallback_err:
+                            last_error = fallback_err
+                            if self._is_model_missing_error(fallback_err):
+                                logger.warning(
+                                    "Ollama fallback model '%s' not found on current client; trying next candidate",
+                                    fallback_model,
+                                )
+                                continue
+                            logger.exception(
+                                "Ollama fallback model '%s' failed after Gemini rate limit",
+                                fallback_model,
+                            )
+                            raise
+                logger.exception("Ollama fallback failed after Gemini rate limit")
+                if last_error is not None:
+                    raise last_error
+                raise
             raise
         data = response.json()
         text = self._extract_gemini_text(data)
