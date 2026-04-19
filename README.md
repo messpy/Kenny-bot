@@ -200,7 +200,7 @@ Bot にメンション or リプライすると自動応答：
 - ✅ 時刻付き履歴を含める（「xx時にこんなこと言ってた」を記憶）
 - ✅ 同じサーバー内でユーザー ID で個人を識別
 - ✅ README や `knowledge/chat_rag.md/json/toml` の内容を参照して Bot 自身の仕様説明に回答可能
-- ✅ チャンネル固有の Q&A を `data/channel_rag/<channel_id>/faq.json` に蓄積して会話応答へ反映可能
+- ✅ チャンネル固有の説明文を `data/channel_rag/<channel_id>/chat_rag.md` に蓄積して会話応答へ反映可能
 - ✅ web search が使える構成では最新情報を検索して回答可能
 - ✅ DM でも同様に会話可能
 
@@ -254,15 +254,15 @@ Bot にメンション or リプライすると自動応答：
 
 ### 追加 RAG ファイル
 
-Bot 固有の説明、チャンネル運用メモ、FAQ を別ファイルで持たせたい場合は次を使えます。
+Bot 固有の説明、チャンネル運用メモを別ファイルで持たせたい場合は次を使えます。
 
 - `knowledge/chat_rag.md`
 - `knowledge/chat_rag.json`
 - `knowledge/chat_rag.toml`
-- `data/channel_rag/<channel_id>/faq.json`
+- `data/channel_rag/<channel_id>/chat_rag.md`
 
 まずは `knowledge/chat_rag.md` を使うのが一番簡単です。README と同様に会話中のローカル知識として参照されます。
-チャンネルごとの Q&A を入れたい場合は `data/channel_rag/<channel_id>/faq.json` を直接編集します。
+チャンネル固有の説明をそのまま書くなら `data/channel_rag/<channel_id>/chat_rag.md` が向いています。
 
 ### 旧データの移行
 
