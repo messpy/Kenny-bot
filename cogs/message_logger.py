@@ -1054,26 +1054,13 @@ class MessageLogger(BaseCog):
         channel_id: int | None = None,
         guild_id: int | None = None,
     ) -> list[int]:
-        ids: list[int] = []
-        if channel_id:
-            ids.append(int(channel_id))
-        if channel is not None:
-            parent_id = getattr(channel, "parent_id", None)
-            if parent_id:
-                ids.append(int(parent_id))
-            if getattr(channel, "id", None):
-                ids.append(int(getattr(channel, "id")))
         if guild_id:
-            ids.append(int(guild_id))
-
-        deduped: list[int] = []
-        seen: set[int] = set()
-        for item in ids:
-            if item in seen:
-                continue
-            seen.add(item)
-            deduped.append(item)
-        return deduped
+            return [int(guild_id)]
+        if channel_id:
+            return [int(channel_id)]
+        if channel is not None and getattr(channel, "id", None):
+            return [int(getattr(channel, "id"))]
+        return []
 
     def _get_profile_knowledge(
         self,
