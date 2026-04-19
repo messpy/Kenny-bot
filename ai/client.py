@@ -365,15 +365,47 @@ class OllamaClientService:
                             last_error = fallback_err
                             if self._is_model_missing_error(fallback_err):
                                 logger.warning(
-                                    "Ollama fallback model '%s' not found on current client; trying next candidate",
+                                    "Ollama fallback model '%s' not found on current client; pulling and retrying",
                                     fallback_model,
                                 )
-                                continue
+                                try:
+                                    self._ensure_model_available_on_client(
+                                        fallback_client, fallback_model
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to pull Ollama fallback model '%s'",
+                                        fallback_model,
+                                    )
+                                    continue
+                                try:
+                                    if fallback_client is self._local_fallback_client:
+                                        return self._try_local_chat_fallback(
+                                            model=fallback_model,
+                                            messages=messages,
+                                            stream=stream,
+                                            format=format,
+                                            **kwargs,
+                                        )
+                                    return fallback_client.chat(
+                                        model=fallback_model,
+                                        messages=messages,
+                                        stream=stream,
+                                        format=format,
+                                        **kwargs,
+                                    )
+                                except Exception as retry_err:
+                                    last_error = retry_err
+                                    logger.exception(
+                                        "Retry after pulling Ollama fallback model '%s' failed",
+                                        fallback_model,
+                                    )
+                                    continue
                             logger.exception(
                                 "Ollama fallback model '%s' failed after Gemini rate limit",
                                 fallback_model,
                             )
-                            raise
+                            continue
                 logger.exception("Ollama fallback failed after Gemini rate limit")
                 if last_error is not None:
                     raise last_error
@@ -421,6 +453,14 @@ class OllamaClientService:
             self.client.pull(model=model, stream=False)
             self._ensured_models.add(model)
 
+    def _ensure_model_available_on_client(self, client: Client, model: str) -> None:
+        if client is self.client:
+            self._ensure_model_available(model)
+            return
+        local_model = self._normalize_local_fallback_model(model)
+        logger.info("Model '%s' not found on fallback client. Pulling via Ollama.", local_model)
+        client.pull(model=local_model, stream=False)
+
     def _normalize_local_fallback_model(self, model: str) -> str:
         value = (model or "").strip()
         if value.endswith("-cloud"):
@@ -440,13 +480,26 @@ class OllamaClientService:
             raise RuntimeError("local fallback client is not available")
         local_model = self._normalize_local_fallback_model(model)
         logger.warning("Falling back to local Ollama model '%s' after remote failure", local_model)
-        return self._local_fallback_client.chat(
-            model=local_model,
-            messages=messages,
-            stream=stream,
-            format=format,
-            **kwargs,
-        )
+        try:
+            return self._local_fallback_client.chat(
+                model=local_model,
+                messages=messages,
+                stream=stream,
+                format=format,
+                **kwargs,
+            )
+        except Exception as err:
+            if self._is_model_missing_error(err):
+                logger.info("Local fallback model '%s' not found. Pulling via Ollama.", local_model)
+                self._local_fallback_client.pull(model=local_model, stream=False)
+                return self._local_fallback_client.chat(
+                    model=local_model,
+                    messages=messages,
+                    stream=stream,
+                    format=format,
+                    **kwargs,
+                )
+            raise
 
     def _chat_with_auto_pull(
         self,
