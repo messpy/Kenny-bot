@@ -383,7 +383,9 @@ class MessageLogger(BaseCog):
             )
 
         channel_profile_block = self._build_channel_profile_block(
+            channel=msg.channel,
             channel_id=channel_id,
+            guild_id=guild_id,
             limit=4,
             max_chars=1800,
         )
@@ -1045,26 +1047,78 @@ class MessageLogger(BaseCog):
             blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
         return "\n\n".join(blocks)
 
-    def _build_channel_profile_block(
+    def _profile_channel_ids(
         self,
         *,
-        channel_id: int | None,
+        channel: discord.abc.Messageable | None = None,
+        channel_id: int | None = None,
+        guild_id: int | None = None,
+    ) -> list[int]:
+        ids: list[int] = []
+        if channel_id:
+            ids.append(int(channel_id))
+        if channel is not None:
+            parent_id = getattr(channel, "parent_id", None)
+            if parent_id:
+                ids.append(int(parent_id))
+            if getattr(channel, "id", None):
+                ids.append(int(getattr(channel, "id")))
+        if guild_id:
+            ids.append(int(guild_id))
+
+        deduped: list[int] = []
+        seen: set[int] = set()
+        for item in ids:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
+
+    def _get_profile_knowledge(
+        self,
+        *,
+        channel: discord.abc.Messageable | None = None,
+        channel_id: int | None = None,
+        guild_id: int | None = None,
         limit: int = 4,
         max_chars: int = 1800,
     ) -> str:
-        knowledge = self._get_channel_knowledge(
+        for candidate_id in self._profile_channel_ids(
+            channel=channel,
             channel_id=channel_id,
+            guild_id=guild_id,
+        ):
+            knowledge = self._get_channel_knowledge(
+                channel_id=candidate_id,
+                limit=limit,
+                max_chars=max_chars,
+            )
+            if knowledge:
+                return (
+                    "[この場所の正式プロフィール]\n"
+                    "以下はこの場所の前提です。一般テンプレート、古い assistant 発言、"
+                    "推測よりも優先して扱ってください。\n"
+                    "この内容と矛盾する場合は、こちらを正としてください。\n\n"
+                    f"{knowledge}"
+                )
+        return ""
+
+    def _build_channel_profile_block(
+        self,
+        *,
+        channel: discord.abc.Messageable | None = None,
+        channel_id: int | None = None,
+        guild_id: int | None = None,
+        limit: int = 4,
+        max_chars: int = 1800,
+    ) -> str:
+        return self._get_profile_knowledge(
+            channel=channel,
+            channel_id=channel_id,
+            guild_id=guild_id,
             limit=limit,
             max_chars=max_chars,
-        )
-        if not knowledge:
-            return ""
-        return (
-            "[このチャンネルの正式プロフィール]\n"
-            "以下はこのチャンネルの前提です。一般テンプレート、古い assistant 発言、"
-            "推測よりも優先して扱ってください。\n"
-            "この内容と矛盾する場合は、こちらを正としてください。\n\n"
-            f"{knowledge}"
         )
 
     async def _answer_channel_profile_query(
@@ -1085,7 +1139,9 @@ class MessageLogger(BaseCog):
             return
 
         channel_profile_block = self._build_channel_profile_block(
+            channel=channel,
             channel_id=channel_id,
+            guild_id=getattr(getattr(channel, "guild", None), "id", None),
             limit=6,
             max_chars=2600,
         )
@@ -1786,7 +1842,9 @@ class MessageLogger(BaseCog):
 
         normalized_query = (query or "").replace("きのう", "機能")
         channel_profile_block = self._build_channel_profile_block(
+            channel=channel,
             channel_id=channel_id,
+            guild_id=getattr(getattr(channel, "guild", None), "id", None),
             limit=4,
             max_chars=1800,
         )
@@ -2304,7 +2362,9 @@ class MessageLogger(BaseCog):
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
         channel_profile_block = self._build_channel_profile_block(
+            channel=msg.channel,
             channel_id=msg.channel.id,
+            guild_id=msg.guild.id,
             limit=4,
             max_chars=1800,
         )
