@@ -7,6 +7,7 @@
 - README を概要と利用方法に集中させる
 - 設計判断や処理フローを `doc/` に集約する
 - 実装変更時に参照すべき資料を明確にする
+- サーバーやチャンネルごとの説明、設定、ログは `data/channel_rag/<guild_id>/` 以下に集約する
 
 ## 現在の文書
 
@@ -20,7 +21,7 @@
 - 現行の実装はルート直下の `ai/`, `cogs/`, `guards/`, `utils/`, `commands/` を正とする
 - `src/` は将来の整理候補として扱い、実際に移す場合だけコードと文書を同時に更新する
 - 既存コードを触る場合は、直近で必要な範囲だけを変更対象にする
-- チャンネル固有の説明は `data/channel_rag/<channel_id>/chat_rag.md` に保存し、会話応答から参照する
+- サーバー固有の説明は `data/channel_rag/<guild_id>/chat_rag.md` に、チャンネル固有の説明は `data/channel_rag/<guild_id>/channels/<channel_id>/` に保存し、会話応答から参照する
 
 ## 推奨ファイル名
 
