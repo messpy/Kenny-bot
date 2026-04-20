@@ -1,2 +1,3 @@
-# ai package
-# AI 関連モジュール（runner, chat, search）
+"""Compatibility wrapper for src.kennybot.ai."""
+
+from src.kennybot.ai import *

@@ -1,1 +1,2 @@
-"""Compatibility wrappers for legacy root package."""
+# ai package
+# AI 関連モジュール（runner, chat, search）

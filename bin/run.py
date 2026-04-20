@@ -11,8 +11,8 @@ from pathlib import Path
 # プロジェクトルートを sys.path に追加（絶対インポート対応）
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.env import load_env_file, require_env
-from utils.single_instance import SingleInstanceError, acquire_lock
+from src.kennybot.utils.env import load_env_file, require_env
+from src.kennybot.utils.single_instance import SingleInstanceError, acquire_lock
 from src.kennybot.bootstrap import create_bot
 
 

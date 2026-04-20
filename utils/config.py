@@ -1,6 +1,3 @@
-# utils/config.py
-# 互換レイヤー: prompt template のみを公開
+"""Compatibility wrapper for src.kennybot.utils.config."""
 
-from utils.prompts import get_prompt
-PROMPT_TEMPLATE = get_prompt("chat", "prompt_template")
-HISTORY_CONTEXT_TEMPLATE = get_prompt("chat", "history_context_template")
+from src.kennybot.utils.config import *

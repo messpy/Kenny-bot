@@ -1,12 +1,3 @@
-# commands/action_commands.py
-# （既存の action_commands.py から移動）
+"""Compatibility wrapper for src.kennybot.commands.action_commands."""
 
-from discord.ext import commands
-
-
-class ActionCog(commands.Cog):
-    """アクションコマンド"""
-
-    # 【実装例】
-    # 各アクションコマンドを実装
-    pass
+from src.kennybot.commands.action_commands import *
