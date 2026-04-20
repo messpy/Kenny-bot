@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
+from utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_MODEL_SUMMARY, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
 from ai.runner import OllamaRunner, OllamaConfig
 from ai.chat import ChatMemory, ChatService, ChatConfig
 from ai.client import OllamaClientService, OllamaClientConfig, create_ollama_client
@@ -96,11 +96,19 @@ class MyBot(commands.Bot):
                         mode="normal",
                         concurrency=2,
                         model=OLLAMA_MODEL_CHAT,
+                        fallback_models=(
+                            OLLAMA_MODEL_SUMMARY,
+                            OLLAMA_MODEL_DEFAULT,
+                        ),
                         max_chars=400,
                     ),
                 ),
                 runner=runner,
                 final_model=OLLAMA_MODEL_CHAT,
+                final_fallback_models=[
+                    OLLAMA_MODEL_SUMMARY,
+                    OLLAMA_MODEL_DEFAULT,
+                ],
                 debug=False,
             )
         except Exception:

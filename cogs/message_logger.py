@@ -897,11 +897,20 @@ class MessageLogger(BaseCog):
             ),
             None,
         )
-        prefer_mentioned_targets = (
-            bool(preferred_mention_target)
-            and bool(msg.mentions)
-            and self._is_person_lookup_query(text)
-        )
+        prefer_mentioned_targets = bool(preferred_mention_target) and bool(msg.mentions)
+        mention_focus_block = ""
+        if prefer_mentioned_targets:
+            mention_lines = [
+                "[この会話で明示された人物候補]",
+            ]
+            for key, (member_id, display_name) in target_candidates.items():
+                if not key.startswith("mentioned_"):
+                    continue
+                mention_lines.append(f"- {key}: {display_name} ({member_id})")
+            mention_lines.append(
+                "この質問に人物が関わるなら、上の mention 候補を author より優先して解釈すること。"
+            )
+            mention_focus_block = "\n".join(mention_lines) + "\n\n"
 
         for item in plan:
             source = str(item.get("source") or "").strip().lower()
@@ -1486,10 +1495,20 @@ class MessageLogger(BaseCog):
             "どんな人",
             "どんなやつ",
             "どんな子",
+            "最後の投稿",
+            "最後の発言",
+            "最後に投稿",
+            "最後に発言",
+            "最新の投稿",
+            "最新の発言",
+            "最近の投稿",
+            "最近の発言",
             "プロフィール",
             "情報",
             "何者",
             "誰",
+            "投稿ある",
+            "発言ある",
             "性格",
             "特徴",
             "教えて",
@@ -2425,7 +2444,7 @@ class MessageLogger(BaseCog):
             )
             return
 
-        normalized_query = (query or "").replace("きのう", "機能")
+        normalized_query = query or ""
         channel_profile_block = self._build_channel_profile_block(
             channel=channel,
             channel_id=channel_id,
@@ -2886,6 +2905,66 @@ class MessageLogger(BaseCog):
             await self.bot.process_commands(msg)
             return
 
+        if is_current_info_intent(text) or is_search_intent(text):
+            web_scope = "news" if any(
+                key in normalize_keyword_match_text(text or "")
+                for key in ("事件", "ニュース", "速報", "今日", "最新", "最近")
+            ) else "web"
+            answer, web_refs = await self._build_current_info_context(
+                text,
+                web_scope=web_scope,
+            )
+            answer = (answer or "").strip()
+            if not answer:
+                await msg.channel.send(
+                    f"{msg.author.mention}\n検索結果から十分な情報を取得できませんでした。",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await self._log_bot_activity_event(
+                    msg,
+                    kind="メンション",
+                    processing="Web検索",
+                    level="error",
+                    title="Web検索ログ",
+                    description="検索結果から十分な情報を取得できませんでした。",
+                    input_text=text,
+                    output_text="",
+                    references=web_refs,
+                )
+                await self.bot.process_commands(msg)
+                return
+
+            answer = strip_ansi_and_ctrl(answer)
+            max_len = self._cfg_int("chat.max_response_length", 1800)
+            if len(answer) > max_len:
+                answer = answer[:max_len] + "\n...(省略)..."
+            if self._should_send_letter_file(text):
+                await self._send_letter_file(msg, answer)
+            else:
+                final_message = f"{msg.author.mention}\n{answer}"
+                if len(final_message) > 2000:
+                    await self._send_chunked_text(
+                        msg.channel,
+                        answer,
+                        prefix=f"{msg.author.mention}\n",
+                    )
+                else:
+                    await msg.channel.send(
+                        final_message, allowed_mentions=discord.AllowedMentions.none()
+                    )
+            await self._log_bot_activity_event(
+                msg,
+                kind="メンション",
+                processing="Web検索",
+                input_text=text,
+                output_text=answer,
+                title="Web検索ログ",
+                description="最新情報の検索結果を返しました。",
+                references=web_refs,
+            )
+            await self.bot.process_commands(msg)
+            return
+
         # ユーザー名を取得
         user = msg.author
         user_name = user.display_name or user.name or str(user.id)
@@ -2939,6 +3018,7 @@ class MessageLogger(BaseCog):
         today_local = datetime.now(JST)
         absolute_date = today_local.strftime("%Y-%m-%d")
         requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
+        mention_focus_block = ""
         history_context, planned_refs = await self._resolve_chat_context(
             msg=msg,
             user_display=user_display,
@@ -3011,6 +3091,11 @@ class MessageLogger(BaseCog):
                                 "role": "user",
                                 "content": (
                                     (
+                                        mention_focus_block
+                                        if mention_focus_block
+                                        else ""
+                                    )
+                                    + (
                                         "[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n"
                                         if requires_bot_capability_grounding
                                         else ""
@@ -3113,6 +3198,13 @@ class MessageLogger(BaseCog):
                     )
                 )
                 return
+            try:
+                await msg.channel.send(
+                    f"{msg.author.mention}\n処理中にエラーが起きました。もう一度試してください。",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                logger.exception("Failed to send AI error notice")
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 

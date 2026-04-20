@@ -467,6 +467,34 @@ class OllamaClientService:
             return value[: -len("-cloud")]
         return value
 
+    def _configured_fallback_models(self, primary_model: str) -> list[str]:
+        settings = get_settings()
+        candidates: list[str] = []
+        for candidate in (
+            _OLLAMA_FALLBACK_MODEL,
+            str(settings.get("ollama.model_chat", "") or "").strip(),
+            str(settings.get("ollama.model_summary", "") or "").strip(),
+            str(settings.get("ollama.model_default", "") or "").strip(),
+        ):
+            if not candidate or candidate == primary_model:
+                continue
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def _candidate_models(
+        self,
+        primary_model: str,
+        fallback_models: Optional[list[str]] = None,
+    ) -> list[str]:
+        candidates: list[str] = []
+        for candidate in [primary_model, *(fallback_models or []), *self._configured_fallback_models(primary_model)]:
+            model_name = str(candidate or "").strip()
+            if not model_name or model_name in candidates:
+                continue
+            candidates.append(model_name)
+        return candidates
+
     def _try_local_chat_fallback(
         self,
         *,
@@ -554,6 +582,7 @@ class OllamaClientService:
         messages: list[dict],
         stream: bool = False,
         format: Optional[str | dict] = None,
+        fallback_models: Optional[list[str]] = None,
         **kwargs,
     ):
         """
@@ -569,13 +598,24 @@ class OllamaClientService:
         Returns:
             streaming 時は generator、非 streaming 時は response
         """
-        return self._chat_with_auto_pull(
-            model=model,
-            messages=messages,
-            stream=stream,
-            format=format,
-            **kwargs,
-        )
+        candidates = self._candidate_models(model, fallback_models)
+        last_error: Exception | None = None
+        for candidate in candidates:
+            try:
+                return self._chat_with_auto_pull(
+                    model=candidate,
+                    messages=messages,
+                    stream=stream,
+                    format=format,
+                    **kwargs,
+                )
+            except Exception as err:
+                last_error = err
+                logger.warning("chat failed with model '%s': %r", candidate, err)
+                continue
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("chat failed without any candidate model")
 
     def has_web_tools(self) -> bool:
         # Gemini requests are routed directly via REST and do not expose local web tools here.
@@ -730,6 +770,7 @@ class OllamaClientService:
         model: str,
         prompt: str,
         stream: bool = False,
+        fallback_models: Optional[list[str]] = None,
         **kwargs,
     ) -> str | None:
         """
@@ -745,32 +786,48 @@ class OllamaClientService:
             応答テキスト（streaming 時は最後の chunk）
         """
         messages = [{"role": "user", "content": prompt}]
+        candidates = self._candidate_models(model, fallback_models)
         
         if stream:
             last_content = None
-            try:
-                for chunk in self._chat_with_auto_pull(
-                    model=model,
-                    messages=messages,
-                    stream=True,
-                    **kwargs,
-                ):
-                    msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {}) or {}
-                    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-                    if content:
-                        last_content = content
-            except Exception:
+            last_error: Exception | None = None
+            for candidate in candidates:
+                try:
+                    for chunk in self._chat_with_auto_pull(
+                        model=candidate,
+                        messages=messages,
+                        stream=True,
+                        **kwargs,
+                    ):
+                        msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", {}) or {}
+                        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+                        if content:
+                            last_content = content
+                    if last_content:
+                        return last_content
+                except Exception as err:
+                    last_error = err
+                    logger.warning("chat_simple stream failed with model '%s': %r", candidate, err)
+                    continue
+            if last_error is not None:
                 logger.exception("chat_simple stream failed")
-                return None
             return last_content
-        else:
+        last_error: Exception | None = None
+        for candidate in candidates:
             try:
-                resp = self._chat_with_auto_pull(model=model, messages=messages, **kwargs)
+                resp = self._chat_with_auto_pull(model=candidate, messages=messages, **kwargs)
                 msg = resp.get("message", {}) if isinstance(resp, dict) else getattr(resp, "message", {}) or {}
-                return msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-            except Exception:
-                logger.exception("chat_simple failed")
+                content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+                if content:
+                    return content
                 return None
+            except Exception as err:
+                last_error = err
+                logger.warning("chat_simple failed with model '%s': %r", candidate, err)
+                continue
+        if last_error is not None:
+            logger.exception("chat_simple failed")
+        return None
 
 
 def create_ollama_client(

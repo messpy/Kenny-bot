@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 
 from ddgs import DDGS  # uv add ddgs
@@ -47,6 +47,7 @@ class SummaryConfig:
     concurrency: int = 2
     model: str = "gemma2:2b"    # 記事要約に使うモデル
     max_chars: int = 400        # 1件あたりの要約最大文字数
+    fallback_models: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -196,6 +197,15 @@ class WebSummarizer:
         self.config = config
         self._sem = asyncio.Semaphore(config.concurrency)
 
+    def _candidate_models(self) -> list[str]:
+        candidates: list[str] = []
+        for model in (self.config.model, *self.config.fallback_models):
+            model_name = str(model or "").strip()
+            if not model_name or model_name in candidates:
+                continue
+            candidates.append(model_name)
+        return candidates
+
     async def summarize_one(self, question: str, item: WebItem, *, mode: str = "normal") -> str:
         """
         記事 1 件分を要約する。
@@ -226,16 +236,37 @@ class WebSummarizer:
 【出力条件】
 ・2〜4行程度の日本語要約
 ・事実ベースで、推測は避ける
+・記事本文（抜粋）と記事要約一覧に書かれていない固有名詞、数値、出来事は追加しない
+・質問に対する答えが記事から確認できない場合は、確認できないと書く
 ・見出しや装飾は不要
 """
 
         async with self._sem:
-            out = await self.runner.run_async(prompt, model=self.config.model)
-
-        out = (out or "").strip()
-        if len(out) > self.config.max_chars:
-            out = out[:self.config.max_chars] + "..."
-        return out
+            last_error: Exception | None = None
+            for model_name in self._candidate_models():
+                try:
+                    out = await self.runner.run_async(prompt, model=model_name)
+                    out = (out or "").strip()
+                    if len(out) > self.config.max_chars:
+                        out = out[:self.config.max_chars] + "..."
+                    if out:
+                        return out
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "[ai_search] summarize failed with model=%s url=%s: %r",
+                        model_name,
+                        item.url,
+                        e,
+                    )
+                    continue
+            if last_error is not None:
+                logger.warning(
+                    "[ai_search] summarize failed for all models url=%s: %r",
+                    item.url,
+                    last_error,
+                )
+        return ""
 
 
 class AISearchService:
@@ -246,6 +277,7 @@ class AISearchService:
         runner: OllamaRunner,
         *,
         final_model: str,
+        final_fallback_models: Optional[List[str]] = None,
         mode_to_max_chars: Optional[Dict[str, int]] = None,
         debug: bool = False,
     ) -> None:
@@ -253,6 +285,11 @@ class AISearchService:
         self.summarizer = summarizer
         self.runner = runner
         self.final_model = final_model
+        self.final_fallback_models = [
+            str(model or "").strip()
+            for model in (final_fallback_models or [])
+            if str(model or "").strip()
+        ]
         self._mode_to_max_chars = mode_to_max_chars or _MODE_TO_MAX_CHARS
         self.debug = debug
 
@@ -271,6 +308,82 @@ class AISearchService:
         """
         keywords = ("意味", "とは", "定義", "由来", "語源")
         return any(k in question for k in keywords)
+
+    def _build_direct_answer(
+        self,
+        *,
+        question: str,
+        query: str,
+        items: List[WebItem],
+        summaries: List[str],
+    ) -> str:
+        if not items:
+            return "検索結果が取得できませんでした。キーワードを変えて再度お試しください。"
+
+        def _snippet_summary(item: WebItem) -> str:
+            snippet = (item.snippet or "").strip()
+            if snippet:
+                snippet = snippet.replace("\n", " ")
+                if len(snippet) > 180:
+                    snippet = snippet[:180] + "..."
+            title = (item.title or "").strip()
+            if snippet and title:
+                return f"{title}。{snippet}"
+            if snippet:
+                return snippet
+            if title:
+                return title
+            return "詳細は記事URLを確認してください。"
+
+        lines: List[str] = []
+        lines.append("Web検索結果を取得しました。")
+        lines.append("")
+        lines.append("【要点】")
+        for item in items[: self.searcher.config.top_n]:
+            lines.append(f"- {_snippet_summary(item)}")
+        if summaries:
+            lines.append("")
+            lines.append("【AI要約】")
+            for sm in summaries[: self.searcher.config.top_n]:
+                lines.append(f"- {sm}")
+        lines.append("")
+        lines.append("【見つかった記事】")
+        for it in items[: self.searcher.config.top_n]:
+            date_str = f"（{it.date}）" if it.date else ""
+            snippet = f" / {it.snippet}" if it.snippet else ""
+            lines.append(f"- {it.title}{date_str}{snippet}\n  {it.url}")
+        lines.append("")
+        lines.append("【参考】")
+        for it in items[: self.searcher.config.top_n]:
+            lines.append(f"- {it.url}")
+        return "\n".join(lines)
+
+    def _candidate_final_models(self) -> list[str]:
+        candidates: list[str] = []
+        for model in (self.final_model, *self.final_fallback_models):
+            model_name = str(model or "").strip()
+            if not model_name or model_name in candidates:
+                continue
+            candidates.append(model_name)
+        return candidates
+
+    async def _run_with_model_fallbacks(self, prompt: str) -> str:
+        last_error: Exception | None = None
+        for model_name in self._candidate_final_models():
+            try:
+                answer_text = await self.runner.run_async(prompt, model=model_name)
+                return (answer_text or "").strip()
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "[ai_search] final generation failed with model=%s: %r",
+                    model_name,
+                    e,
+                )
+                continue
+        if last_error is not None:
+            raise last_error
+        return ""
 
     # ------------------------------
     # メイン処理
@@ -336,17 +449,13 @@ class AISearchService:
                 break
 
         if not summaries:
-            # 要約が全部失敗した場合でも、途中経過としてタイトル＋URL は返す
             fallback_items = items[:top_n]
-            lines = [
-                "Web検索結果を取得しましたが、AI要約に失敗しました。",
-                "",
-                "【見つかった記事】",
-            ]
-            for it in fallback_items:
-                date_str = f"（{it.date}）" if it.date else ""
-                lines.append(f"- {it.title}{date_str}\n  {it.url}")
-            answer = "\n".join(lines)
+            answer = self._build_direct_answer(
+                question=question,
+                query=q,
+                items=fallback_items,
+                summaries=[],
+            )
             return AISearchAnswer(query=q, items=fallback_items, summaries=[], answer=answer)
 
         # Discord 向けにまとめるためのプロンプトを構築
@@ -383,10 +492,23 @@ class AISearchService:
 3. 最後に [参考] セクションを作り、利用した記事の URL を上から順に列挙する
 
 ※ 検索結果にない情報は推測しないでください。
+※ 挨拶文、雑談、ユーザー名の言い回し、日付の補完、ニュースの創作はしないでください。
+※ 記事から確認できない話題は「検索結果からは確認できません」と書いてください。
 """
 
-        answer_text = await self.runner.run_async(final_prompt, model=self.final_model)
-        answer_text = (answer_text or "").strip()
+        try:
+            answer_text = await self._run_with_model_fallbacks(final_prompt)
+        except Exception as e:
+            logger.warning("[ai_search] final answer generation failed: %r", e)
+            answer_text = ""
+
+        if not answer_text:
+            answer_text = self._build_direct_answer(
+                question=question,
+                query=q,
+                items=used_items,
+                summaries=summaries,
+            )
 
         max_chars = self._mode_to_max_chars.get(mode, _MODE_TO_MAX_CHARS["normal"])
         if len(answer_text) > max_chars:
