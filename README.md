@@ -302,7 +302,8 @@ python bin/migrate_channel_rag.py
 python bin/reindex_message_embeddings.py
 ```
 
-これは `data/message_logs/*.json` を読み、`ollama.model_embedding` で batch embedding を作って `data/message_logs/message_vectors.sqlite3` に保存します。
+これは `runtime/history/message_logs/*.json` を読み、`ollama.model_embedding` で batch embedding を作って `runtime/rag/message_vectors.sqlite3` に保存します。
+既存の `data/message_logs/*.json` も互換入力として読みます。
 
 ### 議事録機能
 
@@ -403,6 +404,7 @@ python bin/reindex_message_embeddings.py
 ### 保存方式
 - **場所**: `data/channel_rag/<guild_id>/channels/<channel_id>/messages.json`
 - **互換保存**: 既存の `data/message_logs/*.json` にも書き出し
+- **新規保存**: `runtime/history/message_logs/*.json`
 - **保持件数**: チャンネル単位で最新 1000 件
 - **更新頻度**: リアルタイム（全メッセージ）
 

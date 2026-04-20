@@ -23,6 +23,8 @@ data/meeting_audio_debug/
 data/*.json
 data/*.lock
 .codex
+runtime/*
+!runtime/AGENTS.md
 
 # ===== OS =====
 .DS_Store

@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List
 
-from src.kennybot.utils.paths import MESSAGE_LOG_DIR
+from src.kennybot.utils.paths import LEGACY_MESSAGE_LOG_DIR, MESSAGE_LOG_DIR
 from src.kennybot.utils.scoped_data import channel_scope_dir, ensure_scoped_dirs
 from src.kennybot.utils.runtime_settings import get_settings
 
@@ -39,7 +39,7 @@ class MessageStore:
         self.guild_name = guild_name
         self.channel_name = channel_name
         self.log_file = channel_scope_dir(guild_id, channel_id) / "messages.json"
-        self.legacy_log_file = MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
+        self.legacy_log_file = LEGACY_MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
 
     def _load_messages(self) -> List[dict]:
         """JSON ファイルからメッセージを読み込む"""

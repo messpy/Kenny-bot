@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ai.client import create_ollama_client
 from utils.message_vector_store import MessageVectorStore
-from utils.paths import MESSAGE_LOG_DIR, MESSAGE_VECTOR_DB_PATH
+from utils.paths import LEGACY_MESSAGE_LOG_DIR, MESSAGE_LOG_DIR, MESSAGE_VECTOR_DB_PATH
 from utils.runtime_settings import get_settings
 
 
@@ -26,9 +26,21 @@ def _iter_message_logs(root: Path) -> list[tuple[int, int, Path]]:
     return out
 
 
+def _iter_all_message_logs(roots: list[Path]) -> list[tuple[int, int, Path]]:
+    seen: set[Path] = set()
+    out: list[tuple[int, int, Path]] = []
+    for root in roots:
+        for guild_id, channel_id, path in _iter_message_logs(root):
+            if path in seen:
+                continue
+            seen.add(path)
+            out.append((guild_id, channel_id, path))
+    return out
+
+
 def main() -> int:
     settings = get_settings()
-    logs_root = MESSAGE_LOG_DIR
+    logs_roots = [MESSAGE_LOG_DIR, LEGACY_MESSAGE_LOG_DIR]
     vector_db = MESSAGE_VECTOR_DB_PATH
     model = str(settings.get("ollama.model_embedding", "embeddinggemma"))
     batch_size = 32
@@ -39,7 +51,7 @@ def main() -> int:
     total_rows = 0
     indexed_rows = 0
 
-    for guild_id, channel_id, path in _iter_message_logs(logs_root):
+    for guild_id, channel_id, path in _iter_all_message_logs(logs_roots):
         try:
             messages = json.loads(path.read_text(encoding="utf-8"))
         except Exception:

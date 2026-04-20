@@ -36,9 +36,11 @@ for path in (
     path.mkdir(parents=True, exist_ok=True)
 
 LOG_FILE = LOG_DIR / datetime.now().strftime("kennybot_%Y%m%d.log")
-MESSAGE_LOG_DIR = DATA_DIR / "message_logs"
+LEGACY_MESSAGE_LOG_DIR = DATA_DIR / "message_logs"
+LEGACY_MESSAGE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+MESSAGE_LOG_DIR = RUNTIME_HISTORY_DIR / "message_logs"
 MESSAGE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-MESSAGE_VECTOR_DB_PATH = MESSAGE_LOG_DIR / "message_vectors.sqlite3"
+MESSAGE_VECTOR_DB_PATH = RUNTIME_RAG_DIR / "message_vectors.sqlite3"
 CHANNEL_RAG_DIR = DATA_DIR / "channel_rag"
 CHANNEL_RAG_DIR.mkdir(parents=True, exist_ok=True)
 # Backward-compatible alias for older references.
