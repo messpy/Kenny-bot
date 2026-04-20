@@ -251,8 +251,16 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
         "runtime_model": "モデル名は？",
         "capability": "このBotは何ができる？",
         "web_search": "今日のニュースは？",
+        "current_info": "最近の京都の事件を教えて",
+        "news": "今日のニュースは？",
+        "search": "この事件について最新情報を教えて",
         "person": f"<@{args.mention_user_id or args.author_id}> はどんな人？",
+        "person_history": f"<@{args.mention_user_id or args.author_id}> の最後の投稿ある？",
+        "local_activity": f"<@{args.mention_user_id or args.author_id}> 最近の行動は？",
         "server": "このサーバーは何のやつ？",
+        "channel_profile": "このチャンネルは何をする場所？",
+        "minutes_start": "議事録開始",
+        "minutes_stop": "議事録停止",
     }
     if args.preset and not args.text:
         args.text = mention_presets.get(args.preset, args.preset)
@@ -264,10 +272,20 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
             route = "runtime_model"
         elif cog._is_capability_query(text):
             route = "capability"
+        elif cog._is_channel_profile_query(text):
+            route = "channel_profile"
+        elif cog._is_local_activity_query(text):
+            route = "local_activity"
+        elif cog._is_person_lookup_query(text):
+            route = "person_lookup"
         elif message_logger_module.is_current_info_intent(text) or message_logger_module.is_search_intent(text):
             route = "web_search"
         elif cog._is_bot_capability_or_game_query(text):
             route = "capability_grounded_chat"
+        elif any(w in lowered for w in ("議事録開始", "議事録スタート", "minutes start", "start minutes")):
+            route = "minutes_start"
+        elif any(w in lowered for w in ("議事録停止", "議事録終了", "minutes stop", "stop minutes")):
+            route = "minutes_stop"
         print("=== mention routing preview ===")
         print(f"route={route}")
         print(f"text={text!r}")
@@ -377,7 +395,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--preset",
         type=str,
         default="",
-        choices=["", "chat", "runtime_model", "capability", "web_search", "person", "server"],
+        choices=[
+            "",
+            "chat",
+            "runtime_model",
+            "capability",
+            "web_search",
+            "current_info",
+            "news",
+            "search",
+            "person",
+            "person_history",
+            "local_activity",
+            "server",
+            "channel_profile",
+            "minutes_start",
+            "minutes_stop",
+        ],
         help="Use a built-in text preset when text is omitted",
     )
 
