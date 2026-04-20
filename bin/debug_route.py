@@ -246,6 +246,16 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
     if cog is None:
         raise RuntimeError("MessageLogger cog not available")
     cog._schedule_message_index = lambda *a, **k: None  # type: ignore[assignment]
+    mention_presets = {
+        "chat": "こんにちは",
+        "runtime_model": "モデル名は？",
+        "capability": "このBotは何ができる？",
+        "web_search": "今日のニュースは？",
+        "person": f"<@{args.mention_user_id or args.author_id}> はどんな人？",
+        "server": "このサーバーは何のやつ？",
+    }
+    if args.preset and not args.text:
+        args.text = mention_presets.get(args.preset, args.preset)
     if args.no_ai:
         text = args.text
         lowered = text.lower()
@@ -357,12 +367,19 @@ def _build_parser() -> argparse.ArgumentParser:
     base.add_argument("--bot-user-name", type=str, default="Kennybot")
 
     p_mention = sub.add_parser("mention", parents=[base], help="Preview a mention/message response")
-    p_mention.add_argument("text", type=str)
+    p_mention.add_argument("text", nargs="?", default="", type=str)
     p_mention.add_argument("--message-id", type=int, default=1)
     p_mention.add_argument("--mention-user-id", type=int, default=0)
     p_mention.add_argument("--mention-user-name", type=str, default="")
     p_mention.add_argument("--mention-user-display-name", type=str, default="")
     p_mention.add_argument("--no-ai", action="store_true", help="Only print the routing decision")
+    p_mention.add_argument(
+        "--preset",
+        type=str,
+        default="",
+        choices=["", "chat", "runtime_model", "capability", "web_search", "person", "server"],
+        help="Use a built-in text preset when text is omitted",
+    )
 
     p_slash = sub.add_parser("slash", parents=[base], help="Preview a slash command callback")
     p_slash.add_argument("command", type=str)
