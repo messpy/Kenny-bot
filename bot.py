@@ -10,7 +10,7 @@ from discord.ext import commands
 
 from utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_MODEL_SUMMARY, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
 from ai.runner import OllamaRunner, OllamaConfig
-from ai.chat import ChatMemory, ChatService, ChatConfig
+from src.kennybot.features.chat import ChatMemory, ChatService, ChatConfig
 from ai.client import OllamaClientService, OllamaClientConfig, create_ollama_client
 from ai.search import AISearchService, DuckDuckGoSearch, SearchConfig, SummaryConfig, WebSummarizer
 from guards.spam_guard import SpamGuard, SpamPolicy
