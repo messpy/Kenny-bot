@@ -309,6 +309,15 @@ async def _run_slash_preview(args: argparse.Namespace) -> int:
         raise SystemExit(f"Unknown slash command: {args.command}")
 
     kwargs = {}
+    preset_args = {
+        "help": {},
+        "bot_info": {},
+        "model_list": {},
+        "config_show": {},
+        "minutes_status": {},
+    }
+    if args.preset and not args.args_json:
+        kwargs = dict(preset_args.get(args.preset, {}))
     if args.args_json:
         try:
             parsed = json.loads(args.args_json)
@@ -358,6 +367,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_slash = sub.add_parser("slash", parents=[base], help="Preview a slash command callback")
     p_slash.add_argument("command", type=str)
     p_slash.add_argument("--args-json", type=str, default="")
+    p_slash.add_argument(
+        "--preset",
+        type=str,
+        default="",
+        choices=["", "help", "bot_info", "model_list", "config_show", "minutes_status"],
+        help="Use a built-in argument preset when args-json is omitted",
+    )
 
     return parser
 
