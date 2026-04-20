@@ -58,7 +58,6 @@ global:
     いいね: 👍
     ミュ: 🐈
     みゅ: 🐈
-    草: 😂
     天才: 🧠
     かわいい: 💕
     おはよう: ☀
@@ -98,6 +97,6 @@ guilds:
           🥳: 1491616379550568498
         '1491823474581307412':
           👍: 1439435672342757477
-    summarize_recent_default_messages: 10
+    summarize_recent_default_messages: 300
   '1317683053027659786':
     summarize_recent_default_minutes: 600
