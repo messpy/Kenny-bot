@@ -8,6 +8,7 @@ from pathlib import Path
 
 from utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
 from utils.paths import CHANNEL_RAG_DIR, KNOWLEDGE_DIR
+from utils.scoped_data import channel_scope_dir, guild_scope_dir
 
 
 @dataclass
@@ -52,6 +53,13 @@ def _split_markdown_sections(text: str) -> list[RagChunk]:
         if body:
             chunks.append(RagChunk(source="README", title=cur_title, body=body))
     return chunks
+
+
+def _should_skip_chunk(chunk: RagChunk) -> bool:
+    title = (chunk.title or "").strip().lower()
+    if title in {"サンプル文", "sample文", "sample text", "sample"}:
+        return True
+    return False
 
 
 def _filter_capability_chunks(chunks: list[RagChunk]) -> list[RagChunk]:
@@ -205,21 +213,48 @@ class LocalRAG:
                 paths.append(knowledge_path)
         return paths
 
-    def _channel_extra_paths(self, channel_id: int | None) -> list[Path]:
-        if not channel_id:
+    def _channel_extra_paths(self, guild_id: int | None, channel_id: int | None) -> list[Path]:
+        if not guild_id and not channel_id:
             return []
         paths: list[Path] = []
-        channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
-        for name in ("faq.json", "faq.md", "chat_rag.md", "chat_rag.json", "chat_rag.toml"):
-            path = channel_root / name
-            if path.exists():
-                paths.append(path)
+        extra_names = (
+            "faq.json",
+            "faq.md",
+            "chat_rag.md",
+            "chat_rag.json",
+            "chat_rag.toml",
+            "rules.md",
+            "rules.json",
+            "rules.toml",
+            "settings.yaml",
+            "settings.json",
+            "settings.toml",
+        )
+        if guild_id:
+            guild_root = guild_scope_dir(guild_id)
+            for name in extra_names:
+                path = guild_root / name
+                if path.exists():
+                    paths.append(path)
+        if guild_id and channel_id:
+            channel_root = channel_scope_dir(guild_id, channel_id)
+            for name in extra_names:
+                path = channel_root / name
+                if path.exists():
+                    paths.append(path)
+        if channel_id:
+            channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
+            for name in extra_names:
+                path = channel_root / name
+                if path.exists():
+                    paths.append(path)
         return paths
 
     def _load_chunks(
         self,
         *,
         capability_only: bool = False,
+        guild_id: int | None = None,
         channel_id: int | None = None,
         channel_only: bool = False,
     ) -> list[RagChunk]:
@@ -234,15 +269,17 @@ class LocalRAG:
                     chunks.extend(readme_chunks)
                 except Exception:
                     pass
-        for path in self._channel_extra_paths(channel_id):
+        for path in self._channel_extra_paths(guild_id, channel_id):
             if not path.exists():
                 continue
-            try:
-                extra_chunks = _load_extra_rag_file(path)
-                for chunk in extra_chunks:
-                    chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
-            except Exception:
-                pass
+                try:
+                    extra_chunks = _load_extra_rag_file(path)
+                    for chunk in extra_chunks:
+                        if _should_skip_chunk(chunk):
+                            continue
+                        chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
+                except Exception:
+                    pass
         if not channel_only:
             for path in self._global_extra_paths:
                 if not path.exists():
@@ -250,6 +287,8 @@ class LocalRAG:
                 try:
                     extra_chunks = _load_extra_rag_file(path)
                     for chunk in extra_chunks:
+                        if _should_skip_chunk(chunk):
+                            continue
                         chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
                 except Exception:
                     pass
@@ -261,12 +300,14 @@ class LocalRAG:
         limit: int = 4,
         *,
         capability_only: bool = False,
+        guild_id: int | None = None,
         channel_id: int | None = None,
         channel_only: bool = False,
     ) -> list[RagChunk]:
         tokens = set(_tokenize(query))
         chunks = self._load_chunks(
             capability_only=capability_only,
+            guild_id=guild_id,
             channel_id=channel_id,
             channel_only=channel_only,
         )
@@ -340,9 +381,46 @@ class LocalRAG:
         return faq_path
 
     def append_guild_qa(self, **kwargs: object) -> Path:
-        channel_id = kwargs.pop("channel_id", None)
-        if channel_id is None:
-            channel_id = kwargs.pop("guild_id", None)
-        if channel_id is None:
-            raise TypeError("channel_id is required")
-        return self.append_channel_qa(channel_id=int(channel_id), **kwargs)  # type: ignore[arg-type]
+        guild_id = kwargs.pop("guild_id", None)
+        if guild_id is None:
+            guild_id = kwargs.pop("channel_id", None)
+        if guild_id is None:
+            raise TypeError("guild_id is required")
+        guild_root = guild_scope_dir(int(guild_id))
+        guild_root.mkdir(parents=True, exist_ok=True)
+        question = str(kwargs.pop("question", "")).strip()
+        answer = str(kwargs.pop("answer", "")).strip()
+        if not question:
+            raise ValueError("question is required")
+        if not answer:
+            raise ValueError("answer is required")
+        faq_path = guild_root / "faq.json"
+        entries: list[dict[str, object]] = []
+        if faq_path.exists():
+            try:
+                loaded = json.loads(faq_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    entries = [item for item in loaded if isinstance(item, dict)]
+            except Exception:
+                entries = []
+        entry: dict[str, object] = {
+            "title": question,
+            "question": question,
+            "answer": answer,
+        }
+        tags = kwargs.pop("tags", None)
+        cleaned_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+        if cleaned_tags:
+            entry["tags"] = cleaned_tags
+        metadata = kwargs.pop("metadata", None)
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if value is None:
+                    continue
+                entry[key] = value
+        entries.append(entry)
+        faq_path.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return faq_path

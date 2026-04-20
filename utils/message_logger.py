@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from utils.paths import ALL_MESSAGES_LOG
+from utils.scoped_data import append_text, channel_logs_dir, ensure_scoped_dirs, guild_logs_dir
 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,15 @@ def _append_line(line: str) -> None:
             f.write(line.rstrip("\n") + "\n")
     except Exception:
         logger.exception("Failed to write message log")
+
+
+def _append_scoped_line(line: str, guild_id: int, channel_id: int) -> None:
+    try:
+        ensure_scoped_dirs(guild_id, channel_id)
+        append_text(guild_logs_dir(guild_id) / "messages.log", line)
+        append_text(channel_logs_dir(guild_id, channel_id) / "messages.log", line)
+    except Exception:
+        logger.exception("Failed to write scoped message log")
 
 
 def _timestamp() -> str:
@@ -39,6 +49,11 @@ def log_user_message(msg: Any) -> None:
     content = getattr(msg, "content", "") or ""
     _append_line(
         f"{_format_common_prefix('USER', msg)} author={author_name} author_id={author_id} content={content!r}"
+    )
+    _append_scoped_line(
+        f"{_format_common_prefix('USER', msg)} author={author_name} author_id={author_id} content={content!r}",
+        int(getattr(getattr(msg, "guild", None), "id", 0) or 0),
+        int(getattr(getattr(msg, "channel", None), "id", 0) or 0),
     )
 
 
@@ -61,7 +76,14 @@ def log_ai_output(
     ]
     if error:
         parts.append(f"error={error!r}")
-    _append_line(" ".join(parts))
+    line = " ".join(parts)
+    _append_line(line)
+    if msg is not None:
+        _append_scoped_line(
+            line,
+            int(getattr(getattr(msg, "guild", None), "id", 0) or 0),
+            int(getattr(getattr(msg, "channel", None), "id", 0) or 0),
+        )
 
 
 def log_system_event(
@@ -80,4 +102,11 @@ def log_system_event(
     ]
     if details:
         parts.append(f"details={details!r}")
-    _append_line(" ".join(parts))
+    line = " ".join(parts)
+    _append_line(line)
+    if msg is not None:
+        _append_scoped_line(
+            line,
+            int(getattr(getattr(msg, "guild", None), "id", 0) or 0),
+            int(getattr(getattr(msg, "channel", None), "id", 0) or 0),
+        )

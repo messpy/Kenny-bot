@@ -92,22 +92,13 @@ class VoiceLogger(commands.Cog):
         if not result:
             return
 
-        out_ch = self.bot.meeting_minutes.resolve_announce_channel(  # type: ignore[attr-defined]
+        await self.bot.meeting_minutes.deliver_stop_result(  # type: ignore[attr-defined]
             self.bot,
             guild,
-            session.announce_channel_id,
-            allow_fallback=False,
+            result,
+            action="minutes_auto_stop",
+            source_channel_id=session.announce_channel_id,
         )
-        if out_ch:
-            embed = self.bot.meeting_minutes.build_result_embed(guild, result)  # type: ignore[attr-defined]
-            await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
-        log_ch = self.bot.meeting_minutes.resolve_global_log_channel(self.bot)  # type: ignore[attr-defined]
-        if log_ch and out_ch != log_ch:
-            await log_ch.send(
-                f"[minutes_auto_stop] guild={guild.id} channel={session.announce_channel_id} "
-                f"user={result.mention_user_id} lines={result.transcript_line_count} "
-                f"provider={result.session.transcription_provider or 'default'} model={result.session.whisper_model or 'default'}"
-            )
 
     async def _handle_voice_join(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC入室を記録してロギング"""

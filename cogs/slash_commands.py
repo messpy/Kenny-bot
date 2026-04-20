@@ -747,7 +747,9 @@ class SlashCommands(commands.Cog):
                 key=progress_key,
                 channel=interaction.channel,
                 mention_user_id=interaction.user.id,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(ticket, elapsed),
+                text_factory=lambda elapsed, model=model_summary: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed, model
+                ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
             try:
@@ -1292,21 +1294,19 @@ class SlashCommands(commands.Cog):
             await interaction.followup.send("現在、進行中の議事録はありません。", ephemeral=True)
             return
 
-        embed = self.bot.meeting_minutes.build_result_embed(interaction.guild, result)
         await interaction.followup.send("議事録を停止し、要約を作成しました。", ephemeral=True)
-
-        out_ch = self.bot.meeting_minutes.resolve_announce_channel(
-            self.bot,
-            interaction.guild,
-            interaction.channel_id,
-            allow_fallback=False,
-        )
-        if out_ch:
-            await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
 
         playback_note = ""
         voice_channel = interaction.guild.get_channel(result.session.voice_channel_id)
-        wav_path = Path(result.audio_debug_paths[0]) if result.audio_debug_paths else None
+        wav_path = None
+        if result.audio_debug_paths:
+            for candidate in result.audio_debug_paths:
+                path = Path(candidate)
+                if path.suffix.lower() == ".wav":
+                    wav_path = path
+                    break
+            if wav_path is None:
+                wav_path = Path(result.audio_debug_paths[0])
         if wav_path and wav_path.exists() and isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
             try:
                 playback_error = await self._play_wav_in_voice_channel(interaction.guild, voice_channel, wav_path)
@@ -1317,14 +1317,14 @@ class SlashCommands(commands.Cog):
             except Exception as e:
                 playback_note = f" / 録音再生失敗: {e}"
 
-        log_ch = self.bot.meeting_minutes.resolve_global_log_channel(self.bot)
-        if log_ch and out_ch != log_ch:
-            await log_ch.send(
-                f"[minutes_stop] guild={interaction.guild.id} channel={interaction.channel_id} "
-                f"user={result.mention_user_id} lines={result.transcript_line_count} "
-                f"provider={result.session.transcription_provider or 'default'} model={result.session.whisper_model or 'default'}"
-                f"{playback_note}"
-            )
+        await self.bot.meeting_minutes.deliver_stop_result(
+            self.bot,
+            interaction.guild,
+            result,
+            action="minutes_stop",
+            source_channel_id=interaction.channel_id,
+            playback_note=playback_note,
+        )
 
     @app_commands.command(name=MINUTES_STATUS_META.name, description=MINUTES_STATUS_META.description)
     async def minutes_status(self, interaction: discord.Interaction):

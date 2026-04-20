@@ -275,18 +275,29 @@ class AISearchService:
     # ------------------------------
     # メイン処理
     # ------------------------------
-    async def answer_ai_async(self, question: str, *, mode: str = "normal") -> AISearchAnswer:
+    async def answer_ai_async(
+        self,
+        question: str,
+        *,
+        mode: str = "normal",
+        news_only: bool | None = None,
+    ) -> AISearchAnswer:
         q = self._build_query(question)
         if self.debug:
             logger.debug("[ai_search] question=%r query=%r mode=%s", question, q, mode)
         else:
             logger.info("[ai_search] built query: %r", q)
 
-        # 定義系の質問なら news_only=False で検索
+        # 定義系の質問なら news_only=False で検索。呼び出し側が明示した場合はそれを優先する。
         prefer_web = self._prefer_web_over_news(question)
+        effective_news_only = (not prefer_web) if news_only is None else bool(news_only)
 
         try:
-            items = await asyncio.to_thread(self.searcher.search, q, news_only=not prefer_web)
+            items = await asyncio.to_thread(
+                self.searcher.search,
+                q,
+                news_only=effective_news_only,
+            )
         except TimeoutException as e:
             logger.warning("[ai_search] ddgs timeout: %r", e)
             msg = "Web検索の実行に失敗しました。クエリを短くするか、時間をおいて再度お試しください。"

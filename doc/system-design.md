@@ -242,6 +242,7 @@ flowchart TD
 - 外部依存の失敗は、可能であればフォールバックする
 - Gemini の `generateContent` が 429 / クォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` と `ollama.model_chat` / `ollama.model_summary` を順に試して Ollama へ切り替える
 - チャンネル固有の説明は `data/channel_rag/<channel_id>/chat_rag.md` に保存し、会話応答のローカル知識として参照する
+- 録音系の設定は `recorder.default_format` / `recorder.max_minutes` / `recorder.silence_timeout_seconds` / `recorder.max_tracks` / `recorder.auto_cook_formats` を使い、外部録音の停止と後処理に反映する
 
 ## 10. ディレクトリ方針
 

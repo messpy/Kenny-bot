@@ -65,7 +65,7 @@ global:
     天使: て、て、て、天使の羽👼
   reaction_roles:
     bindings:
-      '1489788137512108203': &id001
+      '1489788137512108203':
         😂: 1162405024475922523
   tts:
     voicevox_url: http://127.0.0.1:50021
@@ -85,18 +85,4 @@ global:
     - flac
     - mix
   summarize_recent_default_minutes: 30
-guilds:
-  '664237144600215581':
-    summarize_recent_default_minutes: 720
-    reaction_roles:
-      bindings:
-        '1489788137512108203': *id001
-        '1491609482461970472':
-          🥳: 1272063659832512555
-        '1491612540151529552':
-          🥳: 1491616379550568498
-        '1491823474581307412':
-          👍: 1439435672342757477
-    summarize_recent_default_messages: 300
-  '1317683053027659786':
-    summarize_recent_default_minutes: 600
+guilds: {}

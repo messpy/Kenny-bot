@@ -142,7 +142,21 @@ global:
     model_chat: mistral-large-3:675b-cloud
     model_summary: gpt-oss:120b
     model_embedding: embeddinggemma
+  recorder:
+    default_format: flac
+    max_minutes: 180
+    silence_timeout_seconds: 15
+    max_tracks: 10000
+    auto_cook_formats: [flac, mix]
 ```
+
+### 録音設定
+
+- `recorder.default_format`: 録音後に標準で用意する形式
+- `recorder.max_minutes`: 外部録音プロセスの最大継続時間
+- `recorder.silence_timeout_seconds`: 無音が続いたときの自動停止秒数
+- `recorder.max_tracks`: 録音対象のトラック数上限
+- `recorder.auto_cook_formats`: 停止後に追加で書き出す形式
 
 ### キーワードリアクション
 

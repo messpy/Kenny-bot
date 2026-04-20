@@ -41,7 +41,9 @@ class _RecordingRuntime:
     recorder_process: asyncio.subprocess.Process | None = None
     recorder_ready_path: Path | None = None
     recorder_log_path: Path | None = None
+    recorder_reason_path: Path | None = None
     recorder_wav_path: Path | None = None
+    recorder_watch_task: asyncio.Task | None = None
     warning: str = ""
     max_total_bytes: int = 64 * 1024 * 1024
     max_user_bytes: int = 8 * 1024 * 1024
@@ -119,6 +121,119 @@ class MeetingMinutesManager:
     @staticmethod
     def _realtime_min_audio_bytes(guild_id: int) -> int:
         return max(24000, int(_settings.get("meeting.realtime_translation_min_audio_bytes", 48000, guild_id=guild_id)))
+
+    @staticmethod
+    def _realtime_interval_seconds(guild_id: int) -> float:
+        return max(
+            1.0,
+            float(_settings.get("meeting.realtime_translation_interval_sec", 20, guild_id=guild_id)),
+        )
+
+    @staticmethod
+    def _normalize_recorder_format(value: object, default: str = "wav") -> str:
+        text = str(value or "").strip().lower()
+        if text in {"", "none"}:
+            return default
+        if text in {"wav", "wave"}:
+            return "wav"
+        if text in {"flac", "mix"}:
+            return text
+        return default
+
+    @classmethod
+    def _recorder_default_format(cls, guild_id: int) -> str:
+        return cls._normalize_recorder_format(_settings.get("recorder.default_format", "wav", guild_id=guild_id))
+
+    @classmethod
+    def _recorder_auto_cook_formats(cls, guild_id: int) -> list[str]:
+        raw = _settings.get("recorder.auto_cook_formats", ["flac", "mix"], guild_id=guild_id)
+        if isinstance(raw, str):
+            items = [part.strip() for part in raw.split(",")]
+        elif isinstance(raw, (list, tuple, set)):
+            items = [str(part).strip() for part in raw]
+        else:
+            items = ["flac", "mix"]
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            fmt = cls._normalize_recorder_format(item, default="")
+            if not fmt or fmt in seen:
+                continue
+            seen.add(fmt)
+            out.append(fmt)
+        return out
+
+    @staticmethod
+    def _recorder_max_minutes(guild_id: int) -> int:
+        return max(0, int(_settings.get("recorder.max_minutes", 180, guild_id=guild_id)))
+
+    @staticmethod
+    def _recorder_silence_timeout_seconds(guild_id: int) -> int:
+        return max(0, int(_settings.get("recorder.silence_timeout_seconds", 15, guild_id=guild_id)))
+
+    @staticmethod
+    def _recorder_max_tracks(guild_id: int) -> int:
+        return max(0, int(_settings.get("recorder.max_tracks", 10000, guild_id=guild_id)))
+
+    @staticmethod
+    def _recorder_output_path(wav_path: Path, fmt: str) -> Path:
+        normalized = MeetingMinutesManager._normalize_recorder_format(fmt, default="wav")
+        if normalized in {"wav", "mix"}:
+            return wav_path
+        return wav_path.with_suffix(f".{normalized}")
+
+    def _build_recorder_artifacts(self, wav_path: Path, guild_id: int) -> list[Path]:
+        if not wav_path.exists():
+            return []
+
+        formats = [self._recorder_default_format(guild_id), *self._recorder_auto_cook_formats(guild_id)]
+        out_paths: list[Path] = []
+        seen: set[Path] = set()
+
+        for fmt in formats:
+            target = self._recorder_output_path(wav_path, fmt)
+            if target in seen:
+                continue
+            seen.add(target)
+            if target == wav_path:
+                out_paths.append(target)
+                continue
+            if target.exists():
+                out_paths.append(target)
+                continue
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-i",
+                        str(wav_path),
+                        str(target),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                if target.exists():
+                    out_paths.append(target)
+                else:
+                    out_paths.append(wav_path)
+            except Exception:
+                out_paths.append(wav_path)
+
+        if wav_path not in out_paths:
+            out_paths.insert(0, wav_path)
+
+        deduped: list[Path] = []
+        seen_paths: set[Path] = set()
+        for path in out_paths:
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            deduped.append(path)
+        return deduped
 
     @staticmethod
     def _can_send(channel: AnnounceChannel, me: discord.Member | None) -> bool:
@@ -385,11 +500,16 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         wav_path = self._AUDIO_DEBUG_DIR / f"guild_{voice_channel.guild.id}_{stamp}_mix.wav"
         ready_path = self._AUDIO_DEBUG_DIR / f"guild_{voice_channel.guild.id}_{stamp}.ready"
         log_path = self._AUDIO_DEBUG_DIR / f"guild_{voice_channel.guild.id}_{stamp}.log"
+        reason_path = self._AUDIO_DEBUG_DIR / f"guild_{voice_channel.guild.id}_{stamp}.reason"
         for path in (ready_path, log_path):
             try:
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
+        try:
+            reason_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         env = os.environ.copy()
         env["DISCORD_TOKEN"] = token
@@ -398,6 +518,12 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         env["OUTPUT_PATH"] = str(wav_path.resolve())
         env["READY_PATH"] = str(ready_path.resolve())
         env["LOG_PATH"] = str(log_path.resolve())
+        env["REASON_PATH"] = str(reason_path.resolve())
+        env["MAX_MINUTES"] = str(self._recorder_max_minutes(voice_channel.guild.id))
+        env["SILENCE_TIMEOUT_SECONDS"] = str(self._recorder_silence_timeout_seconds(voice_channel.guild.id))
+        env["MAX_TRACKS"] = str(self._recorder_max_tracks(voice_channel.guild.id))
+        env["DEFAULT_FORMAT"] = self._recorder_default_format(voice_channel.guild.id)
+        env["AUTO_COOK_FORMATS"] = ",".join(self._recorder_auto_cook_formats(voice_channel.guild.id))
         env["PLAY_ON_STOP"] = "0"
 
         try:
@@ -417,6 +543,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         runtime.recorder_process = proc
         runtime.recorder_ready_path = ready_path
         runtime.recorder_log_path = log_path
+        runtime.recorder_reason_path = reason_path
         runtime.recorder_wav_path = wav_path
 
         for _ in range(100):
@@ -613,7 +740,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             if session is None:
                 return
             if not self._is_realtime_enabled(guild_id) or session.runtime.phrase_queue is None:
-                await asyncio.sleep(1)
+                await asyncio.sleep(self._realtime_interval_seconds(guild_id))
                 continue
             try:
                 uid, pcm = await session.runtime.phrase_queue.get()
@@ -658,6 +785,79 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             except Exception:
                 continue
 
+    def _read_recorder_reason(self, runtime: _RecordingRuntime) -> str:
+        path = runtime.recorder_reason_path
+        if path is None or not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            return ""
+
+    async def _watch_external_recorder(self, bot: commands.Bot, guild_id: int) -> None:
+        session = self._sessions.get(guild_id)
+        if session is None or session.runtime.recorder_process is None:
+            return
+        proc = session.runtime.recorder_process
+        try:
+            await proc.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+        current = self._sessions.get(guild_id)
+        if current is None or current.runtime.recorder_process is not proc:
+            return
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            return
+
+        reason = self._read_recorder_reason(current.runtime) or "録音プロセスが終了したため自動停止"
+        result = await self.stop_session(
+            bot=bot,
+            guild=guild,
+            reason=reason,
+            mention_user_id=current.started_by_id,
+        )
+        if result is None:
+            return
+        await self.deliver_stop_result(
+            bot,
+            guild,
+            result,
+            action="minutes_auto_stop",
+            source_channel_id=current.announce_channel_id,
+        )
+
+    async def deliver_stop_result(
+        self,
+        bot: commands.Bot,
+        guild: discord.Guild,
+        result: MeetingStopResult,
+        *,
+        action: str,
+        source_channel_id: int | None = None,
+        playback_note: str = "",
+    ) -> None:
+        out_ch = self.resolve_announce_channel(
+            bot,
+            guild,
+            result.session.announce_channel_id,
+            allow_fallback=False,
+        )
+        if out_ch:
+            embed = self.build_result_embed(guild, result)
+            await out_ch.send(content=f"<@{result.mention_user_id}>", embed=embed)
+        log_ch = self.resolve_global_log_channel(bot)
+        if log_ch and out_ch != log_ch:
+            source = f" source_channel={source_channel_id}" if source_channel_id is not None else ""
+            await log_ch.send(
+                f"[{action}] guild={guild.id}{source} user={result.mention_user_id} "
+                f"lines={result.transcript_line_count} provider={result.session.transcription_provider or 'default'} "
+                f"model={result.session.whisper_model or 'default'}{playback_note}"
+            )
+
     async def start_session(
         self,
         bot: commands.Bot,
@@ -699,6 +899,8 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         if runtime.voice_client is not None and self._is_realtime_enabled(guild.id):
             runtime.phrase_queue = asyncio.Queue()
             runtime.realtime_task = asyncio.create_task(self._run_realtime_updates(bot, guild.id))
+        if runtime.recorder_process is not None:
+            runtime.recorder_watch_task = asyncio.create_task(self._watch_external_recorder(bot, guild.id))
 
         msg = f"議事録を開始しました。対象VC: {voice_channel.name}"
         if warmup_note:
@@ -724,18 +926,33 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 await task
             except asyncio.CancelledError:
                 pass
+        watch_task = session.runtime.recorder_watch_task
+        current_task = asyncio.current_task()
+        if watch_task is not None and watch_task is not current_task:
+            watch_task.cancel()
+            try:
+                await watch_task
+            except asyncio.CancelledError:
+                pass
 
         ended_at = discord.utils.utcnow()
         debug_chunk_map = {uid: bytes(pcm) for uid, pcm in session.runtime.chunks.items()}
-        audio_debug_paths = await asyncio.to_thread(self._dump_debug_audio, debug_chunk_map, guild.id) if debug_chunk_map else []
-        if not audio_debug_paths and session.runtime.recorder_wav_path is not None:
-            audio_debug_paths = [str(session.runtime.recorder_wav_path)]
         transcript_lines, warning = await self._stop_recording_and_transcribe(
             session.runtime,
             guild.id,
             session.transcription_provider,
             session.whisper_model,
         )
+        audio_debug_paths = await asyncio.to_thread(self._dump_debug_audio, debug_chunk_map, guild.id) if debug_chunk_map else []
+        if not audio_debug_paths and session.runtime.recorder_wav_path is not None:
+            audio_debug_paths = [
+                str(path)
+                for path in await asyncio.to_thread(
+                    self._build_recorder_artifacts,
+                    session.runtime.recorder_wav_path,
+                    guild.id,
+                )
+            ]
         transcript_line_count = len(transcript_lines)
         mention_uid = mention_user_id or session.started_by_id
 

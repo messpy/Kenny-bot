@@ -41,7 +41,15 @@ class AIProgressTracker:
         if should_release:
             self._semaphore.release()
 
-    def render(self, ticket: str, elapsed_seconds: int) -> str:
+    def render(
+        self,
+        ticket: str,
+        elapsed_seconds: int,
+        model_name: str | None = None,
+    ) -> str:
+        model_label = (model_name or "").strip()
         if ticket in self._waiting:
-            return f"{self._waiting.index(ticket) + 1}人待ち"
-        return f"{max(1, int(elapsed_seconds))}秒推論中"
+            waiting = f"{self._waiting.index(ticket) + 1}人待ち"
+            return f"{model_label} {waiting}".strip() if model_label else waiting
+        elapsed = f"{max(1, int(elapsed_seconds))}秒推論中"
+        return f"{model_label}が{elapsed}" if model_label else elapsed

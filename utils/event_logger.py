@@ -5,6 +5,7 @@ from typing import Iterable
 import discord
 
 from utils.runtime_settings import get_settings
+from utils.scoped_data import append_text, channel_logs_dir, ensure_scoped_dirs, guild_logs_dir
 
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,26 @@ async def send_event_log(
         embed.set_footer(text=footer[:2048])
 
     try:
-        return await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        if guild is not None:
+            try:
+                ensure_scoped_dirs(guild.id, source_channel_id or getattr(channel, "id", None))
+                summary_lines = [
+                    f"title={title}",
+                    f"description={description}",
+                    f"level={level}",
+                    f"channel_id={getattr(channel, 'id', 0)}",
+                ]
+                for name, value, inline in fields or ():
+                    if value:
+                        summary_lines.append(f"{name}={value[:240]}")
+                summary = " | ".join(summary_lines)
+                append_text(guild_logs_dir(guild.id) / "event.log", summary)
+                if source_channel_id is not None:
+                    append_text(channel_logs_dir(guild.id, int(source_channel_id)) / "event.log", summary)
+            except Exception:
+                logger.exception("Failed to write scoped event log: %s", title)
+        return message
     except Exception:
         logger.exception("Failed to send event log: %s", title)
         return None

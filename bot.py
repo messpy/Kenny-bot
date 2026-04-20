@@ -12,7 +12,7 @@ from utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_T
 from ai.runner import OllamaRunner, OllamaConfig
 from ai.chat import ChatMemory, ChatService, ChatConfig
 from ai.client import OllamaClientService, OllamaClientConfig, create_ollama_client
-from ai.search import AISearchService  # search.py から移動
+from ai.search import AISearchService, DuckDuckGoSearch, SearchConfig, SummaryConfig, WebSummarizer
 from guards.spam_guard import SpamGuard, SpamPolicy
 from cogs.voice_logger import VoiceLogger
 from cogs.member_logger import MemberLogger
@@ -77,6 +77,35 @@ class MyBot(commands.Bot):
             ),
             debug=False,
         )
+
+        try:
+            self.ai_search = AISearchService(
+                searcher=DuckDuckGoSearch(
+                    SearchConfig(
+                        top_n=3,
+                        max_results=10,
+                        timelimit="w",
+                        region="jp-jp",
+                        safesearch="moderate",
+                        prefer_news=False,
+                    )
+                ),
+                summarizer=WebSummarizer(
+                    runner=runner,
+                    config=SummaryConfig(
+                        mode="normal",
+                        concurrency=2,
+                        model=OLLAMA_MODEL_CHAT,
+                        max_chars=400,
+                    ),
+                ),
+                runner=runner,
+                final_model=OLLAMA_MODEL_CHAT,
+                debug=False,
+            )
+        except Exception:
+            logger.exception("Failed to initialize AI search service")
+            self.ai_search = None
 
         # 方法2: ollama_util.py スタイルの Client API
         # ローカルの ollama を使う場合

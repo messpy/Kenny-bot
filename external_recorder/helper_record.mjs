@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import OpusScript from "opusscript";
 
@@ -13,6 +14,12 @@ const voiceChannelId = process.env.VOICE_CHANNEL_ID;
 const outputPath = process.env.OUTPUT_PATH;
 const readyPath = process.env.READY_PATH;
 const logPath = process.env.LOG_PATH;
+const reasonPath = process.env.REASON_PATH;
+const maxMinutes = Number.parseFloat(process.env.MAX_MINUTES || "0");
+const silenceTimeoutSeconds = Number.parseFloat(process.env.SILENCE_TIMEOUT_SECONDS || "0");
+const maxTracks = Number.parseInt(process.env.MAX_TRACKS || "0", 10);
+const defaultFormat = normalizeFormat(process.env.DEFAULT_FORMAT || "wav");
+const autoCookFormats = parseFormats(process.env.AUTO_COOK_FORMATS || "");
 const playOnStop = process.env.PLAY_ON_STOP === "1";
 
 const requireEnv = [
@@ -33,11 +40,28 @@ for (const [name, value] of requireEnv) {
 fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 fs.mkdirSync(path.dirname(readyPath), { recursive: true });
 if (logPath) fs.mkdirSync(path.dirname(logPath), { recursive: true });
+if (reasonPath) fs.mkdirSync(path.dirname(reasonPath), { recursive: true });
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
 const BYTES_PER_SAMPLE = 2;
 const decoder = new OpusScript(SAMPLE_RATE, CHANNELS, OpusScript.Application.AUDIO);
+
+function normalizeFormat(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text || text === "none") return "wav";
+  if (text === "wave") return "wav";
+  if (text === "mix") return "mix";
+  if (text === "flac") return "flac";
+  return "wav";
+}
+
+function parseFormats(text) {
+  return String(text || "")
+    .split(",")
+    .map((part) => normalizeFormat(part))
+    .filter((fmt, index, arr) => fmt && arr.indexOf(fmt) === index);
+}
 
 function log(message) {
   const line = `${new Date().toISOString()} ${message}\n`;
@@ -91,6 +115,10 @@ let sessionStartedAt = Date.now();
 let firstPacketAt = null;
 let lastPacketAt = null;
 let lastTimestamp = null;
+let lastVoicePacketAt = null;
+let stopReason = "manual stop";
+let stopTimer = null;
+const seenUsers = new Set();
 
 function writeSilenceSamples(sampleCount) {
   if (!sampleCount || sampleCount <= 0) return;
@@ -98,9 +126,74 @@ function writeSilenceSamples(sampleCount) {
   writer.write(Buffer.alloc(bytes));
 }
 
+function cookOutputs() {
+  const formats = new Set([defaultFormat, ...autoCookFormats].filter(Boolean));
+  const artifacts = [];
+  const base = path.parse(outputPath);
+
+  for (const fmt of formats) {
+    if (fmt === "wav" || fmt === "mix") {
+      artifacts.push(outputPath);
+      continue;
+    }
+    const target = path.join(base.dir, `${base.name}.${fmt}`);
+    try {
+      if (fs.existsSync(target)) {
+        artifacts.push(target);
+        continue;
+      }
+      const result = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-i", outputPath, target], {
+        stdio: "pipe",
+      });
+      if (result.status === 0 && fs.existsSync(target)) {
+        artifacts.push(target);
+      } else {
+        log(`cook failed format=${fmt} stderr=${String(result.stderr || "").trim()}`);
+        artifacts.push(outputPath);
+      }
+    } catch (error) {
+      log(`cook failed format=${fmt} error=${error}`);
+      artifacts.push(outputPath);
+    }
+  }
+
+  if (!artifacts.length) {
+    artifacts.push(outputPath);
+  }
+  return [...new Set(artifacts)];
+}
+
+function stopFor(reason) {
+  stopReason = reason || "manual stop";
+  void stopAndExit(0);
+}
+
+function maybeAutoStop() {
+  if (stopping) return;
+  if (maxMinutes > 0) {
+    const elapsedMs = Date.now() - sessionStartedAt;
+    if (elapsedMs >= maxMinutes * 60 * 1000) {
+      stopFor(`最大録音時間 ${maxMinutes} 分を超えたため停止`);
+      return;
+    }
+  }
+  if (silenceTimeoutSeconds > 0) {
+    const silenceAnchor = lastVoicePacketAt ?? sessionStartedAt;
+    const silenceMs = Date.now() - silenceAnchor;
+    if (silenceMs >= silenceTimeoutSeconds * 1000) {
+      stopFor(`無音 ${silenceTimeoutSeconds} 秒を超えたため停止`);
+      return;
+    }
+  }
+}
+
 async function stopAndExit(code = 0) {
   if (stopping) return;
   stopping = true;
+  if (stopTimer) {
+    clearInterval(stopTimer);
+    stopTimer = null;
+  }
   try {
     if (receiver) receiver.removeAllListeners("data");
   } catch {}
@@ -112,6 +205,10 @@ async function stopAndExit(code = 0) {
     }
     writer?.close();
   } catch {}
+  try {
+    if (reasonPath) fs.writeFileSync(reasonPath, `${stopReason}\n`);
+  } catch {}
+  log(`stopped reason=${stopReason} packets=${packetCount} output=${outputPath}`);
   if (playOnStop && connection) {
     await new Promise((resolve) => {
       let done = false;
@@ -144,13 +241,20 @@ async function stopAndExit(code = 0) {
   try {
     client.disconnect({ reconnect: false });
   } catch {}
-  log(`stopped packets=${packetCount} output=${outputPath}`);
   process.exit(code);
 }
 
 function onData(data, userId, timestamp) {
   if (!Buffer.isBuffer(data) || !data.length) return;
   try {
+    const uid = Number(userId) || 0;
+    if (uid && !seenUsers.has(uid)) {
+      seenUsers.add(uid);
+      if (maxTracks > 0 && seenUsers.size > maxTracks) {
+        stopFor(`最大トラック数 ${maxTracks} を超えたため停止`);
+        return;
+      }
+    }
     const now = Date.now();
     if (firstPacketAt === null) {
       firstPacketAt = now;
@@ -169,12 +273,14 @@ function onData(data, userId, timestamp) {
     writer.write(pcm);
     packetCount += 1;
     lastPacketAt = now;
+    lastVoicePacketAt = now;
     if (Number.isFinite(timestamp)) {
       lastTimestamp = Number(timestamp);
     }
     if (packetCount <= 5 || packetCount % 50 === 0) {
       log(`packet user=${userId} len=${data.length} ts=${timestamp} pcm=${pcm.length} count=${packetCount}`);
     }
+    maybeAutoStop();
   } catch (error) {
     log(`decode failed: ${error}`);
   }
@@ -190,8 +296,12 @@ client.on("ready", async () => {
     receiver.on("data", onData);
     fs.writeFileSync(readyPath, outputPath);
     log(`ready channel=${voiceChannelId} output=${outputPath}`);
+    if (maxMinutes > 0 || silenceTimeoutSeconds > 0) {
+      stopTimer = setInterval(maybeAutoStop, 1000);
+    }
   } catch (error) {
     log(`start failed: ${error}`);
+    stopReason = `start failed: ${error}`;
     await stopAndExit(1);
   }
 });
@@ -203,17 +313,17 @@ client.on("error", (error) => {
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   if (String(chunk).toLowerCase().includes("stop")) {
-    void stopAndExit(0);
+    stopFor("manual stop");
   }
 });
 process.stdin.on("end", () => {
-  void stopAndExit(0);
+  stopFor("manual stop");
 });
 process.on("SIGINT", () => {
-  void stopAndExit(0);
+  stopFor("SIGINT");
 });
 process.on("SIGTERM", () => {
-  void stopAndExit(0);
+  stopFor("SIGTERM");
 });
 
 await client.connect();

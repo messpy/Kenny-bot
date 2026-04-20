@@ -11,6 +11,7 @@ import shutil
 
 import yaml
 from utils.paths import LEGACY_RUNTIME_SETTINGS_PATH, RUNTIME_SETTINGS_PATH
+from utils.scoped_data import SCOPED_DATA_DIR, guild_settings_path
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -81,7 +82,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "いいね": "👍",
             "ミュ": "🐈",
             "みゅ": "🐈",
-            "草": "😂",
             "天才": "🧠",
             "かわいい": "💕",
             "おはよう": "☀",
@@ -102,6 +102,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "holiday_timeout_sec": 8,
         },
         "user_nicknames": {},
+        "recorder": {
+            "default_format": "flac",
+            "max_minutes": 180,
+            "silence_timeout_seconds": 15,
+            "max_tracks": 10000,
+            "auto_cook_formats": ["flac", "mix"],
+        },
     },
     "guilds": {},
 }
@@ -142,6 +149,7 @@ class SettingsStore:
             else:
                 self._data = {}
             self._ensure_shape()
+            self._load_guild_sidecars()
             self._last_mtime_ns = self._current_mtime_ns()
             if self._data != previous:
                 self.save()
@@ -152,6 +160,40 @@ class SettingsStore:
                 yaml.safe_dump(self._data, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
+
+    def _load_guild_sidecars(self) -> None:
+        if not SCOPED_DATA_DIR.exists():
+            return
+        guilds = self._data.setdefault("guilds", {})
+        if not isinstance(guilds, dict):
+            guilds = {}
+            self._data["guilds"] = guilds
+        for path in sorted(SCOPED_DATA_DIR.glob("*/settings.yaml")):
+            try:
+                guild_id = path.parent.name
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                if not isinstance(raw, dict):
+                    continue
+                current = guilds.get(guild_id, {})
+                if not isinstance(current, dict):
+                    current = {}
+                guilds[guild_id] = self._deep_merge(current, raw)
+            except Exception:
+                continue
+
+    def _save_guild_sidecar(self, guild_id: int) -> None:
+        try:
+            path = guild_settings_path(guild_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = self._data.get("guilds", {}).get(str(guild_id), {})
+            if not isinstance(data, dict):
+                data = {}
+            path.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def _ensure_shape(self) -> None:
         if "global" not in self._data or not isinstance(self._data.get("global"), dict):
@@ -209,6 +251,8 @@ class SettingsStore:
                     self._data["guilds"][str(guild_id)] = g
                 self._set_by_path(g, path, value)
             self.save()
+            if guild_id is not None:
+                self._save_guild_sidecar(guild_id)
 
     def get_global_snapshot(self) -> dict[str, Any]:
         with self._lock:

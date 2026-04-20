@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from utils.paths import MESSAGE_LOG_DIR
+from utils.scoped_data import channel_scope_dir, ensure_scoped_dirs
 from utils.runtime_settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -37,24 +38,33 @@ class MessageStore:
         self.channel_id = channel_id
         self.guild_name = guild_name
         self.channel_name = channel_name
-        self.log_file = MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
+        self.log_file = channel_scope_dir(guild_id, channel_id) / "messages.json"
+        self.legacy_log_file = MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
 
     def _load_messages(self) -> List[dict]:
         """JSON ファイルからメッセージを読み込む"""
-        if not self.log_file.exists():
-            return []
+        if self.log_file.exists():
+            try:
+                with open(self.log_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load messages: {e}")
+        if self.legacy_log_file.exists():
+            try:
+                with open(self.legacy_log_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load legacy messages: {e}")
 
-        try:
-            with open(self.log_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load messages: {e}")
-            return []
+        return []
 
     def _save_messages(self, messages: List[dict]) -> None:
         """メッセージを JSON ファイルに保存"""
         try:
+            ensure_scoped_dirs(self.guild_id, self.channel_id)
             with open(self.log_file, "w", encoding="utf-8") as f:
+                json.dump(messages, f, ensure_ascii=False, indent=2)
+            with open(self.legacy_log_file, "w", encoding="utf-8") as f:
                 json.dump(messages, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Failed to save messages: {e}")

@@ -17,7 +17,6 @@ from discord.ext import commands
 
 from utils.config import (
     PROMPT_TEMPLATE,
-    HISTORY_CONTEXT_TEMPLATE,
 )
 from utils.message_store import MessageStore
 from utils.live_info import ExternalContext, LiveInfoService
@@ -47,6 +46,7 @@ from guards.mod_actions import ModActions
 logger = logging.getLogger(__name__)
 JST = timezone(timedelta(hours=9))
 URL_RE = re.compile(r"https?://[^\s)>\"]+")
+RAG_HEADER_RE = re.compile(r"^\[([^\]]+)\]")
 
 import random
 
@@ -186,6 +186,423 @@ class MessageLogger(BaseCog):
             urls.append(url)
         return urls
 
+    def _merge_unique_strings(self, *collections: list[str]) -> list[str]:
+        seen: set[str] = set()
+        merged: list[str] = []
+        for collection in collections:
+            for value in collection:
+                item = str(value or "").strip()
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                merged.append(item)
+        return merged
+
+    def _parse_json_payload(self, raw: str) -> object | None:
+        text = strip_ansi_and_ctrl(raw or "").strip()
+        if not text:
+            return None
+        candidates = [text]
+        for start, end in (("{", "}"), ("[", "]")):
+            left = text.find(start)
+            right = text.rfind(end)
+            if left != -1 and right != -1 and right > left:
+                candidates.append(text[left : right + 1].strip())
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except Exception:
+                continue
+        return None
+
+    def _normalize_retrieval_plan(self, payload: object | None) -> list[dict[str, object]]:
+        if payload is None:
+            return []
+        raw_items: list[object] = []
+        if isinstance(payload, dict):
+            plan = payload.get("plan")
+            if isinstance(plan, list):
+                raw_items = list(plan)
+            else:
+                sources = payload.get("sources")
+                if isinstance(sources, list):
+                    raw_items = [{"source": item} for item in sources]
+        elif isinstance(payload, list):
+            raw_items = list(payload)
+
+        aliases = {
+            "user_history": "recent_user_history",
+            "history": "recent_turns",
+            "conversation": "recent_turns",
+            "channel": "channel_history",
+            "profile": "channel_profile",
+            "server_profile": "channel_profile",
+            "getserverinfo": "channel_profile",
+            "member_profile": "member_profile",
+            "player_profile": "member_profile",
+            "playerinfo": "member_profile",
+            "getplayerinfo": "member_profile",
+            "knowledge": "local_knowledge",
+            "commands": "bot_command_catalog",
+            "games": "bot_game_catalog",
+            "model": "runtime_model",
+            "world": "vrchat_world",
+            "search": "web_search",
+        }
+        allowed = {
+            "recent_user_history",
+            "member_history",
+            "recent_turns",
+            "reply_chain",
+            "channel_history",
+            "semantic_history",
+            "channel_profile",
+            "member_profile",
+            "local_knowledge",
+            "bot_command_catalog",
+            "bot_game_catalog",
+            "runtime_model",
+            "vrchat_world",
+            "web_search",
+            "none",
+        }
+
+        normalized: list[dict[str, object]] = []
+        seen: set[tuple[object, ...]] = set()
+        for item in raw_items:
+            if isinstance(item, str):
+                candidate: dict[str, object] = {"source": item}
+            elif isinstance(item, dict):
+                candidate = dict(item)
+            else:
+                continue
+            source = str(candidate.get("source") or "").strip().lower()
+            source = aliases.get(source, source)
+            if not source or source not in allowed:
+                continue
+            if source == "none":
+                continue
+            candidate["source"] = source
+            target = str(candidate.get("target") or "").strip().lower()
+            if target:
+                candidate["target"] = target
+            query = str(candidate.get("query") or "").strip()
+            if query:
+                candidate["query"] = query
+            web_scope = str(candidate.get("web_scope") or "").strip().lower()
+            if web_scope:
+                candidate["web_scope"] = web_scope
+            limit = candidate.get("limit")
+            if isinstance(limit, str) and limit.isdigit():
+                candidate["limit"] = int(limit)
+            elif isinstance(limit, (int, float)):
+                candidate["limit"] = int(limit)
+            capability_only = candidate.get("capability_only")
+            if isinstance(capability_only, str):
+                candidate["capability_only"] = capability_only.lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+            elif isinstance(capability_only, bool):
+                candidate["capability_only"] = capability_only
+            key = (
+                source,
+                candidate.get("target", ""),
+                candidate.get("query", ""),
+                candidate.get("limit", ""),
+                candidate.get("web_scope", ""),
+                candidate.get("capability_only", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(candidate)
+            if len(normalized) >= 8:
+                break
+        return normalized
+
+    def _prioritize_mentioned_person_plan(
+        self,
+        *,
+        plan: list[dict[str, object]],
+        text: str,
+        target_candidates: dict[str, tuple[int, str]],
+        user_lines: int,
+    ) -> list[dict[str, object]]:
+        if not plan or not self._is_person_lookup_query(text):
+            return plan
+        preferred_mention_target = next(
+            (
+                key
+                for key in target_candidates.keys()
+                if key.startswith("mentioned_")
+            ),
+            None,
+        )
+        if not preferred_mention_target:
+            return plan
+
+        adjusted: list[dict[str, object]] = []
+        saw_person_source = False
+        for item in plan:
+            candidate = dict(item)
+            source = str(candidate.get("source") or "").strip().lower()
+            target = str(candidate.get("target") or "author").strip().lower()
+            if source == "recent_user_history":
+                candidate["source"] = "member_history"
+                candidate["target"] = preferred_mention_target
+                saw_person_source = True
+                adjusted.append(candidate)
+                continue
+            if source in {"member_history", "member_profile"}:
+                saw_person_source = True
+                if target == "author":
+                    candidate["target"] = preferred_mention_target
+            adjusted.append(candidate)
+
+        if not saw_person_source:
+            adjusted.insert(
+                0,
+                {
+                    "source": "member_profile",
+                    "target": preferred_mention_target,
+                },
+            )
+            adjusted.insert(
+                1,
+                {
+                    "source": "member_history",
+                    "target": preferred_mention_target,
+                    "limit": min(max(user_lines, 6), 24),
+                },
+            )
+        return adjusted[:8]
+
+    def _fallback_retrieval_plan(
+        self,
+        *,
+        text: str,
+        user_lines: int,
+        channel_lines: int,
+        has_profile: bool,
+    ) -> list[dict[str, object]]:
+        normalized = normalize_keyword_match_text(text or "")
+        plan: list[dict[str, object]] = []
+        if self._is_channel_profile_query(text):
+            if has_profile:
+                plan.append({"source": "channel_profile"})
+            plan.append(
+                {
+                    "source": "web_search",
+                    "web_scope": "web" if "有名" in normalized or "評判" in normalized else "auto",
+                }
+            )
+            return plan
+        if self._is_local_activity_query(text):
+            plan.append(
+                {
+                    "source": "recent_user_history",
+                    "target": "author",
+                    "limit": min(max(user_lines, 6), 24),
+                }
+            )
+            if "返信" in normalized or "リプ" in normalized:
+                plan.append({"source": "reply_chain", "limit": 4})
+            return plan
+        if is_current_info_intent(text) or is_search_intent(text):
+            plan.append(
+                {
+                    "source": "web_search",
+                    "web_scope": "news"
+                    if any(
+                        key in normalized
+                        for key in ("事件", "ニュース", "速報", "今日", "最新", "最近")
+                    )
+                    else "web",
+                }
+            )
+            return plan
+        if has_profile:
+            plan.append({"source": "channel_profile"})
+        plan.append({"source": "recent_turns", "limit": min(max(channel_lines, 4), 8)})
+        return plan
+
+    async def _build_retrieval_plan(
+        self,
+        *,
+        msg: discord.Message,
+        user_display: str,
+        text: str,
+        channel_profile_available: bool,
+    ) -> list[dict[str, object]]:
+        guild_id = msg.guild.id if msg.guild else 0
+        channel_id = msg.channel.id
+        guild_name = msg.guild.name if msg.guild else "DM"
+        channel_name = (
+            msg.channel.name if hasattr(msg.channel, "name") else str(msg.channel.id)
+        )
+        user_lines = self._cfg_int("chat.user_history_lines", 24)
+        channel_lines = self._cfg_int("chat.channel_history_lines", 16)
+        target_candidates = self._context_target_candidates(msg)
+        prompt = get_prompt("chat", "retrieval_plan_prompt").format(
+            user_id=msg.author.id,
+            user_display=user_display,
+            guild_id=guild_id,
+            guild_name=guild_name,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            message=text,
+            user_history_limit=user_lines,
+            channel_history_limit=channel_lines,
+            channel_profile_available=str(bool(channel_profile_available)).lower(),
+            available_targets=json.dumps(
+                {
+                    key: {"user_id": value[0], "display": value[1]}
+                    for key, value in target_candidates.items()
+                },
+                ensure_ascii=False,
+            ),
+            explicit_mention_targets=json.dumps(
+                [
+                    key
+                    for key in target_candidates.keys()
+                    if key.startswith("mentioned_")
+                ],
+                ensure_ascii=False,
+            ),
+        )
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.bot.ollama_client.chat_simple,
+                    model=model_name,
+                    prompt=prompt,
+                    stream=False,
+                    format="json",
+                ),
+                timeout=min(20, max(8, self._cfg_int("ollama.timeout_sec", 180))),
+            )
+            plan = self._normalize_retrieval_plan(self._parse_json_payload(raw or ""))
+            if plan:
+                return plan
+        except Exception:
+            logger.exception("Failed to build retrieval plan via AI")
+        return self._fallback_retrieval_plan(
+            text=text,
+            user_lines=user_lines,
+            channel_lines=channel_lines,
+            has_profile=bool(channel_profile_available),
+        )
+
+    async def _build_current_info_context(
+        self,
+        text: str,
+        *,
+        web_scope: str = "auto",
+    ) -> tuple[str, list[str]]:
+        search_service = getattr(self.bot, "ai_search", None)
+        if search_service is None:
+            return "", []
+        scope = normalize_keyword_match_text(web_scope or "").strip().lower()
+        news_only: bool | None = None
+        if scope in {"news", "latest"}:
+            news_only = True
+        elif scope in {"web", "general"}:
+            news_only = False
+        try:
+            result = await asyncio.wait_for(
+                search_service.answer_ai_async(
+                    text,
+                    mode="normal",
+                    news_only=news_only,
+                ),
+                timeout=max(20, self._cfg_int("ollama.timeout_sec", 180)),
+            )
+        except Exception:
+            logger.exception("AI search context build failed")
+            searcher = getattr(search_service, "searcher", None)
+            if searcher is None or not callable(getattr(searcher, "search", None)):
+                return "", []
+            try:
+                lowered = normalize_keyword_match_text(text or "")
+                prefer_web = any(k in lowered for k in ("意味", "とは", "定義", "由来", "語源"))
+                if news_only is True:
+                    prefer_web = False
+                elif news_only is False:
+                    prefer_web = True
+                items = await asyncio.to_thread(
+                    searcher.search,
+                    text,
+                    news_only=not prefer_web,
+                )
+            except Exception:
+                logger.exception("Direct DDGS fallback search failed")
+                return "", []
+            if not items:
+                return "", []
+            refs = ["method:ddgs.search"]
+            urls = self._merge_unique_strings(
+                [item.url for item in items if getattr(item, "url", "").strip()]
+            )[:2]
+            refs.extend(urls)
+            lines: list[str] = []
+            for item in items[:2]:
+                date_str = f" ({item.date})" if item.date else ""
+                snippet = f"\n{item.snippet.strip()}" if item.snippet.strip() else ""
+                lines.append(f"- {item.title}{date_str}\n  {item.url}{snippet}")
+            return "[Web検索結果]\n" + "\n".join(lines), refs
+
+        refs: list[str] = ["method:ai_search.answer_ai_async", "method:ddgs.search"]
+        urls = [item.url for item in result.items if getattr(item, "url", "").strip()]
+        urls = self._merge_unique_strings(urls)[:2]
+        for url in urls:
+            refs.append(url)
+
+        blocks: list[str] = []
+        answer = (result.answer or "").strip()
+        if answer:
+            blocks.append(f"[Web検索結果]\n{answer}")
+        elif result.items:
+            item_lines: list[str] = []
+            for item in result.items[:2]:
+                date_str = f" ({item.date})" if item.date else ""
+                snippet = f"\n{item.snippet.strip()}" if item.snippet.strip() else ""
+                item_lines.append(f"- {item.title}{date_str}\n  {item.url}{snippet}")
+            if item_lines:
+                blocks.append("[Web検索結果]\n" + "\n".join(item_lines))
+        return "\n\n".join(blocks).strip(), refs
+
+    async def _handle_current_info_search_failure(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        mention: str | None = None,
+        query: str = "",
+        source_msg: discord.Message | None = None,
+        model_name: str = "",
+        references: list[str] | None = None,
+    ) -> None:
+        prefix = f"{mention}\n" if mention else ""
+        await channel.send(
+            f"{prefix}最新情報の検索に失敗しました。少し待ってからもう一度試してください。"
+        )
+        if source_msg is not None:
+            await self._log_bot_activity_event(
+                source_msg,
+                kind="メンション",
+                processing="最新情報検索",
+                level="warning",
+                title="Bot 会話ログ",
+                description="最新情報検索に失敗しました。",
+                input_text=query,
+                output_text="最新情報の検索に失敗しました。",
+                model_name=model_name,
+                references=references or [],
+            )
+
     async def _embed_text(self, text: str) -> list[float] | None:
         embed_client = getattr(self.bot, "ollama_embed_client", self.bot.ollama_client)
         if not text or not embed_client.has_embed():
@@ -288,6 +705,54 @@ class MessageLogger(BaseCog):
             mention_index += 1
         return targets
 
+    @staticmethod
+    def _format_profile_dt(value: object) -> str:
+        if not value:
+            return "不明"
+        try:
+            if isinstance(value, datetime):
+                return value.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S JST")
+        except Exception:
+            pass
+        return str(value)
+
+    def _format_member_profile(self, member: discord.Member) -> str:
+        display_name = getattr(member, "display_name", None) or member.name or str(member.id)
+        nick = getattr(member, "nick", None) or "なし"
+        role_names = [
+            role.name
+            for role in getattr(member, "roles", [])
+            if getattr(role, "name", "@everyone") != "@everyone"
+        ]
+        if len(role_names) > 10:
+            role_names = role_names[:10] + [f"...他{len(role_names) - 10}件"]
+        activities = []
+        for act in getattr(member, "activities", []) or []:
+            act_name = getattr(act, "name", "") or str(act)
+            act_type = getattr(getattr(act, "type", None), "name", None) or getattr(act, "type", None)
+            if act_type:
+                activities.append(f"{act_name} ({act_type})")
+            else:
+                activities.append(act_name)
+        if len(activities) > 5:
+            activities = activities[:5] + [f"...他{len(activities) - 5}件"]
+        status = getattr(member, "status", None)
+        status_text = str(status) if status is not None else "不明"
+        lines = [
+            "[メンバープロフィール]",
+            f"対象: {display_name} ({member.id})",
+            f"ユーザー名: {member.name}",
+            f"ニックネーム: {nick}",
+            f"表示名: {display_name}",
+            f"アカウント作成日: {self._format_profile_dt(getattr(member, 'created_at', None))}",
+            f"サーバー参加日時: {self._format_profile_dt(getattr(member, 'joined_at', None))}",
+            f"ブースト開始日時: {self._format_profile_dt(getattr(member, 'premium_since', None))}",
+            f"ロール一覧: {', '.join(role_names) if role_names else 'なし'}",
+            f"オンライン状態: {status_text}",
+            f"アクティビティ: {', '.join(activities) if activities else 'なし'}",
+        ]
+        return "\n".join(lines)
+
     async def _resolve_chat_context(
         self,
         *,
@@ -379,8 +844,27 @@ class MessageLogger(BaseCog):
                 limit=limit,
                 capability_only=capability_only,
                 max_chars=2200,
+                guild_id=guild_id,
                 channel_id=channel_id,
             )
+
+        async def get_member_profile(target: str = "author") -> str:
+            """Get the target member's profile-style metadata."""
+            target_key = (target or "author").strip().lower()
+            target_info = target_candidates.get(target_key) or target_candidates["author"]
+            member: discord.Member | None = None
+            if msg.guild is not None:
+                member = msg.guild.get_member(target_info[0])
+                if member is None:
+                    try:
+                        member = await msg.guild.fetch_member(target_info[0])
+                    except Exception:
+                        member = None
+            if member is None and isinstance(msg.author, discord.Member) and target_info[0] == msg.author.id:
+                member = msg.author
+            if member is None:
+                return ""
+            return self._format_member_profile(member)
 
         channel_profile_block = self._build_channel_profile_block(
             channel=msg.channel,
@@ -389,150 +873,99 @@ class MessageLogger(BaseCog):
             limit=4,
             max_chars=1800,
         )
-
-        planner_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a context planner for a Discord bot.\n"
-                    "Decide what context should be gathered before answering the user.\n"
-                    "Available tools let you fetch recent message history, semantic history, and bot-local documentation.\n"
-                    "Use get_reply_chain first for direct replies, short acknowledgements, clarification answers, or context that depends on the immediately previous turns.\n"
-                    "Use get_recent_turns for short conversational context before considering semantic history.\n"
-                    "Use get_member_history when the user asks about themselves, a replied user, or a mentioned user.\n"
-                    "Use get_channel_history for shared discussion or recent events in the channel.\n"
-                    "Use get_semantic_history only when topical similarity matters more than strict recency.\n"
-                    "Avoid get_semantic_history for very short replies such as numbers, yes/no, which one, this/that, or direct answers to the bot's previous message.\n"
-                    "Use get_local_knowledge when the user asks about bot functions, commands, setup, README contents, RAG behavior, or project-specific facts.\n"
-                    "Use get_local_knowledge when the user asks about channel rules, channel FAQ, channel procedures, or any channel-specific knowledge that has been added to RAG.\n"
-                    "Use _get_bot_game_catalog for questions about available games or game-related utility commands.\n"
-                    "Use _get_bot_command_catalog for questions asking what commands or features the bot has.\n"
-                    "Use _get_runtime_model_info when the user asks which model is currently configured or being used.\n"
-                    "Use _search_vrchat_world when the user wants VRChat world search results.\n"
-                    "When a channel profile is available, treat it as the authoritative description of that channel.\n"
-                    "Do not let older generic replies override the channel profile.\n"
-                    "You may call multiple tools if needed. If the message is self-contained, call no tools."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"user_id={user_id}\n"
-                    f"user_display={user_display}\n"
-                    f"channel_id={channel_id}\n"
-                    f"user_history_limit={user_lines}\n"
-                    f"channel_history_limit={channel_lines}\n"
-                    f"available_targets={json.dumps({k: {'user_id': v[0], 'display': v[1]} for k, v in target_candidates.items()}, ensure_ascii=False)}\n"
-                    f"message={text}"
-                ),
-            },
-        ]
-        if channel_profile_block:
-            planner_messages[0]["content"] = (
-                f"{channel_profile_block}\n\n" + str(planner_messages[0]["content"])
-            )
+        plan = await self._build_retrieval_plan(
+            msg=msg,
+            user_display=user_display,
+            text=text,
+            channel_profile_available=bool(channel_profile_block),
+        )
+        plan = self._prioritize_mentioned_person_plan(
+            plan=plan,
+            text=text,
+            target_candidates=target_candidates,
+            user_lines=user_lines,
+        )
 
         blocks: list[tuple[str, str]] = []
-        try:
-            response = await asyncio.to_thread(
-                self.bot.ollama_client.chat,
-                model=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
-                messages=planner_messages,
-                stream=False,
-                tools=[
-                    get_recent_turns,
-                    get_reply_chain,
-                    get_user_history,
-                    get_member_history,
-                    get_channel_history,
-                    get_semantic_history,
-                    get_local_knowledge,
-                    self._get_bot_game_catalog,
-                    self._get_bot_command_catalog,
-                    self._get_runtime_model_info,
-                    self._search_vrchat_world,
-                ],
-            )
-            tool_calls = self._extract_tool_calls(response)
-            if not tool_calls:
-                return ""
+        references: list[str] = []
+        used_sources: list[str] = []
+        preferred_mention_target = next(
+            (
+                key
+                for key in target_candidates.keys()
+                if key.startswith("mentioned_")
+            ),
+            None,
+        )
+        prefer_mentioned_targets = (
+            bool(preferred_mention_target)
+            and bool(msg.mentions)
+            and self._is_person_lookup_query(text)
+        )
 
-            for call in tool_calls:
-                name, args = self._normalize_tool_call(call)
-                requested_lines = args.get("lines")
-                if name == "get_user_history":
-                    body = get_user_history(
-                        requested_lines
-                        if isinstance(requested_lines, int)
-                        else user_lines
-                    )
-                    if body:
-                        blocks.append(
-                            (f"このユーザーの最近の発言 {user_lines} 件以内", body)
-                        )
-                elif name == "get_recent_turns":
-                    body = get_recent_turns(
-                        requested_lines if isinstance(requested_lines, int) else 6
-                    )
-                    if body:
-                        blocks.append(("このチャンネルの直近会話", body))
-                elif name == "get_reply_chain":
-                    body = get_reply_chain(
-                        requested_lines if isinstance(requested_lines, int) else 4
-                    )
-                    if body:
-                        blocks.append(("直前の会話チェーン", body))
-                elif name == "get_member_history":
-                    target = str(args.get("target") or "author")
-                    target_key = target.strip().lower()
-                    body = get_member_history(
-                        target=target_key,
-                        lines=requested_lines
-                        if isinstance(requested_lines, int)
-                        else user_lines,
-                    )
-                    target_info = (
-                        target_candidates.get(target_key) or target_candidates["author"]
-                    )
-                    if body:
-                        blocks.append(
-                            (f"{target_info[1]} の最近の発言 {user_lines} 件以内", body)
-                        )
-                elif name == "get_channel_history":
-                    body = get_channel_history(
-                        requested_lines
-                        if isinstance(requested_lines, int)
-                        else channel_lines
-                    )
-                    if body:
-                        blocks.append(
-                            (
-                                f"このチャンネル全体の最近の発言 {channel_lines} 件以内",
-                                body,
-                            )
-                        )
-                elif name == "get_semantic_history":
-                    scope = str(args.get("scope") or "channel")
-                    target = str(args.get("target") or "author")
-                    k = args.get("k")
-                    query_embedding = await self._embed_text(text)
-                    if not query_embedding:
-                        continue
-                    scope_value = scope.strip().lower()
-                    limit = max(
+        for item in plan:
+            source = str(item.get("source") or "").strip().lower()
+            target = str(item.get("target") or "author").strip().lower()
+            query = str(item.get("query") or text or "").strip()
+            limit = item.get("limit")
+            capability_only = bool(item.get("capability_only", False))
+            web_scope = str(item.get("web_scope") or "auto").strip().lower()
+            body = ""
+            title = ""
+
+            if (
+                prefer_mentioned_targets
+                and source in {"member_history", "member_profile"}
+                and target == "author"
+            ):
+                target = preferred_mention_target or target
+
+            if source == "recent_user_history":
+                lines = int(limit) if isinstance(limit, int) else user_lines
+                body = get_user_history(lines)
+                title = f"このユーザーの最近の発言 {lines} 件以内"
+            elif source == "member_history":
+                lines = int(limit) if isinstance(limit, int) else user_lines
+                body = get_member_history(target=target, lines=lines)
+                target_info = (
+                    target_candidates.get(target) or target_candidates["author"]
+                )
+                title = f"{target_info[1]} の最近の発言 {lines} 件以内"
+            elif source == "member_profile":
+                body = await get_member_profile(target=target)
+                target_info = (
+                    target_candidates.get(target) or target_candidates["author"]
+                )
+                title = f"{target_info[1]} のプロフィール"
+            elif source == "recent_turns":
+                lines = int(limit) if isinstance(limit, int) else 6
+                body = get_recent_turns(lines)
+                title = "このチャンネルの直近会話"
+            elif source == "reply_chain":
+                lines = int(limit) if isinstance(limit, int) else 4
+                body = get_reply_chain(lines)
+                title = "直前の会話チェーン"
+            elif source == "channel_history":
+                lines = int(limit) if isinstance(limit, int) else channel_lines
+                body = get_channel_history(lines)
+                title = f"このチャンネル全体の最近の発言 {lines} 件以内"
+            elif source == "semantic_history":
+                query_embedding = await self._embed_text(query)
+                if query_embedding:
+                    scope_value = str(item.get("scope") or "channel").strip().lower()
+                    limit_value = max(
                         1,
                         min(
                             int(
-                                k
-                                if isinstance(k, int)
+                                limit
+                                if isinstance(limit, int)
                                 else self._cfg_int("chat.semantic_history_k", 6)
                             ),
                             12,
                         ),
                     )
-                    target_key = target.strip().lower()
                     target_info = (
-                        target_candidates.get(target_key) or target_candidates["author"]
+                        target_candidates.get(target) or target_candidates["author"]
                     )
                     rows = await asyncio.to_thread(
                         self._vector_store.semantic_search,
@@ -540,7 +973,7 @@ class MessageLogger(BaseCog):
                         channel_id=channel_id,
                         query_embedding=query_embedding,
                         author_id=target_info[0] if scope_value == "user" else None,
-                        limit=limit,
+                        limit=limit_value,
                     )
                     body = self._vector_store.format_results(rows)
                     if body:
@@ -549,43 +982,48 @@ class MessageLogger(BaseCog):
                             if scope_value == "user"
                             else "このチャンネルの意味的に近い過去発言"
                         )
-                        blocks.append((title, body))
-                elif name == "get_local_knowledge":
-                    query = str(args.get("query") or text)
-                    limit = args.get("limit")
-                    capability_only = bool(args.get("capability_only", False))
-                    body = get_local_knowledge(
-                        query=query,
-                        limit=int(limit) if isinstance(limit, int) else 4,
-                        capability_only=capability_only,
-                    )
-                    if body:
-                        blocks.append(("Bot ローカル資料", body))
-                elif name == "_get_runtime_model_info":
-                    body = self._get_runtime_model_info()
-                    if body:
-                        blocks.append(("現在のモデル設定", body))
-                elif name == "_get_bot_game_catalog":
-                    body = self._get_bot_game_catalog()
-                    if body:
-                        blocks.append(("Bot ゲーム一覧", body))
-                elif name == "_get_bot_command_catalog":
-                    body = self._get_bot_command_catalog(
-                        str(args.get("category") or "")
-                    )
-                    if body:
-                        blocks.append(("Bot コマンド一覧", body))
-                elif name == "_search_vrchat_world":
-                    body = self._search_vrchat_world(
-                        keyword=str(args.get("keyword") or text or ""),
-                        count=int(args.get("count") or 5),
-                        author=str(args.get("author") or ""),
-                        tag=str(args.get("tag") or ""),
-                    )
-                    if body:
-                        blocks.append(("VRChat ワールド検索結果", body))
-        except Exception:
-            logger.exception("Failed to resolve chat context via tool calling")
+            elif source == "channel_profile":
+                body = channel_profile_block
+                title = "この場所の正式プロフィール"
+            elif source == "local_knowledge":
+                body = get_local_knowledge(
+                    query=query,
+                    limit=int(limit) if isinstance(limit, int) else 4,
+                    capability_only=capability_only,
+                )
+                title = "Bot ローカル資料"
+            elif source == "bot_command_catalog":
+                body = self._get_bot_command_catalog(str(item.get("category") or ""))
+                title = "Bot コマンド一覧"
+            elif source == "bot_game_catalog":
+                body = self._get_bot_game_catalog()
+                title = "Bot ゲーム一覧"
+            elif source == "runtime_model":
+                body = self._get_runtime_model_info()
+                title = "現在のモデル設定"
+            elif source == "vrchat_world":
+                body = self._search_vrchat_world(
+                    keyword=query or text or "",
+                    count=int(limit) if isinstance(limit, int) else 5,
+                    author=str(item.get("author") or ""),
+                    tag=str(item.get("tag") or ""),
+                )
+                title = "VRChat ワールド検索結果"
+            elif source == "web_search":
+                body, web_refs = await self._build_current_info_context(
+                    query or text or "",
+                    web_scope=web_scope,
+                )
+                references.extend(web_refs)
+                title = "Web検索結果"
+            else:
+                continue
+
+            if body:
+                blocks.append((title or source, body))
+                references.extend(self._collect_reference_labels(body))
+                if source not in used_sources:
+                    used_sources.append(source)
 
         if not blocks:
             query_embedding = await self._embed_text(text)
@@ -601,11 +1039,25 @@ class MessageLogger(BaseCog):
                 body = self._vector_store.format_results(rows)
                 if body:
                     blocks.append(("このチャンネルの意味的に近い過去発言", body))
+                    references.extend(self._collect_reference_labels(body))
 
-        if channel_profile_block:
-            blocks.insert(0, ("このチャンネルの正式プロフィール", channel_profile_block))
+        should_attach_channel_profile = self._is_channel_profile_query(text) or any(
+            item.get("source") == "channel_profile" for item in plan
+        )
+        if should_attach_channel_profile and channel_profile_block and not any(
+            title == "この場所の正式プロフィール" for title, _ in blocks
+        ):
+            blocks.insert(0, ("この場所の正式プロフィール", channel_profile_block))
+            references.extend(self._collect_reference_labels(channel_profile_block))
+            if "channel_profile" not in used_sources:
+                used_sources.append("channel_profile")
 
-        return self._build_history_context(blocks)
+        for source in used_sources:
+            source_ref = f"source:{source}"
+            if source_ref not in references:
+                references.append(source_ref)
+
+        return self._build_history_context(blocks), self._merge_unique_strings(references)
 
     async def _run_ollama_chat_with_tools(
         self,
@@ -617,7 +1069,7 @@ class MessageLogger(BaseCog):
         guild: discord.Guild | None = None,
         channel_id: int | None = None,
         user_id: int | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, list[str]]:
         if not tools:
             response = await asyncio.to_thread(
                 self.bot.ollama_client.chat,
@@ -625,10 +1077,11 @@ class MessageLogger(BaseCog):
                 messages=messages,
                 stream=False,
             )
-            return self._extract_message_content(response)
+            return self._extract_message_content(response), []
 
         working_messages = [dict(item) for item in messages]
         source_urls: list[str] = []
+        used_tools: list[str] = []
         last_tool_outputs: list[tuple[str, str]] = []
         for _ in range(max_rounds):
             response = await asyncio.to_thread(
@@ -645,16 +1098,14 @@ class MessageLogger(BaseCog):
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
                 answer = self._extract_message_content(response)
-                if answer and source_urls:
-                    logger.info(
-                        "Appending source URLs to response: %s", source_urls[:8]
-                    )
-                    refs = "\n".join(f"- {url}" for url in source_urls[:8])
-                    answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
-                return answer
+                references = [f"tool:{name}" for name in used_tools]
+                references.extend(source_urls)
+                return answer, references
 
             async def execute_tool_call(call: object) -> tuple[dict, list[str]]:
                 name, args = self._normalize_tool_call(call)
+                if name and name not in used_tools:
+                    used_tools.append(name)
                 tool_fn = next(
                     (tool for tool in tools if getattr(tool, "__name__", "") == name),
                     None,
@@ -768,11 +1219,9 @@ class MessageLogger(BaseCog):
                     "外部情報の取得は試しましたが、回答文をうまく生成できませんでした。\n"
                     "取得結果:\n" + "\n".join(tool_summaries)
                 )
-        if answer and source_urls:
-            logger.info("Appending source URLs to response: %s", source_urls[:8])
-            refs = "\n".join(f"- {url}" for url in source_urls[:8])
-            answer = f"{answer.rstrip()}\n\n参考元:\n{refs}"
-        return answer
+        references = [f"tool:{name}" for name in used_tools]
+        references.extend(source_urls)
+        return answer, references
 
     async def _run_ollama_text(
         self, model: str, prompt: str, *, timeout_sec: int | None = None
@@ -1011,6 +1460,43 @@ class MessageLogger(BaseCog):
             and any(key in normalized for key in bot_keys)
         )
 
+    def _is_local_activity_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        keywords = (
+            "最近の行動",
+            "最近の発言",
+            "最近の投稿",
+            "最近何して",
+            "最近どう",
+            "履歴",
+            "発言履歴",
+            "行動履歴",
+            "活動履歴",
+            "このユーザー",
+            "この人",
+            "この人の",
+            "このメンバー",
+            "この子",
+        )
+        return any(keyword in normalized for keyword in keywords)
+
+    def _is_person_lookup_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        keywords = (
+            "どんな人",
+            "どんなやつ",
+            "どんな子",
+            "プロフィール",
+            "情報",
+            "何者",
+            "誰",
+            "性格",
+            "特徴",
+            "教えて",
+            "紹介",
+        )
+        return any(keyword in normalized for keyword in keywords)
+
     def _sanitize_for_prompt(self, text: str, max_len: int) -> str:
         v = strip_ansi_and_ctrl(text or "")
         v = v.replace("@everyone", "＠everyone").replace("@here", "＠here")
@@ -1027,6 +1513,7 @@ class MessageLogger(BaseCog):
     def _get_channel_knowledge(
         self,
         *,
+        guild_id: int | None = None,
         channel_id: int | None,
         limit: int = 4,
         max_chars: int = 1200,
@@ -1036,6 +1523,7 @@ class MessageLogger(BaseCog):
         chunks = self._local_rag.retrieve(
             "",
             limit=max(1, min(int(limit or 4), 6)),
+            guild_id=guild_id,
             channel_id=channel_id,
             channel_only=True,
         )
@@ -1077,6 +1565,7 @@ class MessageLogger(BaseCog):
             guild_id=guild_id,
         ):
             knowledge = self._get_channel_knowledge(
+                guild_id=guild_id,
                 channel_id=candidate_id,
                 limit=limit,
                 max_chars=max_chars,
@@ -1132,6 +1621,7 @@ class MessageLogger(BaseCog):
             limit=6,
             max_chars=2600,
         )
+
         if not channel_profile_block:
             prefix = f"{mention}\n" if mention else ""
             await channel.send(
@@ -1152,8 +1642,8 @@ class MessageLogger(BaseCog):
                 key=progress_key,
                 channel=channel,
                 mention_user_id=0,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
-                    ticket, elapsed
+                text_factory=lambda elapsed, model=model_name: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed, model
                 ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
@@ -1182,6 +1672,7 @@ class MessageLogger(BaseCog):
                     title="Bot 会話ログ",
                     description="サーバー・チャンネル・ワールドの説明に応答しました。",
                     model_name=model_name,
+                    references=self._collect_reference_labels(channel_profile_block),
                 )
         except Exception as e:
             prefix = f"{mention}\n" if mention else ""
@@ -1209,6 +1700,7 @@ class MessageLogger(BaseCog):
         *,
         capability_only: bool = False,
         max_chars: int = 1200,
+        guild_id: int | None = None,
         channel_id: int | None = None,
     ) -> str:
         query = (query or "").strip()
@@ -1219,6 +1711,7 @@ class MessageLogger(BaseCog):
             query,
             limit=limit,
             capability_only=capability_only,
+            guild_id=guild_id,
             channel_id=channel_id,
         )
         blocks: list[str] = []
@@ -1327,28 +1820,24 @@ class MessageLogger(BaseCog):
             content=text,
         )
 
-        history_context = await self._resolve_chat_context(
+        references: list[str] = []
+        history_context, planned_refs = await self._resolve_chat_context(
             msg=msg,
             user_display=user_name or str(msg.author.id),
             text=text,
         )
-        if not history_context:
-            history_lines = self._cfg_int("chat.history_lines", 100)
-            history_text = store.get_recent_context(lines=history_lines)
-            history_context = (
-                HISTORY_CONTEXT_TEMPLATE.format(history=history_text)
-                if history_text
-                else ""
-            )
+        references.extend(planned_refs)
         external_context = ""
-        if self._live_info.needs_external_context(text):
+        if history_context and self._live_info.needs_external_context(text):
             external_context = self._build_external_context_text(
                 await asyncio.to_thread(self._live_info.build_context, text)
             )
+        combined_history_context = history_context + (
+            f"[外部参照情報]\n{external_context}\n\n" if external_context else ""
+        )
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_name or str(msg.author.id),
-            history_context=history_context
-            + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
+            history_context=combined_history_context,
             user_message=text,
             max_response_length_prompt=self._cfg_int(
                 "chat.max_response_length_prompt", 500
@@ -1363,8 +1852,8 @@ class MessageLogger(BaseCog):
                 key=progress_key,
                 channel=msg.channel,
                 mention_user_id=msg.author.id,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
-                    ticket, elapsed
+                text_factory=lambda elapsed, model=model_name: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed, model
                 ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
@@ -1404,6 +1893,7 @@ class MessageLogger(BaseCog):
                 model_name=model_name,
                 title="Bot 会話ログ",
                 description="DM の会話応答を送信しました。",
+                references=references,
             )
         except Exception as e:
             logger.exception("DM AI response failed")
@@ -1427,6 +1917,7 @@ class MessageLogger(BaseCog):
                 input_text=text,
                 error_text=str(e),
                 model_name=model_name,
+                references=references,
             )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
@@ -1641,6 +2132,21 @@ class MessageLogger(BaseCog):
             return text
         return text[:limit] + "\n...(省略)..."
 
+    def _collect_reference_labels(self, *texts: str) -> list[str]:
+        refs: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            for line in (text or "").splitlines():
+                match = RAG_HEADER_RE.match(line.strip())
+                if not match:
+                    continue
+                label = match.group(1).strip()
+                if not label or label in seen:
+                    continue
+                seen.add(label)
+                refs.append(label)
+        return refs[:12]
+
     def _format_activity_location(self, msg: discord.Message) -> str:
         if msg.guild is None:
             return f"DM ({getattr(msg.channel, 'id', 0)})"
@@ -1659,6 +2165,7 @@ class MessageLogger(BaseCog):
         description: str = "Bot 関連の会話処理を記録しました。",
         error_text: str = "",
         model_name: str = "",
+        references: list[str] | None = None,
     ) -> None:
         fields: list[tuple[str, str, bool]] = [
             ("種別", kind, True),
@@ -1675,6 +2182,42 @@ class MessageLogger(BaseCog):
             fields.append(("モデル", self._truncate_event_text(model_name), True))
         if error_text:
             fields.append(("エラー", self._truncate_event_text(error_text), False))
+        if references:
+            method_names = [
+                ref.removeprefix("tool:").removeprefix("method:")
+                for ref in references
+                if str(ref).startswith("tool:") or str(ref).startswith("method:")
+            ]
+            if method_names:
+                fields.append(
+                    (
+                        "参照メソッド",
+                        ", ".join(self._truncate_event_text(name, 120) for name in method_names),
+                        False,
+                    )
+                )
+        if references:
+            ref_lines = [
+                self._truncate_event_text(ref, 400)
+                for ref in references
+                if str(ref).strip()
+            ]
+            chunk: list[str] = []
+            chunk_len = 0
+            part = 1
+            for line in ref_lines:
+                line_len = len(line) + (1 if chunk else 0)
+                if chunk and chunk_len + line_len > 900:
+                    fields.append((f"参照元{part}", "\n".join(chunk), False))
+                    part += 1
+                    chunk = [line]
+                    chunk_len = len(line)
+                else:
+                    chunk.append(line)
+                    chunk_len += line_len
+            if chunk:
+                label = "参照元" if part == 1 else f"参照元{part}"
+                fields.append((label, "\n".join(chunk), False))
         await send_event_log(
             self.bot,
             guild=msg.guild,
@@ -1801,9 +2344,11 @@ class MessageLogger(BaseCog):
         *,
         capability_only: bool = False,
         body_limit: int | None = 1200,
+        guild_id: int | None = None,
         channel_id: int | None = None,
     ) -> str:
         channel_knowledge = self._get_channel_knowledge(
+            guild_id=guild_id,
             channel_id=channel_id,
             limit=4,
             max_chars=body_limit or 1200,
@@ -1812,6 +2357,7 @@ class MessageLogger(BaseCog):
             query,
             limit=limit,
             capability_only=capability_only,
+            guild_id=guild_id,
             channel_id=channel_id,
         )
         blocks: list[str] = []
@@ -1896,6 +2442,7 @@ class MessageLogger(BaseCog):
                     limit=12,
                     capability_only=True,
                     body_limit=None,
+                    guild_id=msg.guild.id,
                     channel_id=channel_id,
                 ),
                 self._build_rag_context(
@@ -1903,6 +2450,7 @@ class MessageLogger(BaseCog):
                     limit=6,
                     capability_only=False,
                     body_limit=None,
+                    guild_id=msg.guild.id,
                     channel_id=channel_id,
                 ),
             ]
@@ -1919,14 +2467,15 @@ class MessageLogger(BaseCog):
             rag_context=rag_context,
             updates_block=(f"[最新更新(git log)]\n{updates}\n" if updates else ""),
         )
+        references = self._collect_reference_labels(channel_profile_block, rag_context, updates)
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
         ticket = await self.bot.ai_progress_tracker.create_ticket()
         try:
             await self._ai_progress_countdowns.start_countup(
                 key=progress_key,
                 channel=channel,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
-                    ticket, elapsed
+                text_factory=lambda elapsed, model=model_name: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed, model
                 ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
@@ -1953,6 +2502,7 @@ class MessageLogger(BaseCog):
                     title="Bot 会話ログ",
                     description="Bot の機能説明または更新情報へ応答しました。",
                     model_name=model_name,
+                    references=references,
                 )
         except Exception as e:
             prefix = f"{mention}\n" if mention else ""
@@ -1994,6 +2544,7 @@ class MessageLogger(BaseCog):
                     input_text=query,
                     error_text=str(e),
                     model_name=model_name,
+                    references=references,
                 )
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
@@ -2324,17 +2875,6 @@ class MessageLogger(BaseCog):
             await self.bot.process_commands(msg)
             return
 
-        if self._is_channel_profile_query(text):
-            await self._answer_channel_profile_query(
-                msg.channel,
-                text,
-                mention=msg.author.mention,
-                source_msg=msg,
-                channel_id=msg.channel.id,
-            )
-            await self.bot.process_commands(msg)
-            return
-
         if self._is_capability_query(text):
             await self._answer_capability_query(
                 msg.channel,
@@ -2395,48 +2935,34 @@ class MessageLogger(BaseCog):
             content=text,
         )
 
-        history_context = await self._resolve_chat_context(
+        references: list[str] = []
+        today_local = datetime.now(JST)
+        absolute_date = today_local.strftime("%Y-%m-%d")
+        requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
+        history_context, planned_refs = await self._resolve_chat_context(
             msg=msg,
             user_display=user_display,
             text=text,
         )
-        if not history_context:
-            history_lines = self._cfg_int("chat.history_lines", 100)
-            history_text = store.get_recent_context(lines=history_lines)
-            if history_text:
-                history_context = HISTORY_CONTEXT_TEMPLATE.format(history=history_text)
-            else:
-                history_context = ""
+        references.extend(planned_refs)
         external_context = ""
-        if self._live_info.needs_external_context(text):
+        if history_context and self._live_info.needs_external_context(text):
             external_context = self._build_external_context_text(
                 await asyncio.to_thread(self._live_info.build_context, text)
             )
-
-        # =========================
-        # プロンプトを生成（履歴と表示名を含める）
-        # =========================
+        combined_history_context = history_context + (
+            f"[外部参照情報]\n{external_context}\n\n" if external_context else ""
+        )
+        progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+        channel_profile_block = ""
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_display,
-            history_context=history_context
-            + (f"[外部参照情報]\n{external_context}\n\n" if external_context else ""),
+            history_context=combined_history_context,
             user_message=text,
             max_response_length_prompt=self._cfg_int(
                 "chat.max_response_length_prompt", 500
             ),
-        )
-        today_local = datetime.now(JST)
-        absolute_date = today_local.strftime("%Y-%m-%d")
-        requires_current_lookup = is_current_info_intent(text)
-        requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
-        progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
-        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
-        channel_profile_block = self._build_channel_profile_block(
-            channel=msg.channel,
-            channel_id=msg.channel.id,
-            guild_id=msg.guild.id,
-            limit=4,
-            max_chars=1800,
         )
         ticket = await self.bot.ai_progress_tracker.create_ticket()
 
@@ -2445,8 +2971,8 @@ class MessageLogger(BaseCog):
                 key=progress_key,
                 channel=msg.channel,
                 mention_user_id=msg.author.id,
-                text_factory=lambda elapsed: self.bot.ai_progress_tracker.render(
-                    ticket, elapsed
+                text_factory=lambda elapsed, model=model_name: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed, model
                 ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
@@ -2471,7 +2997,7 @@ class MessageLogger(BaseCog):
                             self._get_runtime_model_info,
                             self._search_vrchat_world,
                         ]
-                    answer = await self._run_ollama_chat_with_tools(
+                    answer, tool_references = await self._run_ollama_chat_with_tools(
                         model=model_name,
                         messages=[
                             {
@@ -2485,11 +3011,6 @@ class MessageLogger(BaseCog):
                                 "role": "user",
                                 "content": (
                                     (
-                                        f"[必須: 最新情報として扱う。回答に日付 {absolute_date} を明記すること]\n"
-                                        if requires_current_lookup
-                                        else ""
-                                    )
-                                    + (
                                         "[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n"
                                         if requires_bot_capability_grounding
                                         else ""
@@ -2503,6 +3024,9 @@ class MessageLogger(BaseCog):
                         channel_id=msg.channel.id,
                         user_id=msg.author.id,
                     )
+                    for ref in tool_references:
+                        if ref not in references:
+                            references.append(ref)
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
 
@@ -2520,34 +3044,43 @@ class MessageLogger(BaseCog):
             # Bot の応答も履歴に保存
             bot_name = self.bot.user.name if self.bot.user else "Bot"
             bot_id = self.bot.user.id if self.bot.user else 0
-            store.add_message(bot_name, answer, msg.id, author_id=bot_id)
+            web_urls = self._merge_unique_strings(
+                self._extract_urls(answer),
+                [ref for ref in references if str(ref).startswith("http")],
+                [ref for ref in tool_references if str(ref).startswith("http")],
+            )
+            answer_with_refs = answer
+            if web_urls:
+                refs_block = "\n".join(f"- {url}" for url in web_urls)
+                answer_with_refs = f"{answer.rstrip()}\n\n参考元:\n{refs_block}"
+            store.add_message(bot_name, answer_with_refs, msg.id, author_id=bot_id)
 
             # メッセージ送信（メンションのみ）
-            final_message = f"{msg.author.mention}\n{answer}"
-
-            # 最終的なメッセージサイズが 2000 を超える場合は切り詰める
-            if len(final_message) > 2000:
-                # メンション+改行の長さを計算
-                mention_overhead = len(f"{msg.author.mention}\n")
-                max_answer_len = 2000 - mention_overhead - len("\n...(省略)...")
-                answer = answer[:max_answer_len] + "\n...(省略)..."
-                final_message = f"{msg.author.mention}\n{answer}"
+            final_message = f"{msg.author.mention}\n{answer_with_refs}"
 
             if self._should_send_letter_file(text):
-                await self._send_letter_file(msg, answer)
+                await self._send_letter_file(msg, answer_with_refs)
             else:
-                await msg.channel.send(
-                    final_message, allowed_mentions=discord.AllowedMentions.none()
-                )
+                if len(final_message) > 2000:
+                    await self._send_chunked_text(
+                        msg.channel,
+                        answer_with_refs,
+                        prefix=f"{msg.author.mention}\n",
+                    )
+                else:
+                    await msg.channel.send(
+                        final_message, allowed_mentions=discord.AllowedMentions.none()
+                    )
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",
                 processing="通常会話",
                 input_text=text,
-                output_text=answer,
+                output_text=answer_with_refs,
                 model_name=model_name,
                 title="Bot 会話ログ",
                 description="メンションまたはリプライへの AI 応答を送信しました。",
+                references=references,
             )
 
         except Exception as e:
@@ -2562,6 +3095,7 @@ class MessageLogger(BaseCog):
                 input_text=text,
                 error_text=str(e),
                 model_name=model_name,
+                references=references,
             )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")

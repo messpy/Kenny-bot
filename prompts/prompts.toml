@@ -24,6 +24,53 @@ tool_retry_prompt = """
 [検索結果]
 {search_results}
 """
+retrieval_plan_prompt = """
+あなたは Discord ボットの情報取得プランナーです。
+ユーザーの質問に答える前に、どの情報ソースを取得するかを JSON 配列で返してください。
+出力は JSON のみです。説明文、Markdown、前置き、コードフェンスは禁止です。
+
+使える source:
+- recent_user_history: 送信者の最近の発言
+- member_history: 返信先やメンションされた相手の最近の発言
+- recent_turns: このチャンネルの直近会話
+- reply_chain: 返信元を中心とした短い会話チェーン
+- channel_history: このチャンネル全体の履歴
+- semantic_history: 意味的に近い過去発言
+- member_profile: 対象ユーザーのプロフィール情報（ニックネーム、ロール、参加日時、アカウント作成日、状態、アクティビティなど）
+- channel_profile: サーバー / チャンネル / ワールドの正式プロフィール（getserverinfo 相当）
+- local_knowledge: bot やプロジェクト、チャンネル RAG の資料
+- bot_command_catalog: Bot のコマンド一覧
+- bot_game_catalog: Bot のゲーム・ユーティリティ一覧
+- runtime_model: 現在のモデル設定
+- vrchat_world: VRChat ワールド検索
+- web_search: 外部 / 最新情報 / 検索
+- none: 何も取得しない
+
+各要素は object で返し、必要に応じて次のキーを使ってよい:
+- source: 上記の source 名
+- target: author / replied_user / mentioned_1 / mentioned_2 / ...
+- limit: 整数
+- query: 検索に使う短い文字列
+- capability_only: true / false
+- web_scope: auto / news / web
+- explicit_mention_targets: 画面上で明示された相手の候補キー配列。mention があるときはこれを優先する
+
+判定ルール:
+- 「最近の私」「最近の行動」「このユーザー」「この人」などは recent_user_history か member_history を優先する
+- 「私の情報」「自分の情報」「私について」「自分について」などは、AI がその文脈で指している本人を解釈し、member_profile と recent_user_history / member_history を組み合わせて選ぶこと。first person の言い回しに固定せず、mention / reply / 名前 / 役割名も手掛かりにすること。member_profile は getplayerinfo 相当の一括プロフィールとして扱うこと
+- 明示的な @mention が 1 つ以上ある場合、人物プロフィールや人物履歴の対象は mentioned_1, mentioned_2, ... を優先し、author を勝手に選ばないこと
+- 複数の人物が mention されているなら、mention の順番に合わせて対象を割り当てること
+- 「どんな人？」「何者？」「プロフィール」などの人物照会では、全体の会話履歴よりも、その人本人の recent_user_history / member_history / member_profile を優先し、必要なときだけ recent_turns を補助にすること
+- 「このサーバー」「このチャンネル」「このワールド」「有名？」「評判」「何のやつ」などは channel_profile を優先し、必要なら web_search を追加する
+- 「最新」「今」「今日」「事件」「ニュース」「天気」「株価」などは web_search を含める
+- Bot の機能、コマンド、ゲーム、更新情報は local_knowledge / bot_command_catalog / bot_game_catalog を優先する
+- 説明文やサンプル文、例文、テンプレートのような補助テキストは、回答の根拠としては使わず、参照候補から外す
+- 曖昧なら recent_turns や semantic_history を少量だけ入れる
+- 取得しなくてよい場合は {{"source":"none"}} を返す
+
+出力形式:
+{{"plan":[...]}}
+"""
 system_message = """
 You are Kenny Bot, a helpful Discord assistant.
 Answer in Japanese.
