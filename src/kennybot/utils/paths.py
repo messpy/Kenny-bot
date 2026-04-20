@@ -13,7 +13,8 @@ RUNTIME_STATE_DIR = RUNTIME_DIR / "state"
 RUNTIME_HISTORY_DIR = RUNTIME_DIR / "history"
 RUNTIME_RAG_DIR = RUNTIME_DIR / "rag"
 RUNTIME_TMP_DIR = RUNTIME_DIR / "tmp"
-LOG_DIR = Path("log")
+LEGACY_LOG_DIR = Path("log")
+LOG_DIR = RUNTIME_LOG_DIR
 PROMPTS_DIR = Path("prompts")
 KNOWLEDGE_DIR = Path("knowledge")
 
@@ -27,6 +28,7 @@ for path in (
     RUNTIME_HISTORY_DIR,
     RUNTIME_RAG_DIR,
     RUNTIME_TMP_DIR,
+    LEGACY_LOG_DIR,
     LOG_DIR,
     PROMPTS_DIR,
     KNOWLEDGE_DIR,
@@ -41,6 +43,6 @@ CHANNEL_RAG_DIR = DATA_DIR / "channel_rag"
 CHANNEL_RAG_DIR.mkdir(parents=True, exist_ok=True)
 # Backward-compatible alias for older references.
 SERVER_RAG_DIR = CHANNEL_RAG_DIR
-ALL_MESSAGES_LOG = LOG_DIR / "messages.log"
+ALL_MESSAGES_LOG = RUNTIME_LOG_DIR / "messages.log"
 RUNTIME_SETTINGS_PATH = CONFIG_DIR / "bot_settings.yaml"
 LEGACY_RUNTIME_SETTINGS_PATH = DATA_DIR / "bot_settings.yaml"

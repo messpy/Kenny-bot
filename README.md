@@ -502,10 +502,10 @@ spam_guard.reset_violation(user_id, guild_id)
 
 ## 📝 ロギング
 
-ログは `log/` ディレクトリに保存されます：
+ログは `runtime/logs/` ディレクトリに保存されます：
 
 ```bash
-log/
+runtime/logs/
 └── kennybot_20260218.log
 ```
 
