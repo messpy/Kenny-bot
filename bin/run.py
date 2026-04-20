@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.env import load_env_file, require_env
 from utils.single_instance import SingleInstanceError, acquire_lock
-from bot import MyBot
+from src.kennybot.bootstrap import create_bot
 
 
 def main():
@@ -31,9 +31,7 @@ def main():
     env_vars = require_env("DISCORD_TOKEN")
     token = env_vars["DISCORD_TOKEN"]
 
-    import discord
-    intents = discord.Intents.all()
-    bot = MyBot(command_prefix="!", intents=intents)
+    bot = create_bot()
     bot.run(token)
 
 
