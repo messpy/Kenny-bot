@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import discord
 
-from bot import MyBot
+from src.kennybot.bot import MyBot
 
 
 def create_bot() -> MyBot:
     """Discord Bot インスタンスを生成する。"""
     intents = discord.Intents.all()
     return MyBot(command_prefix="!", intents=intents)
-

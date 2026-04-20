@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
 
-from ai.runner import OllamaRunner
+from src.kennybot.ai.runner import OllamaRunner
 
 
 @dataclass(frozen=True)
@@ -105,4 +105,3 @@ class ChatService:
         if len(out) > self.config.max_output_chars:
             out = out[: self.config.max_output_chars] + "\n...(省略)..."
         return out
-
