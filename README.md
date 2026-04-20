@@ -502,6 +502,15 @@ print(f"Current level: {violation.current_level}")
 spam_guard.reset_violation(user_id, guild_id)
 ```
 
+### ローカル preview
+
+Discord に投稿せず、slash コマンドやメンションの挙動を確認できます。
+
+```bash
+./.venv/bin/python bin/debug_route.py slash help
+./.venv/bin/python bin/debug_route.py mention "モデル名は？" --no-ai
+```
+
 ## 📝 ロギング
 
 ログは `runtime/logs/` ディレクトリに保存されます：
