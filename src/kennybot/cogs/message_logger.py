@@ -89,12 +89,35 @@ class MessageLogger(BaseCog):
         self._kenny_chat_reverse: dict[int, int] = {}
         # AI応答のチャンネル単位クールダウン
         self._ai_channel_last: dict[int, float] = {}
+        # (guild_id, channel_id, user_id) -> expires_at (monotonic seconds)
+        self._recent_mention_windows: dict[tuple[int, int, int], float] = {}
         self._local_rag = LocalRAG(Path(__file__).resolve().parent.parent)
         self._live_info = LiveInfoService()
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
         self._vector_store = MessageVectorStore(MESSAGE_VECTOR_DB_PATH)
         self._ai_retry_countdowns = ChannelCountdown()
         self._ai_progress_countdowns = ChannelCountdown()
+
+    def _prune_recent_mention_windows(self) -> None:
+        now = time.monotonic()
+        expired = [key for key, expires_at in self._recent_mention_windows.items() if expires_at <= now]
+        for key in expired:
+            self._recent_mention_windows.pop(key, None)
+
+    def _arm_recent_mention_window(self, msg: discord.Message, *, seconds: int = 60) -> None:
+        if msg.guild is None or seconds <= 0:
+            return
+        self._prune_recent_mention_windows()
+        key = (msg.guild.id, msg.channel.id, msg.author.id)
+        self._recent_mention_windows[key] = time.monotonic() + seconds
+
+    def _has_recent_mention_window(self, msg: discord.Message) -> bool:
+        if msg.guild is None:
+            return False
+        self._prune_recent_mention_windows()
+        key = (msg.guild.id, msg.channel.id, msg.author.id)
+        expires_at = self._recent_mention_windows.get(key)
+        return bool(expires_at and expires_at > time.monotonic())
 
     def _extract_tool_calls(self, response: object) -> list[object]:
         if response is None:
@@ -3218,9 +3241,11 @@ class MessageLogger(BaseCog):
             and self.bot.user
             and msg.reference.resolved.author.id == self.bot.user.id
         )
+        recent_mention_window = self._has_recent_mention_window(msg)
+        should_treat_as_mention = mentioned_bot or is_reply_to_bot or recent_mention_window
 
         # メンション / リプライがない場合はリアクションのみ
-        if not mentioned_bot and not is_reply_to_bot:
+        if not should_treat_as_mention:
             # メッセージを履歴に記録
             user_name = msg.author.display_name or msg.author.name or str(msg.author.id)
             store = MessageStore(
@@ -3269,16 +3294,20 @@ class MessageLogger(BaseCog):
             await self.bot.process_commands(msg)
             return
 
+        if recent_mention_window:
+            self._arm_recent_mention_window(msg)
+
         # =========================
         # ここから AI 応答処理（メンション or リプライの場合）
         # =========================
         text = normalize_user_text(content)
         if not text:
-            if mentioned_bot or is_reply_to_bot:
+            if should_treat_as_mention:
                 await msg.channel.send(
                     f"{msg.author.mention}\nはい、どうしましたか？",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                self._arm_recent_mention_window(msg)
                 await self.bot.process_commands(msg)
                 return
             await self.bot.process_commands(msg)
@@ -3332,6 +3361,7 @@ class MessageLogger(BaseCog):
                 title="Bot 会話ログ",
                 description="議事録開始を実行しました。",
             )
+            self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
 
@@ -3370,6 +3400,7 @@ class MessageLogger(BaseCog):
                 title="Bot 会話ログ",
                 description="議事録停止を実行しました。",
             )
+            self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
 
@@ -3381,6 +3412,7 @@ class MessageLogger(BaseCog):
                 source_msg=msg,
                 input_text=text,
             )
+            self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
 
@@ -3392,6 +3424,7 @@ class MessageLogger(BaseCog):
                 source_msg=msg,
                 channel_id=msg.channel.id,
             )
+            self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
 
@@ -3415,6 +3448,8 @@ class MessageLogger(BaseCog):
                     mention_user_id=msg.author.id,
                     done_text="✅ AI 呼び出しを再開できます。",
                 )
+            if should_treat_as_mention:
+                self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
         if self._is_ai_channel_rate_limited(msg.channel.id):
@@ -3422,6 +3457,8 @@ class MessageLogger(BaseCog):
                 f"{msg.author.mention}\nこのチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            if should_treat_as_mention:
+                self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
 
@@ -3626,6 +3663,7 @@ class MessageLogger(BaseCog):
                 references=references,
                 web_queries=web_queries + tool_queries,
             )
+            self._arm_recent_mention_window(msg)
 
         except Exception as e:
             logger.exception("AI response failed")
@@ -3648,6 +3686,7 @@ class MessageLogger(BaseCog):
                     f"{msg.author.mention}\nモデル準備中です。完了したらメンションで通知します。",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                self._arm_recent_mention_window(msg)
                 asyncio.create_task(
                     self._notify_when_model_ready(
                         msg.channel,
@@ -3663,6 +3702,7 @@ class MessageLogger(BaseCog):
                     f"{msg.author.mention}\n処理中にエラーが起きました。もう一度試してください。",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+                self._arm_recent_mention_window(msg)
             except Exception:
                 logger.exception("Failed to send AI error notice")
         finally:
