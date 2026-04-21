@@ -164,19 +164,13 @@ class LiveInfoService:
             geo_data = geo.json()
             results = geo_data.get("results") if isinstance(geo_data, dict) else None
             if not isinstance(results, list) or not results:
-                return ExternalContext(
-                    "天気API",
-                    f"場所 `{location}` は見つかりませんでした。\n取得元: Open-Meteo (https://open-meteo.com/)",
-                )
+                return None
 
             place = results[0]
             lat = place.get("latitude")
             lon = place.get("longitude")
             if lat is None or lon is None:
-                return ExternalContext(
-                    "天気API",
-                    f"場所 `{location}` の座標を取得できませんでした。\n取得元: Open-Meteo (https://open-meteo.com/)",
-                )
+                return None
 
             weather = requests.get(
                 "https://api.open-meteo.com/v1/forecast",
@@ -217,10 +211,7 @@ class LiveInfoService:
             )
             return ExternalContext("天気API", body)
         except Exception as e:
-            return ExternalContext(
-                "天気API",
-                f"取得失敗: {str(e)[:180]}\n取得元: Open-Meteo (https://open-meteo.com/)",
-            )
+            return None
 
     def _build_calendar_context(self, text: str) -> ExternalContext | None:
         target = self._extract_target_date(text)

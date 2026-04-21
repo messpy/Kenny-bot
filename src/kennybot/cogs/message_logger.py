@@ -305,6 +305,28 @@ class MessageLogger(BaseCog):
     def _should_preemptive_web_followup(self, text: str) -> bool:
         return False
 
+    def _needs_web_search_for_accuracy(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        keywords = (
+            "天気",
+            "気温",
+            "温度",
+            "weather",
+            "ニュース",
+            "news",
+            "速報",
+            "記事",
+            "話題",
+            "トレンド",
+            "最新",
+            "今日",
+            "今",
+            "現在",
+            "株価",
+            "為替",
+        )
+        return any(keyword in normalized for keyword in keywords)
+
     async def _promote_ai_progress_message(
         self,
         *,
@@ -478,6 +500,7 @@ class MessageLogger(BaseCog):
             "bot_game_catalog",
             "runtime_model",
             "vrchat_world",
+            "web_search",
             "none",
         }
 
@@ -625,6 +648,15 @@ class MessageLogger(BaseCog):
         if has_profile:
             plan.append({"source": "channel_profile"})
         plan.append({"source": "recent_turns", "limit": min(max(channel_lines, 4), 8)})
+        if self._needs_web_search_for_accuracy(text):
+            plan.insert(
+                0,
+                {
+                    "source": "web_search",
+                    "query": text,
+                    "web_scope": "auto",
+                },
+            )
         return plan
 
     async def _build_retrieval_plan(
@@ -696,6 +728,39 @@ class MessageLogger(BaseCog):
         )
 
     async def _build_current_info_context(
+        self,
+        text: str,
+        *,
+        web_scope: str = "auto",
+    ) -> tuple[str, list[str], dict[str, str], list[str]]:
+        def _looks_like_failure(result: tuple[str, list[str], dict[str, str], list[str]]) -> bool:
+            body = strip_ansi_and_ctrl(str(result[0] or "")).strip()
+            if not body:
+                return True
+            normalized = normalize_keyword_match_text(body)
+            failure_markers = (
+                "取得失敗",
+                "検索結果が取得できませんでした",
+                "web検索の実行に失敗しました",
+                "最新情報の検索に失敗しました",
+                "見つかりませんでした",
+            )
+            return any(marker in normalized for marker in failure_markers)
+
+        last_result: tuple[str, list[str], dict[str, str], list[str]] = ("", [], {}, [])
+        for attempt in range(2):
+            if attempt > 0:
+                await asyncio.sleep(0.75 * attempt)
+            result = await self._build_current_info_context_once(
+                text,
+                web_scope=web_scope,
+            )
+            if not _looks_like_failure(result):
+                return result
+            last_result = result
+        return last_result
+
+    async def _build_current_info_context_once(
         self,
         text: str,
         *,
@@ -1117,6 +1182,18 @@ class MessageLogger(BaseCog):
             target_candidates=target_candidates,
             user_lines=user_lines,
         )
+        if self._needs_web_search_for_accuracy(text) and not any(
+            str(item.get("source") or "").strip().lower() == "web_search"
+            for item in plan
+        ):
+            plan.insert(
+                0,
+                {
+                    "source": "web_search",
+                    "query": text,
+                    "web_scope": "auto",
+                },
+            )
 
         blocks: list[tuple[str, str]] = []
         references: list[str] = []
@@ -2086,6 +2163,18 @@ class MessageLogger(BaseCog):
             text=text,
         )
         references.extend(planned_refs)
+        if self._needs_web_search_for_accuracy(text) and not self._has_web_references(
+            planned_refs
+        ):
+            await self._handle_current_info_search_failure(
+                msg.channel,
+                mention=msg.author.mention,
+                query=text,
+                source_msg=msg,
+                model_name=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
+                references=planned_refs,
+            )
+            return
         web_planned = self._has_web_references(planned_refs)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
@@ -3367,6 +3456,18 @@ class MessageLogger(BaseCog):
             text=text,
         )
         references.extend(planned_refs)
+        if self._needs_web_search_for_accuracy(text) and not self._has_web_references(
+            planned_refs
+        ):
+            await self._handle_current_info_search_failure(
+                msg.channel,
+                mention=msg.author.mention,
+                query=text,
+                source_msg=msg,
+                model_name=self._cfg_str("ollama.model_default", "gpt-oss:120b"),
+                references=planned_refs,
+            )
+            return
         web_planned = self._has_web_references(planned_refs)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
