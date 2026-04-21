@@ -219,9 +219,9 @@ sequenceDiagram
 
 ### 6.3 スコープ付きデータ
 
-- `utils/scoped_data.py` が `data/channel_rag/<guild_id>/` 以下の保存先をまとめる
-- `utils/message_store.py` はスコープ付き保存先と既存の legacy 保存先へ互換保存する
-- `utils/message_logger.py` と `utils/event_logger.py` は、サーバー/チャンネル別のログを `data/channel_rag/<guild_id>/logs/` と `data/channel_rag/<guild_id>/channels/<channel_id>/logs/` にも書き出す
+- `utils/scoped_data.py` が `data/channel_rag/<guild_id>/` 以下の設定・RAG データと `runtime/logs/channel_rag/<guild_id>/` 以下のログ保存先を分けてまとめる
+- `utils/message_store.py` は新規のメッセージ履歴を `runtime/logs/message_logs/` に保存し、旧保存先は読み取り互換として残す
+- `utils/message_logger.py` と `utils/event_logger.py` は、サーバー/チャンネル別のログを `runtime/logs/channel_rag/<guild_id>/logs/` と `runtime/logs/channel_rag/<guild_id>/channels/<channel_id>/logs/` に書き出す
 - フォルダが未作成でも保存前に作成するため、初回参照で落ちない
 
 ## 7. モデレーション設計
@@ -277,6 +277,7 @@ flowchart TD
 - Gemini の `generateContent` が 429 / クォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` と `ollama.model_chat` / `ollama.model_summary` を順に試して Ollama へ切り替える
 - サーバー固有の説明は `data/channel_rag/<guild_id>/chat_rag.md` に、チャンネル固有の説明は `data/channel_rag/<guild_id>/channels/<channel_id>/` に保存し、会話応答のローカル知識として参照する
 - 録音系の設定は `recorder.default_format` / `recorder.max_minutes` / `recorder.silence_timeout_seconds` / `recorder.max_tracks` / `recorder.auto_cook_formats` を使い、外部録音の停止と後処理に反映する
+- `meeting.audio_max_total_mb` / `meeting.audio_max_user_mb` は `0` を無制限として扱い、メモリ上限をかけたいときだけ有効化する
 
 ## 10. ディレクトリ方針
 

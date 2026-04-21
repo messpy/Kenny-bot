@@ -77,11 +77,13 @@ class GroupMatchState:
 
 
 @dataclass
-class DebugEchoState:
+class MinutesControlState:
     guild_id: int
     channel_id: int
+    message_id: int
+    status_message_id: int
     owner_user_id: int
-    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    voice_channel_id: int
 
 
 class SlashCommands(commands.Cog):
@@ -96,9 +98,20 @@ class SlashCommands(commands.Cog):
         self._vc_panels: dict[int, VcPanelState] = {}
         # message_id -> group match state
         self._group_matches: dict[int, GroupMatchState] = {}
-        # message_id -> debug echo state
-        self._debug_echo_sessions: dict[int, DebugEchoState] = {}
+        # message_id -> meeting control panel state
+        self._minutes_panels: dict[int, MinutesControlState] = {}
         self._countdowns = ChannelCountdown()
+
+    def _clear_minutes_panels(self, guild_id: int) -> None:
+        for message_id, state in list(self._minutes_panels.items()):
+            if state.guild_id == guild_id:
+                self._minutes_panels.pop(message_id, None)
+
+    async def _set_minutes_status_ended(self, guild: discord.Guild) -> None:
+        for panel in list(self._minutes_panels.values()):
+            if panel.guild_id != guild.id:
+                continue
+            await self._update_minutes_status_message(guild, panel, ended=True)
 
     async def _find_message_for_reaction_role(
         self,
@@ -140,8 +153,6 @@ class SlashCommands(commands.Cog):
     VC_DEAF_OFF_EMOJI = "🙊"
     GROUP_MATCH_EMOJI = "🤝"
     GROUP_MATCH_START_EMOJI = "▶️"
-    DEBUG_ECHO_STOP_EMOJI = "⏹️"
-
     _CONFIG_CHOICES = [
         app_commands.Choice(name="会話履歴の参照行数", value="chat.history_lines"),
         app_commands.Choice(name="本人履歴の参照行数", value="chat.user_history_lines"),
@@ -233,21 +244,99 @@ class SlashCommands(commands.Cog):
         return isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread))
 
     @staticmethod
-    def _latest_meeting_audio_debug(guild_id: int) -> Path | None:
-        root = Path("/home/kennypi/work/Kenny-bot/data/meeting_audio_debug")
-        if not root.exists():
-            return None
-        matches = sorted(
-            [
-                *root.glob(f"rawcap_pycord_guild_{guild_id}_*_user_*.wav"),
-                *root.glob(f"rawcap_mix_guild_{guild_id}_*.wav"),
-                *root.glob(f"rawcap_guild_{guild_id}_*_user_*.wav"),
-                *root.glob(f"guild_{guild_id}_*_user_*.wav"),
-            ],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+    def _emoji_key(emoji: object) -> str:
+        name = getattr(emoji, "name", None)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return str(emoji).strip()
+
+    async def _handle_minutes_reaction(
+        self,
+        *,
+        guild: discord.Guild | None,
+        channel: discord.abc.Messageable | None,
+        message_id: int,
+        channel_id: int,
+        guild_id: int | None,
+        user_id: int,
+        emoji: str,
+    ) -> bool:
+        minutes_panel = self._minutes_panels.get(message_id)
+        if not minutes_panel:
+            return False
+        logger.info(
+            "minutes_panel_hit message=%s expected_channel=%s expected_guild=%s emoji=%s",
+            message_id,
+            minutes_panel.channel_id,
+            minutes_panel.guild_id,
+            emoji,
         )
-        return matches[0] if matches else None
+        if guild_id != minutes_panel.guild_id or channel_id != minutes_panel.channel_id:
+            logger.info(
+                "minutes_panel_mismatch message=%s payload_channel=%s payload_guild=%s",
+                message_id,
+                channel_id,
+                guild_id,
+            )
+            return True
+        if guild is None:
+            logger.info("minutes_panel_missing_guild message=%s guild=%s", message_id, guild_id)
+            return True
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except Exception:
+                logger.info("minutes_panel_missing_member message=%s user=%s", message_id, user_id)
+                return True
+        if not isinstance(member, discord.Member):
+            logger.info("minutes_panel_invalid_member message=%s user=%s", message_id, user_id)
+            return True
+        if member.id != minutes_panel.owner_user_id and not member.guild_permissions.manage_guild:
+            logger.info(
+                "minutes_panel_no_permission message=%s user=%s owner=%s",
+                message_id,
+                user_id,
+                minutes_panel.owner_user_id,
+            )
+            return True
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            logger.info("minutes_panel_invalid_channel message=%s channel=%s", message_id, channel_id)
+            return True
+
+        try:
+            if emoji in {"▶️", "▶"}:
+                text = await self._toggle_minutes_realtime_mode(guild, member, minutes_panel)
+                await channel.send(text, delete_after=10)
+                return True
+            if emoji in {"⏯️", "⏯"}:
+                text = await self._send_minutes_interim_summary(guild, channel)
+                await channel.send(text, delete_after=10)
+                return True
+            if emoji in {"⏹️", "⏹"}:
+                text = await self._stop_minutes_session_from_panel(
+                    guild,
+                    channel,
+                    member,
+                    playback=False,
+                    action="minutes_stop",
+                )
+                await channel.send(text, delete_after=10)
+                return True
+            if emoji in {"🎶"}:
+                text = await self._stop_minutes_session_from_panel(
+                    guild,
+                    channel,
+                    member,
+                    playback=True,
+                    action="minutes_stop",
+                )
+                await channel.send(text, delete_after=10)
+                return True
+        except Exception as e:
+            await channel.send(f"議事録操作に失敗しました: {e}", delete_after=10)
+            return True
+        return False
 
     @staticmethod
     def _write_pcm_wav(path: Path, pcm: bytes, sample_rate: int = 48000, channels: int = 2, sample_width: int = 2) -> None:
@@ -1268,13 +1357,203 @@ class SlashCommands(commands.Cog):
                 allow_fallback=False,
             )
             if out:
-                await out.send(f"{interaction.user.mention} 議事録を開始しました。（VC: {voice_channel_name}）")
+                start_message = await out.send(
+                    "\n".join(
+                        [
+                            f"{interaction.user.mention} 議事録を開始しました。（VC: {voice_channel_name}）",
+                            "リアル文字起こし: ON",
+                            "▶️ リアル文字起こしの開始/停止",
+                            "⏯️ 途中要約",
+                            "⏹️ 停止して要約",
+                            "🎶 停止して録音を再生",
+                        ]
+                    )
+                )
+                for emoji in ("▶️", "⏯️", "⏹️", "🎶"):
+                    try:
+                        await start_message.add_reaction(emoji)
+                    except Exception:
+                        pass
+                self._minutes_panels[start_message.id] = MinutesControlState(
+                    guild_id=interaction.guild.id,
+                    channel_id=out.id,
+                    message_id=start_message.id,
+                    status_message_id=0,
+                    owner_user_id=interaction.user.id,
+                    voice_channel_id=voice_channel.id,
+                )
+                try:
+                    status_message = await out.send(
+                        self._build_minutes_status_text(
+                            interaction.guild,
+                            self.bot.meeting_minutes.get_session(interaction.guild.id),
+                        )
+                    )
+                    self._minutes_panels[start_message.id].status_message_id = status_message.id
+                except Exception:
+                    pass
             log_ch = self.bot.meeting_minutes.resolve_global_log_channel(self.bot)
             if log_ch and out != log_ch:
                 await log_ch.send(
                     f"[minutes_start] guild={interaction.guild.id} channel={interaction.channel_id} "
                     f"user={interaction.user.id} vc={voice_channel_name} provider={provider or 'default'} model={backend_model or 'default'}"
                 )
+
+    async def _toggle_minutes_realtime_mode(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        panel: MinutesControlState,
+    ) -> str:
+        session = self.bot.meeting_minutes.get_session(guild.id)
+        if session is None:
+            return "進行中の議事録がありません。"
+        runtime = session.runtime
+        if runtime.voice_client is None:
+            return "リアル文字起こしはこの録音方式では使えません。"
+        if runtime.realtime_live_enabled:
+            task = runtime.realtime_task
+            runtime.realtime_live_enabled = False
+            runtime.realtime_task = None
+            for flush_task in list(getattr(runtime, "phrase_flush_tasks", {}).values()):
+                flush_task.cancel()
+            getattr(runtime, "phrase_flush_tasks", {}).clear()
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            await self._update_minutes_status_message(guild, panel)
+            return f"{member.mention} リアル文字起こし投稿を停止しました。"
+
+        if runtime.phrase_queue is None:
+            runtime.phrase_queue = asyncio.Queue()
+        if runtime.realtime_task is None or runtime.realtime_task.done():
+            runtime.realtime_task = asyncio.create_task(self.bot.meeting_minutes._run_realtime_updates(self.bot, guild.id))
+        runtime.realtime_live_enabled = True
+        await self._update_minutes_status_message(guild, panel)
+        return f"{member.mention} リアル文字起こし投稿を開始しました。"
+
+    def _build_minutes_status_text(self, guild: discord.Guild, session: object | None, ended: bool = False) -> str:
+        if ended or session is None:
+            return "\n".join(
+                [
+                    "音声認識ステータス: 終了",
+                    "文字起こしステータス: 終了",
+                    "音声認識と文字起こしは停止しました。",
+                ]
+            )
+        voice_channel_id = getattr(session, "voice_channel_id", 0)
+        voice_channel = guild.get_channel(voice_channel_id)
+        voice_channel_name = voice_channel.name if isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{voice_channel_id}"
+        runtime = getattr(session, "runtime", None)
+        voice_client = getattr(runtime, "voice_client", None)
+        phrase_flush_tasks = getattr(runtime, "phrase_flush_tasks", {}) or {}
+        phrase_queue = getattr(runtime, "phrase_queue", None)
+        transcription_active = bool(getattr(runtime, "realtime_live_enabled", False)) or bool(phrase_flush_tasks) or (
+            phrase_queue is not None and not phrase_queue.empty()
+        )
+        recognition_state = "認識中" if voice_client is not None else "停止中"
+        transcription_state = "文字起こし中" if transcription_active else "待機中"
+        return "\n".join(
+            [
+                f"音声認識ステータス: {recognition_state}",
+                f"文字起こし投稿ステータス: {transcription_state}",
+                f"対象VC: {voice_channel_name}",
+            ]
+        )
+
+    async def _update_minutes_status_message(
+        self,
+        guild: discord.Guild,
+        panel: MinutesControlState,
+        *,
+        ended: bool = False,
+    ) -> None:
+        channel = self.bot.get_channel(panel.channel_id)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+        try:
+            msg = await channel.fetch_message(panel.status_message_id)
+        except Exception:
+            return
+        session = self.bot.meeting_minutes.get_session(guild.id)
+        try:
+            await msg.edit(content=self._build_minutes_status_text(guild, session, ended=ended))
+        except Exception:
+            pass
+
+    async def _send_minutes_interim_summary(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel | discord.Thread,
+    ) -> str:
+        ok, payload = await self.bot.meeting_minutes.build_interim_summary(
+            self.bot,
+            guild,
+            reason="途中要約",
+        )
+        if not ok:
+            return str(payload)
+        if isinstance(payload, discord.Embed):
+            await channel.send(embed=payload)
+            return "途中要約を送信しました。"
+        return str(payload)
+
+    async def _stop_minutes_session_from_panel(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel | discord.Thread,
+        member: discord.Member,
+        *,
+        playback: bool,
+        action: str,
+    ) -> str:
+        result = await self.bot.meeting_minutes.stop_session(
+            bot=self.bot,
+            guild=guild,
+            reason=f"{member.display_name} がリアクションで停止",
+            mention_user_id=member.id,
+        )
+        if not result:
+            return "現在、進行中の議事録はありません。"
+
+        playback_note = ""
+        if playback:
+            voice_channel = guild.get_channel(result.session.voice_channel_id)
+            wav_path = None
+            if result.audio_debug_paths:
+                for candidate in result.audio_debug_paths:
+                    path = Path(candidate)
+                    if path.suffix.lower() == ".wav":
+                        wav_path = path
+                        break
+                if wav_path is None:
+                    wav_path = Path(result.audio_debug_paths[0])
+            if wav_path and wav_path.exists() and isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+                try:
+                    playback_error = await self._play_wav_in_voice_channel(guild, voice_channel, wav_path)
+                    if playback_error:
+                        playback_note = f" / 録音再生なし: {playback_error}"
+                    else:
+                        playback_note = " / 録音をVCで再生中"
+                except Exception as e:
+                    playback_note = f" / 録音再生失敗: {e}"
+
+        await self.bot.meeting_minutes.deliver_stop_result(
+            self.bot,
+            guild,
+            result,
+            action=action,
+            source_channel_id=channel.id,
+            playback_note=playback_note,
+        )
+        await self._set_minutes_status_ended(guild)
+        self._clear_minutes_panels(guild.id)
+        return "議事録を停止し、要約を作成しました。" + playback_note
 
     @app_commands.command(name=MINUTES_STOP_META.name, description=MINUTES_STOP_META.description)
     @app_commands.checks.cooldown(1, 15.0)
@@ -1284,47 +1563,12 @@ class SlashCommands(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        result = await self.bot.meeting_minutes.stop_session(
-            bot=self.bot,
-            guild=interaction.guild,
-            reason=f"{interaction.user.display_name} が手動停止",
-            mention_user_id=interaction.user.id,
-        )
-        if not result:
-            await interaction.followup.send("現在、進行中の議事録はありません。", ephemeral=True)
-            return
-
-        await interaction.followup.send("議事録を停止し、要約を作成しました。", ephemeral=True)
-
-        playback_note = ""
-        voice_channel = interaction.guild.get_channel(result.session.voice_channel_id)
-        wav_path = None
-        if result.audio_debug_paths:
-            for candidate in result.audio_debug_paths:
-                path = Path(candidate)
-                if path.suffix.lower() == ".wav":
-                    wav_path = path
-                    break
-            if wav_path is None:
-                wav_path = Path(result.audio_debug_paths[0])
-        if wav_path and wav_path.exists() and isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
-            try:
-                playback_error = await self._play_wav_in_voice_channel(interaction.guild, voice_channel, wav_path)
-                if playback_error:
-                    playback_note = f" / 録音再生なし: {playback_error}"
-                else:
-                    playback_note = " / 録音をVCで再生中"
-            except Exception as e:
-                playback_note = f" / 録音再生失敗: {e}"
-
-        await self.bot.meeting_minutes.deliver_stop_result(
-            self.bot,
-            interaction.guild,
-            result,
+        ok, text = await self._stop_minutes_session(
+            interaction,
+            playback=False,
             action="minutes_stop",
-            source_channel_id=interaction.channel_id,
-            playback_note=playback_note,
         )
+        await interaction.followup.send(text if ok else text, ephemeral=True)
 
     @app_commands.command(name=MINUTES_STATUS_META.name, description=MINUTES_STATUS_META.description)
     async def minutes_status(self, interaction: discord.Interaction):
@@ -1345,139 +1589,57 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="minutes_debug_playback", description="最新の議事録デバッグ音声をVCで再生")
-    async def minutes_debug_playback(self, interaction: discord.Interaction):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
-            return
-        voice = interaction.user.voice
-        if not voice or not isinstance(voice.channel, (discord.VoiceChannel, discord.StageChannel)):
-            await interaction.response.send_message("VCに参加してから実行してください。", ephemeral=True)
-            return
-        wav_path = self._latest_meeting_audio_debug(interaction.guild.id)
-        if wav_path is None:
-            await interaction.response.send_message("再生できるデバッグ音声がありません。", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        existing_vc = interaction.guild.voice_client
-        target_channel = voice.channel
-        if existing_vc and existing_vc.is_connected():
-            current = getattr(existing_vc, "channel", None)
-            if current != target_channel:
-                await interaction.followup.send("Bot が別VCに接続中です。", ephemeral=True)
-                return
-            vc = existing_vc
-        else:
-            vc = await target_channel.connect(self_deaf=True, reconnect=False)
-
-        if vc.is_playing():
-            await interaction.followup.send("Bot は現在再生中です。", ephemeral=True)
-            return
-
-        await interaction.followup.send(f"デバッグ音声を再生します。\n`{wav_path}`", ephemeral=True)
-        source = discord.FFmpegPCMAudio(str(wav_path))
-
-        def _after_playback(error: Exception | None) -> None:
-            if error:
-                return
-            fut = vc.disconnect(force=True)
-            if hasattr(fut, "__await__"):
-                asyncio.run_coroutine_threadsafe(fut, self.bot.loop)
-
-        vc.play(source, after=_after_playback)
-
-    @app_commands.command(name="minutes_debug_echo", description="VC音声を録音して、停止後にそのまま再生")
-    async def minutes_debug_echo(
+    async def _stop_minutes_session(
         self,
         interaction: discord.Interaction,
-    ):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
-            return
-        voice = interaction.user.voice
-        if not voice or not isinstance(voice.channel, (discord.VoiceChannel, discord.StageChannel)):
-            await interaction.response.send_message("VCに参加してから実行してください。", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        if interaction.guild.voice_client and interaction.guild.voice_client.is_connected():
-            await interaction.followup.send("Bot がすでに VC 接続中です。", ephemeral=True)
-            return
+        *,
+        playback: bool,
+        action: str,
+    ) -> tuple[bool, str]:
+        if not interaction.guild:
+            return False, "サーバー内で実行してください。"
+        result = await self.bot.meeting_minutes.stop_session(
+            bot=self.bot,
+            guild=interaction.guild,
+            reason=f"{interaction.user.display_name} が手動停止",
+            mention_user_id=interaction.user.id,
+        )
+        if not result:
+            return False, "現在、進行中の議事録はありません。"
 
-        runtime = await self.bot.meeting_minutes._start_external_recorder(self.bot, voice.channel)
-        if runtime.recorder_process is None:
-            await interaction.followup.send(
-                f"録音開始に失敗しました: {runtime.warning or '外部録音を開始できませんでした。'}",
-                ephemeral=True,
-            )
-            return
+        playback_note = ""
+        if playback:
+            voice_channel = interaction.guild.get_channel(result.session.voice_channel_id)
+            wav_path = None
+            if result.audio_debug_paths:
+                for candidate in result.audio_debug_paths:
+                    path = Path(candidate)
+                    if path.suffix.lower() == ".wav":
+                        wav_path = path
+                        break
+                if wav_path is None:
+                    wav_path = Path(result.audio_debug_paths[0])
+            if wav_path and wav_path.exists() and isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+                try:
+                    playback_error = await self._play_wav_in_voice_channel(interaction.guild, voice_channel, wav_path)
+                    if playback_error:
+                        playback_note = f" / 録音再生なし: {playback_error}"
+                    else:
+                        playback_note = " / 録音をVCで再生中"
+                except Exception as e:
+                    playback_note = f" / 録音再生失敗: {e}"
 
-        try:
-            if not isinstance(interaction.channel, discord.TextChannel):
-                await interaction.followup.send("停止リアクションを置けるテキストチャンネルで実行してください。", ephemeral=True)
-                return
-            stop_message = await interaction.channel.send(
-                f"{interaction.user.mention} 録音を開始しました。停止するまで録音し続けます。\n"
-                f"停止するときは {self.DEBUG_ECHO_STOP_EMOJI} リアクションを押してください。"
-            )
-            await stop_message.add_reaction(self.DEBUG_ECHO_STOP_EMOJI)
-            self._debug_echo_sessions[stop_message.id] = DebugEchoState(
-                guild_id=interaction.guild.id,
-                channel_id=interaction.channel_id,
-                owner_user_id=interaction.user.id,
-            )
-            await interaction.followup.send("録音を開始しました。停止はチャンネル上の `⏹️` リアクションで行ってください。", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"録音開始に失敗しました: {e}", ephemeral=True)
-            return
-
-        proc = runtime.recorder_process
-        state = self._debug_echo_sessions.get(stop_message.id)
-        if state is None:
-            await interaction.followup.send("録音セッションの初期化に失敗しました。", ephemeral=True)
-            return
-        wait_tasks: set[asyncio.Task] = {asyncio.create_task(state.stop_event.wait())}
-        if proc is not None:
-            wait_tasks.add(asyncio.create_task(proc.wait()))
-        try:
-            _done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            await stop_message.edit(content=f"{interaction.user.mention} 録音を停止しています。少し待ってください。")
-        except Exception as e:
-            for task in wait_tasks:
-                task.cancel()
-            await interaction.followup.send(f"録音待機中に失敗しました: {e}", ephemeral=True)
-            return
-        finally:
-            self._debug_echo_sessions.pop(stop_message.id, None)
-
-        try:
-            if proc is not None and proc.stdin is not None:
-                proc.stdin.write(b"stop\n")
-                await proc.stdin.drain()
-                proc.stdin.close()
-            if proc is not None:
-                await asyncio.wait_for(proc.wait(), timeout=20)
-        except Exception:
-            await interaction.followup.send("録音停止に失敗しました。", ephemeral=True)
-            return
-
-        wav_path = runtime.recorder_wav_path
-        if not wav_path.exists() or wav_path.stat().st_size <= 44:
-            await interaction.followup.send("録音ファイルを作れませんでした。", ephemeral=True)
-            return
-
-        await asyncio.sleep(2)
-        playback_error = await self._play_wav_in_voice_channel(interaction.guild, voice.channel, wav_path)
-        if playback_error:
-            await interaction.followup.send(
-                f"wav を保存しましたが再生できませんでした: {playback_error}\n{wav_path}",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.followup.send(f"録音して再生します。\n{wav_path}", ephemeral=True)
+        await self.bot.meeting_minutes.deliver_stop_result(
+            self.bot,
+            interaction.guild,
+            result,
+            action=action,
+            source_channel_id=interaction.channel_id,
+            playback_note=playback_note,
+        )
+        await self._set_minutes_status_ended(interaction.guild)
+        self._clear_minutes_panels(interaction.guild.id)
+        return True, "議事録を停止し、要約を作成しました。" + playback_note
 
     @app_commands.command(name=TIMER_META.name, description=TIMER_META.description)
     @app_commands.checks.cooldown(2, 10.0)
@@ -1566,18 +1728,26 @@ class SlashCommands(commands.Cog):
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == (self.bot.user.id if self.bot.user else 0):
             return
-        emoji = str(payload.emoji)
-
-        debug_echo = self._debug_echo_sessions.get(payload.message_id)
-        if debug_echo:
-            if (
-                emoji == self.DEBUG_ECHO_STOP_EMOJI
-                and payload.guild_id == debug_echo.guild_id
-                and payload.channel_id == debug_echo.channel_id
-                and payload.user_id == debug_echo.owner_user_id
-            ):
-                debug_echo.stop_event.set()
-            return
+        emoji = self._emoji_key(payload.emoji)
+        logger.info(
+            "raw_reaction_add message=%s channel=%s guild=%s user=%s emoji=%s",
+            payload.message_id,
+            payload.channel_id,
+            payload.guild_id,
+            payload.user_id,
+            emoji,
+        )
+        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
+        channel = self.bot.get_channel(payload.channel_id)
+        await self._handle_minutes_reaction(
+            guild=guild,
+            channel=channel,
+            message_id=payload.message_id,
+            channel_id=payload.channel_id,
+            guild_id=payload.guild_id,
+            user_id=payload.user_id,
+            emoji=emoji,
+        )
 
         if payload.message_id in self._group_matches:
             state = self._group_matches.get(payload.message_id)
@@ -1633,6 +1803,32 @@ class SlashCommands(commands.Cog):
                 )
             )
             return
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
+        if user.id == (self.bot.user.id if self.bot.user else 0):
+            return
+        message = reaction.message
+        emoji = self._emoji_key(reaction.emoji)
+        logger.info(
+            "reaction_add message=%s channel=%s guild=%s user=%s emoji=%s",
+            message.id,
+            message.channel.id,
+            getattr(message.guild, "id", None),
+            user.id,
+            emoji,
+        )
+        guild = message.guild if isinstance(message.guild, discord.Guild) else None
+        await self._handle_minutes_reaction(
+            guild=guild,
+            channel=message.channel,
+            message_id=message.id,
+            channel_id=message.channel.id,
+            guild_id=getattr(message.guild, "id", None),
+            user_id=user.id,
+            emoji=emoji,
+        )
+        return
 
         panel = self._vc_panels.get(payload.message_id)
         if not panel:
@@ -1771,7 +1967,7 @@ class SlashCommands(commands.Cog):
             ],
             source_channel_id=interaction.channel_id,
         )
-        text = f"コマンド実行に失敗しました: {error}"
+        text = "コマンド実行に失敗しました。"
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(text, ephemeral=True)

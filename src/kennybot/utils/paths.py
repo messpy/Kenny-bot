@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 
+ROOT_DIR = Path(__file__).resolve().parents[3]
 CONFIG_DIR = Path("config")
 DATA_DIR = Path("data")
 RUNTIME_DIR = Path("runtime")
@@ -17,6 +18,17 @@ LEGACY_LOG_DIR = Path("log")
 LOG_DIR = RUNTIME_LOG_DIR
 PROMPTS_DIR = Path("prompts")
 KNOWLEDGE_DIR = Path("knowledge")
+LEGACY_MESSAGE_LOG_DIR = DATA_DIR / "message_logs"
+LEGACY_RUNTIME_MESSAGE_LOG_DIR = RUNTIME_HISTORY_DIR / "message_logs"
+MESSAGE_LOG_DIR = RUNTIME_LOG_DIR / "message_logs"
+MESSAGE_VECTOR_DB_PATH = RUNTIME_RAG_DIR / "message_vectors.sqlite3"
+CHANNEL_RAG_DIR = DATA_DIR / "channel_rag"
+# Backward-compatible alias for older references.
+SERVER_RAG_DIR = CHANNEL_RAG_DIR
+ALL_MESSAGES_LOG = RUNTIME_LOG_DIR / "messages.log"
+SCOPED_LOG_DIR = RUNTIME_LOG_DIR / "channel_rag"
+RUNTIME_SETTINGS_PATH = CONFIG_DIR / "bot_settings.yaml"
+LEGACY_RUNTIME_SETTINGS_PATH = DATA_DIR / "bot_settings.yaml"
 
 for path in (
     CONFIG_DIR,
@@ -28,23 +40,12 @@ for path in (
     RUNTIME_HISTORY_DIR,
     RUNTIME_RAG_DIR,
     RUNTIME_TMP_DIR,
-    LEGACY_LOG_DIR,
     LOG_DIR,
+    MESSAGE_LOG_DIR,
+    SCOPED_LOG_DIR,
     PROMPTS_DIR,
     KNOWLEDGE_DIR,
 ):
     path.mkdir(parents=True, exist_ok=True)
 
 LOG_FILE = LOG_DIR / datetime.now().strftime("kennybot_%Y%m%d.log")
-LEGACY_MESSAGE_LOG_DIR = DATA_DIR / "message_logs"
-LEGACY_MESSAGE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-MESSAGE_LOG_DIR = RUNTIME_HISTORY_DIR / "message_logs"
-MESSAGE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-MESSAGE_VECTOR_DB_PATH = RUNTIME_RAG_DIR / "message_vectors.sqlite3"
-CHANNEL_RAG_DIR = DATA_DIR / "channel_rag"
-CHANNEL_RAG_DIR.mkdir(parents=True, exist_ok=True)
-# Backward-compatible alias for older references.
-SERVER_RAG_DIR = CHANNEL_RAG_DIR
-ALL_MESSAGES_LOG = RUNTIME_LOG_DIR / "messages.log"
-RUNTIME_SETTINGS_PATH = CONFIG_DIR / "bot_settings.yaml"
-LEGACY_RUNTIME_SETTINGS_PATH = DATA_DIR / "bot_settings.yaml"

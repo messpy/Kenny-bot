@@ -57,9 +57,17 @@ def normalize_keyword_match_text(raw: str) -> str:
 # 意図判定
 # =========================
 def is_search_intent(text: str) -> bool:
-    """検索クエリ生成が必要かどうかを判定"""
-    t = text or ""
-    return ("教えて" in t) or ("調べて" in t) or ("ニュース" in t)
+    """一般的な検索・調査意図を判定する。web 検索とは限らない。"""
+    t = normalize_keyword_match_text(text or "")
+    keywords = (
+        "調べて",
+        "しらべて",
+        "検索",
+        "検索して",
+        "探して",
+        "リサーチ",
+    )
+    return any(keyword in t for keyword in keywords)
 
 
 def is_current_info_intent(text: str) -> bool:
@@ -71,14 +79,66 @@ def is_current_info_intent(text: str) -> bool:
         "現在",
         "今",
         "いま",
+        "今の",
+        "今週",
+        "来週",
+        "先週",
+        "今月",
+        "来月",
+        "先月",
+        "この時期",
+        "時事",
+        "時事ネタ",
+        "話題",
         "最新",
         "最近",
         "ニュース",
         "天気",
         "気温",
+        "季節",
+        "しき",
+        "時期",
+        "旬",
+        "服装",
+        "気候",
         "速報",
         "トレンド",
         "株価",
         "レート",
+        "流行",
+        "日時",
+        "何日",
+        "何時",
+        "何曜日",
+        "いつ",
     )
     return any(keyword in t for keyword in keywords)
+
+
+def looks_like_web_search_artifact(text: str) -> bool:
+    """Web 検索結果の要約っぽい本文かどうかを判定する。
+
+    会話履歴や semantic memory に混ぜたくない生成物を弾くための
+    かなり保守的な判定にする。
+    """
+    raw = strip_ansi_and_ctrl(text or "").strip()
+    if not raw:
+        return False
+
+    normalized = normalize_keyword_match_text(raw)
+    if "web検索" in normalized and (
+        "失敗" in normalized or "エラー" in normalized or "実行に失敗" in normalized
+    ):
+        return True
+
+    summary_markers = (
+        "全体要約",
+        "補足",
+        "参考URL",
+        "出典元",
+        "検索結果の要約",
+    )
+    if not any(marker in raw for marker in summary_markers):
+        return False
+
+    return "http://" in raw or "https://" in raw or "](" in raw

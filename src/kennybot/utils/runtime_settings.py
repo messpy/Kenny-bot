@@ -58,8 +58,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
         "meeting": {
             "max_minutes": 90,
-            "audio_max_total_mb": 64,
-            "audio_max_user_mb": 8,
+            "audio_max_total_mb": 0,
+            "audio_max_user_mb": 0,
             "transcription_provider": "google",
             "google_language_code": "ja-JP",
             "google_chunk_seconds": 20,

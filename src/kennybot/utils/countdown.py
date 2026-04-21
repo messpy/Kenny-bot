@@ -11,6 +11,9 @@ class ChannelCountdown:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._messages: dict[str, discord.Message] = {}
 
+    def get_message(self, key: str) -> discord.Message | None:
+        return self._messages.get(key)
+
     def _format_elapsed(self, seconds: int) -> str:
         total = max(1, int(seconds))
         minutes, secs = divmod(total, 60)
@@ -40,14 +43,22 @@ class ChannelCountdown:
         start_seconds: int = 1,
     ) -> None:
         await self.stop(key, delete_message=True)
+        prefix = f"<@{mention_user_id}> " if mention_user_id else ""
+        elapsed = max(1, int(start_seconds))
+        text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
+        msg = await channel.send(
+            f"{prefix}{text}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self._messages[key] = msg
         task = asyncio.create_task(
             self._run_countup(
                 key=key,
-                channel=channel,
+                msg=msg,
                 base_text=base_text,
                 text_factory=text_factory,
                 mention_user_id=mention_user_id,
-                start_seconds=start_seconds,
+                elapsed=elapsed,
             )
         )
         self._tasks[key] = task
@@ -118,29 +129,19 @@ class ChannelCountdown:
         self,
         *,
         key: str,
-        channel: discord.abc.Messageable,
+        msg: discord.Message,
         base_text: str,
         text_factory: Callable[[int], str] | None,
         mention_user_id: int | None,
-        start_seconds: int,
+        elapsed: int,
     ) -> None:
-        prefix = f"<@{mention_user_id}> " if mention_user_id else ""
-        elapsed = max(1, int(start_seconds))
-        text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
-        msg = await channel.send(
-            f"{prefix}{text}",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        self._messages[key] = msg
         try:
             while True:
                 await asyncio.sleep(1)
                 elapsed += 1
+                prefix = f"<@{mention_user_id}> " if mention_user_id else ""
                 text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
-                await msg.edit(
-                    content=f"{prefix}{text}",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                await msg.edit(content=f"{prefix}{text}", allowed_mentions=discord.AllowedMentions.none())
         except asyncio.CancelledError:
             return
         finally:

@@ -8,6 +8,7 @@ import importlib
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import wave
@@ -22,11 +23,13 @@ from discord.ext import commands
 
 from src.kennybot.ai.google_speech import GoogleSpeechClient, GoogleSpeechConfig
 from src.kennybot.utils.app_constants import GLOBAL_MEETING_LOG_CHANNEL_ID
+from src.kennybot.utils.paths import ROOT_DIR
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.prompts import get_prompt
 
 JST = timezone(timedelta(hours=9))
 _settings = get_settings()
+ABS_PATH_RE = re.compile(r"/[^\s`'\"<>]+")
 VoiceLikeChannel = discord.VoiceChannel | discord.StageChannel
 AnnounceChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
 
@@ -37,6 +40,7 @@ class _RecordingRuntime:
     sink: object | None = None
     chunks: dict[int, bytearray] = field(default_factory=dict)
     phrase_chunks: dict[int, bytearray] = field(default_factory=dict)
+    phrase_flush_tasks: dict[int, asyncio.Task] = field(default_factory=dict)
     phrase_queue: asyncio.Queue[tuple[int, bytes]] | None = None
     recorder_process: asyncio.subprocess.Process | None = None
     recorder_ready_path: Path | None = None
@@ -45,10 +49,11 @@ class _RecordingRuntime:
     recorder_wav_path: Path | None = None
     recorder_watch_task: asyncio.Task | None = None
     warning: str = ""
-    max_total_bytes: int = 64 * 1024 * 1024
-    max_user_bytes: int = 8 * 1024 * 1024
+    max_total_bytes: int = 0
+    max_user_bytes: int = 0
     dropped: bool = False
     realtime_task: asyncio.Task | None = None
+    realtime_live_enabled: bool = False
 
 
 @dataclass
@@ -82,7 +87,7 @@ class MeetingMinutesManager:
     """議事録セッション管理"""
 
     _AUDIO_DEBUG_DIR = Path("data") / "meeting_audio_debug"
-    _EXTERNAL_RECORDER_DIR = Path(__file__).resolve().parents[1] / "external_recorder"
+    _EXTERNAL_RECORDER_DIR = ROOT_DIR / "external_recorder"
     _EXTERNAL_RECORDER_SCRIPT = _EXTERNAL_RECORDER_DIR / "helper_record.mjs"
     _MOONSHINE_PYTHON_CANDIDATES = (
         Path("/home/kennypi/work/voicechat/.moonshine-pi-venv/bin/python"),
@@ -176,6 +181,14 @@ class MeetingMinutesManager:
         return max(0, int(_settings.get("recorder.max_tracks", 10000, guild_id=guild_id)))
 
     @staticmethod
+    def _recorder_start_confirm_timeout_seconds(guild_id: int) -> int:
+        return max(5, int(_settings.get("recorder.start_confirm_timeout_seconds", 30, guild_id=guild_id)))
+
+    @staticmethod
+    def _redact_paths(text: str) -> str:
+        return ABS_PATH_RE.sub("[path]", text or "")
+
+    @staticmethod
     def _recorder_output_path(wav_path: Path, fmt: str) -> Path:
         normalized = MeetingMinutesManager._normalize_recorder_format(fmt, default="wav")
         if normalized in {"wav", "mix"}:
@@ -263,6 +276,131 @@ class MeetingMinutesManager:
             "3) 次アクション/未解決事項\n"
             "- AI要約に失敗したため、必要に応じて抜粋ログから確認してください。"
         )
+
+    def _build_summary_prompt(
+        self,
+        *,
+        vc_name: str,
+        duration_min: int,
+        reason: str,
+        transcript_line_count: int,
+        transcript: str,
+    ) -> str:
+        return get_prompt("meeting", "summary_prompt").format(
+            vc_name=vc_name,
+            duration_min=duration_min,
+            reason=reason,
+            transcript_line_count=transcript_line_count,
+            transcript_block=self._render_data_block("transcript", transcript),
+        )
+
+    async def _summarize_transcript_text(
+        self,
+        bot: commands.Bot,
+        guild: discord.Guild,
+        *,
+        session: MeetingSession,
+        reason: str,
+        transcript_lines: list[str],
+        translated: bool = False,
+    ) -> tuple[str, bool, str]:
+        transcript_line_count = len(transcript_lines)
+        vc = guild.get_channel(session.voice_channel_id)
+        vc_name = vc.name if isinstance(vc, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{session.voice_channel_id}"
+        duration_min = max(1, int((discord.utils.utcnow() - session.started_at).total_seconds() // 60))
+        transcript = "\n".join(transcript_lines)
+        truncated = False
+        if len(transcript) > 12000:
+            head = transcript[:7000]
+            tail = transcript[-3500:]
+            transcript = head + "\n...(中略)...\n" + tail
+            truncated = True
+
+        summary_source = transcript
+        if self._is_realtime_enabled(guild.id):
+            summary_source, translated = await asyncio.to_thread(self._maybe_translate_text, bot, guild.id, transcript)
+
+        prompt = self._build_summary_prompt(
+            vc_name=vc_name,
+            duration_min=duration_min,
+            reason=reason,
+            transcript_line_count=transcript_line_count,
+            transcript=summary_source,
+        )
+        try:
+            model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b", guild_id=guild.id))
+            summary = bot.ollama_client.chat_simple(
+                model=model_summary,
+                prompt=prompt,
+                stream=False,
+            )
+            summary = (summary or "").strip() or "要約結果が空でした。"
+            if len(summary) > 1800:
+                summary = summary[:1800] + "\n...(省略)..."
+            return summary, translated, "ok"
+        except Exception as e:
+            fallback = self._fallback_summary(vc_name, reason, transcript_lines, transcript_line_count, duration_min)
+            return fallback, translated, self._redact_paths(str(e))
+
+    async def build_interim_summary(
+        self,
+        bot: commands.Bot,
+        guild: discord.Guild,
+        *,
+        reason: str = "途中要約",
+    ) -> tuple[bool, discord.Embed | str]:
+        session = self._sessions.get(guild.id)
+        if session is None:
+            return False, "進行中の議事録がありません。"
+
+        transcript_lines: list[str] = []
+        if session.runtime.recorder_wav_path is not None and session.runtime.recorder_wav_path.exists():
+            try:
+                transcript_lines = await asyncio.to_thread(
+                    self._transcribe_wav_file,
+                    session.runtime.recorder_wav_path,
+                    guild.id,
+                    session.transcription_provider,
+                    session.whisper_model,
+                )
+            except Exception as e:
+                return False, f"途中要約の文字起こしに失敗しました: {self._redact_paths(str(e))}"
+        elif session.runtime.chunks:
+            try:
+                transcript_lines = await asyncio.to_thread(
+                    self._transcribe_chunk_map,
+                    {uid: bytes(pcm) for uid, pcm in session.runtime.chunks.items()},
+                    guild.id,
+                    session.transcription_provider,
+                    session.whisper_model,
+                )
+            except Exception as e:
+                return False, f"途中要約の文字起こしに失敗しました: {self._redact_paths(str(e))}"
+
+        if not transcript_lines:
+            return False, "途中要約できる文字起こしがまだありません。"
+
+        summary, translated, error_note = await self._summarize_transcript_text(
+            bot,
+            guild,
+            session=session,
+            reason=reason,
+            transcript_lines=transcript_lines,
+        )
+        embed = discord.Embed(
+            title="途中要約",
+            description=summary,
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        vc = guild.get_channel(session.voice_channel_id)
+        vc_name = vc.name if isinstance(vc, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{session.voice_channel_id}"
+        embed.add_field(name="VC", value=vc_name, inline=True)
+        embed.add_field(name="発話行数", value=str(len(transcript_lines)), inline=True)
+        embed.add_field(name="翻訳", value="有効" if translated else "なし", inline=True)
+        if error_note != "ok":
+            embed.add_field(name="補足", value=error_note[:500], inline=False)
+        return True, embed
 
     @staticmethod
     def _translation_prompt(transcript: str, target_language: str) -> str:
@@ -492,7 +630,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             runtime.warning = "Discord token を取得できず、外部録音を開始できません。"
             return runtime
         if not self._EXTERNAL_RECORDER_SCRIPT.exists():
-            runtime.warning = f"外部録音スクリプトがありません: {self._EXTERNAL_RECORDER_SCRIPT}"
+            runtime.warning = "外部録音スクリプトが見つかりません。"
             return runtime
 
         self._AUDIO_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
@@ -546,7 +684,8 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         runtime.recorder_reason_path = reason_path
         runtime.recorder_wav_path = wav_path
 
-        for _ in range(100):
+        timeout_seconds = self._recorder_start_confirm_timeout_seconds(voice_channel.guild.id)
+        for _ in range(int(timeout_seconds * 10)):
             if ready_path.exists():
                 return runtime
             if proc.returncode is not None:
@@ -555,16 +694,19 @@ print(json.dumps({"text": text}, ensure_ascii=False))
 
         if proc.returncode is None:
             try:
-                await proc.wait()
+                await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
         detail = ""
         try:
             if log_path.exists():
                 detail = log_path.read_text(encoding="utf-8", errors="ignore").strip()[-500:]
         except Exception:
             detail = ""
-        runtime.warning = f"外部録音の開始確認に失敗しました。{detail}".strip()
+        runtime.warning = f"外部録音の準備が完了しませんでした。{self._redact_paths(detail)}".strip()
         return runtime
 
     def _transcribe_wav_file(
@@ -739,7 +881,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             session = self._sessions.get(guild_id)
             if session is None:
                 return
-            if not self._is_realtime_enabled(guild_id) or session.runtime.phrase_queue is None:
+            if not session.runtime.realtime_live_enabled or session.runtime.phrase_queue is None:
                 await asyncio.sleep(self._realtime_interval_seconds(guild_id))
                 continue
             try:
@@ -784,6 +926,35 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 await out_ch.send(content)
             except Exception:
                 continue
+
+    async def _flush_realtime_phrase_after_silence(
+        self,
+        bot: commands.Bot,
+        guild_id: int,
+        uid: int,
+        delay_seconds: float,
+    ) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+        except asyncio.CancelledError:
+            return
+
+        session = self._sessions.get(guild_id)
+        if session is None:
+            return
+        runtime = session.runtime
+        if not runtime.realtime_live_enabled or runtime.phrase_queue is None:
+            return
+
+        phrase = runtime.phrase_chunks.pop(uid, None)
+        if not phrase:
+            return
+        if len(phrase) < self._realtime_min_audio_bytes(guild_id):
+            return
+        try:
+            bot.loop.call_soon_threadsafe(runtime.phrase_queue.put_nowait, (uid, bytes(phrase)))
+        except Exception:
+            return
 
     def _read_recorder_reason(self, runtime: _RecordingRuntime) -> str:
         path = runtime.recorder_reason_path
@@ -882,7 +1053,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         except Exception as e:
             return False, f"文字起こしエンジンの初期化に失敗しました: {e}"
 
-        runtime = await self._start_external_recorder(bot, voice_channel)
+        runtime = await self._start_recording(bot, voice_channel)
         if runtime.voice_client is None and runtime.warning:
             return False, runtime.warning
 
@@ -896,15 +1067,15 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             whisper_model=(whisper_model or "").strip() or None,
             runtime=runtime,
         )
-        if runtime.voice_client is not None and self._is_realtime_enabled(guild.id):
+        if runtime.voice_client is not None:
             runtime.phrase_queue = asyncio.Queue()
+            runtime.realtime_live_enabled = False
             runtime.realtime_task = asyncio.create_task(self._run_realtime_updates(bot, guild.id))
-        if runtime.recorder_process is not None:
-            runtime.recorder_watch_task = asyncio.create_task(self._watch_external_recorder(bot, guild.id))
 
         msg = f"議事録を開始しました。対象VC: {voice_channel.name}"
         if warmup_note:
             msg += f"\n文字起こし: {warmup_note}"
+        msg += "\nリアル文字起こし投稿: 待機中（▶️で開始）"
         if runtime.warning:
             msg += f"\n注意: {runtime.warning}"
         return True, msg
@@ -926,6 +1097,9 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 await task
             except asyncio.CancelledError:
                 pass
+        for flush_task in list(session.runtime.phrase_flush_tasks.values()):
+            flush_task.cancel()
+        session.runtime.phrase_flush_tasks.clear()
         watch_task = session.runtime.recorder_watch_task
         current_task = asyncio.current_task()
         if watch_task is not None and watch_task is not current_task:
@@ -983,59 +1157,26 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             transcript = head + "\n...(中略)...\n" + tail
             truncated = True
 
-        vc = guild.get_channel(session.voice_channel_id)
-        vc_name = vc.name if isinstance(vc, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{session.voice_channel_id}"
-        duration_min = max(1, int((ended_at - session.started_at).total_seconds() // 60))
-        translated = False
-        summary_source = transcript
-        if self._is_realtime_enabled(guild.id):
-            summary_source, translated = await asyncio.to_thread(self._maybe_translate_text, bot, guild.id, transcript)
-
-        prompt = get_prompt("meeting", "summary_prompt").format(
-            vc_name=vc_name,
-            duration_min=duration_min,
+        summary, translated, error_note = await self._summarize_transcript_text(
+            bot,
+            guild,
+            session=session,
+            reason=reason,
+            transcript_lines=transcript_lines,
+        )
+        return MeetingStopResult(
+            session=session,
+            ended_at=ended_at,
             reason=reason,
             transcript_line_count=transcript_line_count,
-            transcript_block=self._render_data_block("transcript", summary_source),
+            summary=summary,
+            mention_user_id=mention_uid,
+            used_ai=(error_note == "ok"),
+            truncated=truncated,
+            translated=translated,
+            error=warning or ("" if error_note == "ok" else error_note),
+            audio_debug_paths=audio_debug_paths,
         )
-
-        try:
-            model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b", guild_id=guild.id))
-            summary = bot.ollama_client.chat_simple(
-                model=model_summary,
-                prompt=prompt,
-                stream=False,
-            )
-            summary = (summary or "").strip() or "要約結果が空でした。"
-            if len(summary) > 1800:
-                summary = summary[:1800] + "\n...(省略)..."
-            return MeetingStopResult(
-                session=session,
-                ended_at=ended_at,
-                reason=reason,
-                transcript_line_count=transcript_line_count,
-                summary=summary,
-                mention_user_id=mention_uid,
-                used_ai=True,
-                truncated=truncated,
-                translated=translated,
-                error=warning or "",
-                audio_debug_paths=audio_debug_paths,
-            )
-        except Exception as e:
-            return MeetingStopResult(
-                session=session,
-                ended_at=ended_at,
-                reason=reason,
-                transcript_line_count=transcript_line_count,
-                summary=self._fallback_summary(vc_name, reason, transcript_lines, transcript_line_count, duration_min),
-                mention_user_id=mention_uid,
-                used_ai=False,
-                truncated=truncated,
-                translated=translated,
-                error=str(e),
-                audio_debug_paths=audio_debug_paths,
-            )
 
     @staticmethod
     def is_human_empty(channel: discord.VoiceChannel) -> bool:
@@ -1125,10 +1266,10 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             return runtime
 
         chunks = runtime.chunks
-        max_total_mb = int(_settings.get("meeting.audio_max_total_mb", 64))
-        max_user_mb = int(_settings.get("meeting.audio_max_user_mb", 8))
-        runtime.max_total_bytes = max(1, max_total_mb) * 1024 * 1024
-        runtime.max_user_bytes = max(1, max_user_mb) * 1024 * 1024
+        max_total_mb = int(_settings.get("meeting.audio_max_total_mb", 0))
+        max_user_mb = int(_settings.get("meeting.audio_max_user_mb", 0))
+        runtime.max_total_bytes = max(0, max_total_mb) * 1024 * 1024
+        runtime.max_user_bytes = max(0, max_user_mb) * 1024 * 1024
         min_phrase_bytes = self._realtime_min_audio_bytes(voice_channel.guild.id)
 
         class _Sink(audio_sink_cls):  # type: ignore[misc, valid-type]
@@ -1153,41 +1294,81 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 if not pcm:
                     return
 
-                # Raspberry Pi 向け: メモリ上限を超える場合は録音取り込みを止める
+                # 必要な場合だけメモリ上限を適用する。0 は無制限。
                 total = sum(len(v) for v in chunks.values())
                 cur_user = len(chunks.get(uid, b""))
-                if total + len(pcm) > runtime.max_total_bytes or cur_user + len(pcm) > runtime.max_user_bytes:
+                if (
+                    (runtime.max_total_bytes > 0 and total + len(pcm) > runtime.max_total_bytes)
+                    or (runtime.max_user_bytes > 0 and cur_user + len(pcm) > runtime.max_user_bytes)
+                ):
                     runtime.dropped = True
-                    runtime.warning = (
-                        "録音データが上限を超えたため途中で打ち切りました。"
-                        f"(total={runtime.max_total_bytes//(1024*1024)}MB, user={runtime.max_user_bytes//(1024*1024)}MB)"
-                    )
+                    limits = []
+                    if runtime.max_total_bytes > 0:
+                        limits.append(f"total={runtime.max_total_bytes//(1024*1024)}MB")
+                    if runtime.max_user_bytes > 0:
+                        limits.append(f"user={runtime.max_user_bytes//(1024*1024)}MB")
+                    limit_note = ", ".join(limits) if limits else "無制限"
+                    runtime.warning = f"録音データの上限に達したため途中で打ち切りました。({limit_note})"
                     return
                 if uid not in chunks:
                     chunks[uid] = bytearray()
                 chunks[uid].extend(pcm)
+                if not runtime.realtime_live_enabled or runtime.phrase_queue is None:
+                    return
                 if uid not in runtime.phrase_chunks:
                     runtime.phrase_chunks[uid] = bytearray()
                 runtime.phrase_chunks[uid].extend(pcm)
 
+                def schedule_flush() -> None:
+                    old_task = runtime.phrase_flush_tasks.pop(uid, None)
+                    if old_task is not None:
+                        old_task.cancel()
+                    delay_seconds = max(
+                        1.0,
+                        min(5.0, MeetingMinutesManager._realtime_interval_seconds(voice_channel.guild.id) / 10.0),
+                    )
+                    task = bot.loop.create_task(
+                        self._flush_realtime_phrase_after_silence(
+                            bot,
+                            voice_channel.guild.id,
+                            uid,
+                            delay_seconds,
+                        )
+                    )
+                    runtime.phrase_flush_tasks[uid] = task
+
+                    def _cleanup(_task: asyncio.Task) -> None:
+                        if runtime.phrase_flush_tasks.get(uid) is task:
+                            runtime.phrase_flush_tasks.pop(uid, None)
+
+                    task.add_done_callback(_cleanup)
+
+                bot.loop.call_soon_threadsafe(schedule_flush)
+
             @audio_sink_cls.listener()
             def on_voice_member_speaking_stop(self, member) -> None:
-                if member is None or runtime.phrase_queue is None:
+                if member is None or runtime.phrase_queue is None or not runtime.realtime_live_enabled:
                     return
                 uid = getattr(member, "id", 0) or 0
                 phrase = runtime.phrase_chunks.pop(uid, None)
                 if not phrase or len(phrase) < min_phrase_bytes:
                     return
+                flush_task = runtime.phrase_flush_tasks.pop(uid, None)
+                if flush_task is not None:
+                    flush_task.cancel()
                 bot.loop.call_soon_threadsafe(runtime.phrase_queue.put_nowait, (uid, bytes(phrase)))
 
             @audio_sink_cls.listener()
             def on_voice_member_disconnect(self, member, _ssrc=None) -> None:
-                if member is None or runtime.phrase_queue is None:
+                if member is None or runtime.phrase_queue is None or not runtime.realtime_live_enabled:
                     return
                 uid = getattr(member, "id", 0) or 0
                 phrase = runtime.phrase_chunks.pop(uid, None)
                 if not phrase or len(phrase) < min_phrase_bytes:
                     return
+                flush_task = runtime.phrase_flush_tasks.pop(uid, None)
+                if flush_task is not None:
+                    flush_task.cancel()
                 bot.loop.call_soon_threadsafe(runtime.phrase_queue.put_nowait, (uid, bytes(phrase)))
 
         try:
@@ -1241,7 +1422,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                         log_tail = runtime.recorder_log_path.read_text(encoding="utf-8", errors="ignore").strip()[-500:]
                 except Exception:
                     log_tail = ""
-                return [], f"{warning} 外部録音の wav が生成されませんでした。{log_tail}".strip()
+                return [], f"{warning} 外部録音の wav が生成されませんでした。{self._redact_paths(log_tail)}".strip()
             try:
                 lines = await asyncio.to_thread(
                     self._transcribe_wav_file,
@@ -1252,7 +1433,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 )
                 return lines, warning
             except Exception as e:
-                return [], f"{warning} 文字起こし処理に失敗: {e}".strip()
+                return [], f"{warning} 文字起こし処理に失敗: {self._redact_paths(str(e))}".strip()
 
         vc = runtime.voice_client
         if vc is not None:
@@ -1284,7 +1465,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 whisper_model,
             )
         except Exception as e:
-            return [], f"{warning} 文字起こし処理に失敗: {e}".strip()
+            return [], f"{warning} 文字起こし処理に失敗: {self._redact_paths(str(e))}".strip()
 
         return lines, warning
 

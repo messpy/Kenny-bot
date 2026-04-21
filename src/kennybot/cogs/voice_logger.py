@@ -1,15 +1,14 @@
 # cogs/voice_logger.py
-# VC ログ（Embed 形式 / 通話時間付き）
+# VC ログ（Embed 形式）
 
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Tuple, Optional
+from typing import Optional
 
 import discord
 from discord.ext import commands
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.event_logger import send_event_log
 
-JST = timezone(timedelta(hours=9))
 _settings = get_settings()
 
 
@@ -19,7 +18,7 @@ class VoiceLogger(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         # ユーザーごとの入室時刻を記録: (user_id, guild_id) -> datetime
-        self._voice_join_times: Dict[Tuple[int, int], datetime] = {}
+        self._voice_join_times: dict[tuple[int, int], datetime] = {}
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -103,7 +102,7 @@ class VoiceLogger(commands.Cog):
     async def _handle_voice_join(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC入室を記録してロギング"""
         # 入室時刻を記録
-        self._voice_join_times[(member.id, guild.id)] = datetime.now(JST)
+        self._voice_join_times[(member.id, guild.id)] = datetime.now(timezone.utc)
 
         if not self._should_log_channel(guild, channel):
             return
@@ -140,6 +139,11 @@ class VoiceLogger(commands.Cog):
                 ("ユーザー", f"{member.name} ({member.id})", False),
                 ("サーバー", f"{guild.name} ({guild.id})", False),
                 ("チャンネル", channel.name, False),
+            ],
+            local_fields=[
+                ("ユーザー", f"{member.name} ({member.id})", False),
+                ("サーバー", f"{guild.name} ({guild.id})", False),
+                ("チャンネル", channel.name, False),
                 ("通話時間", duration, False),
             ],
         )
@@ -149,7 +153,7 @@ class VoiceLogger(commands.Cog):
         if not join_time:
             return "不明"
 
-        duration = datetime.now(JST) - join_time
+        duration = datetime.now(timezone.utc) - join_time
         hours, remainder = divmod(int(duration.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
 

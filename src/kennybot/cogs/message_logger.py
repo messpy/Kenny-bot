@@ -33,8 +33,6 @@ from src.kennybot.utils.channel import resolve_log_channel
 from src.kennybot.utils.text import (
     normalize_user_text,
     normalize_keyword_match_text,
-    is_search_intent,
-    is_current_info_intent,
     strip_ansi_and_ctrl,
 )
 from src.kennybot.utils.prompts import get_prompt
@@ -198,6 +196,223 @@ class MessageLogger(BaseCog):
                 merged.append(item)
         return merged
 
+    def _query_terms(self, text: str) -> list[str]:
+        normalized = normalize_keyword_match_text(text or "")
+        raw_terms = re.split(r"[\s\u3000\W_]+", normalized)
+        stop_words = {
+            "の",
+            "は",
+            "が",
+            "を",
+            "に",
+            "へ",
+            "で",
+            "と",
+            "や",
+            "か",
+            "だ",
+            "です",
+            "ます",
+            "今日",
+            "きょう",
+            "今",
+            "いま",
+            "最近",
+            "最新",
+            "何",
+            "どれ",
+            "ある",
+            "いる",
+        }
+        terms: list[str] = []
+        for term in raw_terms:
+            item = term.strip()
+            if not item or item in stop_words:
+                continue
+            if item not in terms:
+                terms.append(item)
+        return terms[:8]
+
+    def _rank_web_items_for_query(
+        self, query: str, items: list[object], *, max_items: int = 2
+    ) -> list[object]:
+        terms = self._query_terms(query)
+        if not terms:
+            return list(items[:max_items])
+        scored: list[tuple[int, int, object]] = []
+        for idx, item in enumerate(items):
+            title = normalize_keyword_match_text(str(getattr(item, "title", "") or ""))
+            snippet = normalize_keyword_match_text(str(getattr(item, "snippet", "") or ""))
+            score = 0
+            for term in terms:
+                if term in title:
+                    score += 3
+                if term in snippet:
+                    score += 1
+            if score > 0:
+                scored.append((score, idx, item))
+        if scored:
+            scored.sort(key=lambda x: (-x[0], x[1]))
+            return [item for _, _, item in scored[:max_items]]
+        return list(items[:max_items])
+
+    def _strip_web_search_boilerplate(self, text: str) -> str:
+        cleaned = strip_ansi_and_ctrl(text or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"^\[Web検索結果\]\s*", "", cleaned)
+        cleaned = re.sub(
+            r"^(Web検索結果を取得しました[。\.]?\s*)+",
+            "",
+            cleaned,
+            flags=re.MULTILINE,
+        )
+        return cleaned.strip()
+
+    def _looks_uncertain_answer(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(strip_ansi_and_ctrl(text or ""))
+        markers = (
+            "不明",
+            "確認できません",
+            "確認できていません",
+            "わかりません",
+            "わからない",
+            "可能性があります",
+            "と思われます",
+            "と考えられます",
+            "ようです",
+            "みたいです",
+            "かもしれません",
+            "かもしれない",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _has_web_references(self, references: list[str]) -> bool:
+        return any(
+            ref.startswith("tool:web_search")
+            or ref.startswith("tool:web_fetch")
+            or ref.startswith("source:web_search")
+            or ref.startswith("method:")
+            or ref.startswith("web_search")
+            or ref.startswith("web_fetch")
+            for ref in references
+        )
+
+    def _should_web_followup(self, answer: str, references: list[str]) -> bool:
+        normalized = strip_ansi_and_ctrl(answer or "")
+        return self._looks_uncertain_answer(normalized) and self._has_web_references(references)
+
+    def _should_preemptive_web_followup(self, text: str) -> bool:
+        return False
+
+    async def _promote_ai_progress_message(
+        self,
+        *,
+        progress_key: str,
+        ticket: str,
+        model_name: str,
+    ) -> None:
+        message = self._ai_progress_countdowns.get_message(progress_key)
+        if message is None:
+            return
+        try:
+            await message.edit(
+                content=self.bot.ai_progress_tracker.render(ticket, 1, model_name),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            logger.debug("Failed to promote AI progress message", exc_info=True)
+
+    def _build_web_followup_prelude(self, user_display: str, mention: str, text: str) -> str:
+        normalized = normalize_keyword_match_text(text or "")
+        if any(word in normalized for word in ("天気", "気温", "温度", "weather")):
+            intro = "天気を確認します。"
+        elif any(word in normalized for word in ("ニュース", "news", "速報", "記事", "話題", "トレンド")):
+            intro = "少し最新情報を確認します。"
+        else:
+            intro = "少し確認します。"
+        return "\n".join(
+            [
+                f"{mention} こんにちは、{user_display}さん！",
+                intro,
+                "少し確認するので待ってください。",
+            ]
+        )
+
+    async def _rewrite_answer_with_web(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        tools: list[object],
+        user_request: str,
+        previous_answer: str,
+        guild: discord.Guild | None = None,
+        channel_id: int | None = None,
+        user_id: int | None = None,
+    ) -> tuple[str | None, list[str], list[str]]:
+        retry_prompt = get_prompt("chat", "web_retry_prompt").format(
+            user_request=user_request or "指定なし",
+            previous_answer=previous_answer or "空",
+        )
+        retry_messages = [dict(item) for item in messages]
+        insert_at = 1 if retry_messages and str(retry_messages[0].get("role") or "") == "system" else 0
+        retry_messages.insert(
+            insert_at,
+            {
+                "role": "system",
+                "content": retry_prompt,
+            },
+        )
+        return await self._run_ollama_chat_with_tools(
+            model=model,
+            messages=retry_messages,
+            tools=tools,
+            max_rounds=4,
+            guild=guild,
+            channel_id=channel_id,
+            user_id=user_id,
+        )
+
+    async def _build_live_external_context(
+        self, text: str
+    ) -> tuple[str, list[str]]:
+        if not self._live_info.needs_external_context(text):
+            return "", []
+        contexts = await asyncio.to_thread(self._live_info.build_context, text)
+        if not contexts:
+            return "", []
+        body = self._build_external_context_text(contexts)
+        refs = self._merge_unique_strings(
+            [f"method:{item.label}" for item in contexts],
+            self._extract_urls(body),
+        )
+        return body, refs
+
+    async def _build_preemptive_web_context(
+        self, text: str
+    ) -> tuple[str, list[str], dict[str, str]]:
+        if self._live_info.needs_external_context(text):
+            body, refs = await self._build_live_external_context(text)
+            if body:
+                return body, refs, {}
+        return "", [], {}
+
+    def _format_web_reference_link(self, title: str, url: str) -> str:
+        label = (title or "").strip() or url
+        normalized_url = (url or "").strip().strip("<>").strip()
+        return f"[{label}]({normalized_url})"
+
+    def _build_web_reference_block(
+        self, urls: list[str], title_map: dict[str, str] | None = None
+    ) -> str:
+        title_map = title_map or {}
+        lines: list[str] = []
+        for url in urls:
+            label = title_map.get(url, url)
+            lines.append(f"- {self._format_web_reference_link(label, url)}")
+        return "\n".join(lines)
+
     def _parse_json_payload(self, raw: str) -> object | None:
         text = strip_ansi_and_ctrl(raw or "").strip()
         if not text:
@@ -263,7 +478,6 @@ class MessageLogger(BaseCog):
             "bot_game_catalog",
             "runtime_model",
             "vrchat_world",
-            "web_search",
             "none",
         }
 
@@ -279,6 +493,8 @@ class MessageLogger(BaseCog):
             source = str(candidate.get("source") or "").strip().lower()
             source = aliases.get(source, source)
             if not source or source not in allowed:
+                continue
+            if source == "web_search":
                 continue
             if source == "none":
                 continue
@@ -393,12 +609,7 @@ class MessageLogger(BaseCog):
         if self._is_channel_profile_query(text):
             if has_profile:
                 plan.append({"source": "channel_profile"})
-            plan.append(
-                {
-                    "source": "web_search",
-                    "web_scope": "web" if "有名" in normalized or "評判" in normalized else "auto",
-                }
-            )
+            plan.append({"source": "recent_turns", "limit": min(max(channel_lines, 4), 8)})
             return plan
         if self._is_local_activity_query(text):
             plan.append(
@@ -410,19 +621,6 @@ class MessageLogger(BaseCog):
             )
             if "返信" in normalized or "リプ" in normalized:
                 plan.append({"source": "reply_chain", "limit": 4})
-            return plan
-        if is_current_info_intent(text) or is_search_intent(text):
-            plan.append(
-                {
-                    "source": "web_search",
-                    "web_scope": "news"
-                    if any(
-                        key in normalized
-                        for key in ("事件", "ニュース", "速報", "今日", "最新", "最近")
-                    )
-                    else "web",
-                }
-            )
             return plan
         if has_profile:
             plan.append({"source": "channel_profile"})
@@ -502,10 +700,30 @@ class MessageLogger(BaseCog):
         text: str,
         *,
         web_scope: str = "auto",
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], dict[str, str], list[str]]:
+        if self._live_info.needs_external_context(text):
+            contexts = await asyncio.to_thread(self._live_info.build_context, text)
+            if contexts:
+                source_urls = {
+                    "天気API": "https://open-meteo.com/",
+                    "日付・祝日API": "https://date.nager.at/",
+                }
+                refs: list[str] = []
+                title_map: dict[str, str] = {}
+                queries: list[str] = []
+                for item in contexts:
+                    refs.append(f"method:{item.label}")
+                    url = source_urls.get(item.label)
+                    if url:
+                        refs.append(url)
+                        title_map[url] = item.label
+                    queries.append(item.label)
+                body = self._build_external_context_text(contexts)
+                return body, refs, title_map, queries
+
         search_service = getattr(self.bot, "ai_search", None)
         if search_service is None:
-            return "", []
+            return "", [], {}, []
         scope = normalize_keyword_match_text(web_scope or "").strip().lower()
         news_only: bool | None = None
         if scope in {"news", "latest"}:
@@ -525,7 +743,7 @@ class MessageLogger(BaseCog):
             logger.exception("AI search context build failed")
             searcher = getattr(search_service, "searcher", None)
             if searcher is None or not callable(getattr(searcher, "search", None)):
-                return "", []
+                return "", [], {}, []
             try:
                 lowered = normalize_keyword_match_text(text or "")
                 prefer_web = any(k in lowered for k in ("意味", "とは", "定義", "由来", "語源"))
@@ -540,40 +758,54 @@ class MessageLogger(BaseCog):
                 )
             except Exception:
                 logger.exception("Direct DDGS fallback search failed")
-                return "", []
+                return "", [], {}, []
             if not items:
-                return "", []
+                return "", [], {}, []
+            ranked_items = self._rank_web_items_for_query(text, list(items), max_items=2)
             refs = ["method:ddgs.search"]
             urls = self._merge_unique_strings(
-                [item.url for item in items if getattr(item, "url", "").strip()]
+                [item.url for item in ranked_items if getattr(item, "url", "").strip()]
             )[:2]
             refs.extend(urls)
+            title_map = {
+                item.url: item.title
+                for item in ranked_items[:2]
+                if getattr(item, "url", "").strip()
+            }
+            queries = [text.strip()] if text.strip() else []
             lines: list[str] = []
-            for item in items[:2]:
+            lines.append("全体要約")
+            for item in ranked_items[:2]:
                 date_str = f" ({item.date})" if item.date else ""
                 snippet = f"\n{item.snippet.strip()}" if item.snippet.strip() else ""
                 lines.append(f"- {item.title}{date_str}\n  {item.url}{snippet}")
-            return "[Web検索結果]\n" + "\n".join(lines), refs
+            return "\n".join(lines), refs, title_map, queries
 
         refs: list[str] = ["method:ai_search.answer_ai_async", "method:ddgs.search"]
-        urls = [item.url for item in result.items if getattr(item, "url", "").strip()]
+        ranked_items = self._rank_web_items_for_query(text, list(result.items), max_items=2)
+        urls = [item.url for item in ranked_items if getattr(item, "url", "").strip()]
         urls = self._merge_unique_strings(urls)[:2]
         for url in urls:
             refs.append(url)
+        title_map = {
+            item.url: item.title
+            for item in ranked_items[:2]
+            if getattr(item, "url", "").strip()
+        }
+        queries = [result.query] + [q for q in getattr(result, "searched_queries", []) if q]
 
-        blocks: list[str] = []
-        answer = (result.answer or "").strip()
-        if answer:
-            blocks.append(f"[Web検索結果]\n{answer}")
-        elif result.items:
+        if ranked_items:
             item_lines: list[str] = []
-            for item in result.items[:2]:
+            for item in ranked_items[:2]:
                 date_str = f" ({item.date})" if item.date else ""
                 snippet = f"\n{item.snippet.strip()}" if item.snippet.strip() else ""
                 item_lines.append(f"- {item.title}{date_str}\n  {item.url}{snippet}")
             if item_lines:
-                blocks.append("[Web検索結果]\n" + "\n".join(item_lines))
-        return "\n\n".join(blocks).strip(), refs
+                return "\n".join(item_lines).strip(), refs, title_map, queries
+        answer = (result.answer or "").strip()
+        if answer and not ranked_items:
+            return self._strip_web_search_boilerplate(answer), refs, title_map, queries
+        return "", refs, title_map, queries
 
     async def _handle_current_info_search_failure(
         self,
@@ -759,7 +991,7 @@ class MessageLogger(BaseCog):
         msg: discord.Message,
         user_display: str,
         text: str,
-    ) -> str:
+    ) -> tuple[str, list[str], list[str]]:
         guild_id = msg.guild.id if msg.guild else 0
         channel_id = msg.channel.id
         user_id = msg.author.id
@@ -888,6 +1120,7 @@ class MessageLogger(BaseCog):
 
         blocks: list[tuple[str, str]] = []
         references: list[str] = []
+        web_queries: list[str] = []
         used_sources: list[str] = []
         preferred_mention_target = next(
             (
@@ -1019,12 +1252,13 @@ class MessageLogger(BaseCog):
                 )
                 title = "VRChat ワールド検索結果"
             elif source == "web_search":
-                body, web_refs = await self._build_current_info_context(
+                body, web_refs, web_titles, search_queries = await self._build_current_info_context(
                     query or text or "",
                     web_scope=web_scope,
                 )
                 references.extend(web_refs)
-                title = "Web検索結果"
+                title = "検索結果の要約"
+                web_queries.extend([q for q in search_queries if q])
             else:
                 continue
 
@@ -1066,7 +1300,7 @@ class MessageLogger(BaseCog):
             if source_ref not in references:
                 references.append(source_ref)
 
-        return self._build_history_context(blocks), self._merge_unique_strings(references)
+        return self._build_history_context(blocks), self._merge_unique_strings(references), self._merge_unique_strings(web_queries)
 
     async def _run_ollama_chat_with_tools(
         self,
@@ -1078,7 +1312,7 @@ class MessageLogger(BaseCog):
         guild: discord.Guild | None = None,
         channel_id: int | None = None,
         user_id: int | None = None,
-    ) -> tuple[str | None, list[str]]:
+    ) -> tuple[str | None, list[str], list[str]]:
         if not tools:
             response = await asyncio.to_thread(
                 self.bot.ollama_client.chat,
@@ -1086,12 +1320,13 @@ class MessageLogger(BaseCog):
                 messages=messages,
                 stream=False,
             )
-            return self._extract_message_content(response), []
+            return self._extract_message_content(response), [], []
 
         working_messages = [dict(item) for item in messages]
         source_urls: list[str] = []
         used_tools: list[str] = []
         last_tool_outputs: list[tuple[str, str]] = []
+        web_queries: list[str] = []
         for _ in range(max_rounds):
             response = await asyncio.to_thread(
                 self.bot.ollama_client.chat,
@@ -1109,7 +1344,7 @@ class MessageLogger(BaseCog):
                 answer = self._extract_message_content(response)
                 references = [f"tool:{name}" for name in used_tools]
                 references.extend(source_urls)
-                return answer, references
+                return answer, references, self._merge_unique_strings(web_queries)
 
             async def execute_tool_call(call: object) -> tuple[dict, list[str]]:
                 name, args = self._normalize_tool_call(call)
@@ -1133,6 +1368,9 @@ class MessageLogger(BaseCog):
                     result_text = str(result)
                     found_urls: list[str] = []
                     if name in {"web_search", "web_fetch"}:
+                        query_text = str(args.get("query") or args.get("url") or "").strip()
+                        if query_text:
+                            web_queries.append(query_text)
                         logger.info("Web tool used: %s args=%s", name, args)
                         await send_event_log(
                             self.bot,
@@ -1145,13 +1383,17 @@ class MessageLogger(BaseCog):
                                 ("引数", str(args)[:1000], False),
                             ],
                         )
-                        found_urls = self._extract_urls(result_text)
+                        found_urls = self._extract_urls(result_text)[:3]
                 except Exception as e:
                     logger.exception("Tool call failed: %s", name)
                     result_text = f"Tool {name} failed: {e}"
                     found_urls = []
                 if len(result_text) > 8000:
                     result_text = result_text[:8000] + "\n...(省略)..."
+                if name in {"web_search", "web_fetch"}:
+                    result_text = self._strip_web_search_boilerplate(result_text)
+                    if not result_text:
+                        result_text = "検索結果の本文は取得できませんでした。"
                 return (
                     {
                         "role": "tool",
@@ -1228,9 +1470,10 @@ class MessageLogger(BaseCog):
                     "外部情報の取得は試しましたが、回答文をうまく生成できませんでした。\n"
                     "取得結果:\n" + "\n".join(tool_summaries)
                 )
+
         references = [f"tool:{name}" for name in used_tools]
         references.extend(source_urls)
-        return answer, references
+        return answer, references, self._merge_unique_strings(web_queries)
 
     async def _run_ollama_text(
         self, model: str, prompt: str, *, timeout_sec: int | None = None
@@ -1675,10 +1918,7 @@ class MessageLogger(BaseCog):
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
 
-            answer = (
-                strip_ansi_and_ctrl((answer or "").strip())
-                or "この場所の説明を作れませんでした。"
-            )
+            answer = strip_ansi_and_ctrl((answer or "").strip()) or "この場所の説明を作れませんでした。"
             prefix = f"{mention}\n" if mention else ""
             await self._send_chunked_text(channel, answer, prefix=prefix)
             if source_msg is not None:
@@ -1840,20 +2080,37 @@ class MessageLogger(BaseCog):
         )
 
         references: list[str] = []
-        history_context, planned_refs = await self._resolve_chat_context(
+        history_context, planned_refs, web_queries = await self._resolve_chat_context(
             msg=msg,
             user_display=user_name or str(msg.author.id),
             text=text,
         )
         references.extend(planned_refs)
-        external_context = ""
-        if history_context and self._live_info.needs_external_context(text):
-            external_context = self._build_external_context_text(
-                await asyncio.to_thread(self._live_info.build_context, text)
-            )
-        combined_history_context = history_context + (
-            f"[外部参照情報]\n{external_context}\n\n" if external_context else ""
-        )
+        web_planned = self._has_web_references(planned_refs)
+        progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
+        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
+        ticket = await self.bot.ai_progress_tracker.create_ticket()
+        tool_queries: list[str] = []
+        tools: list[object] = []
+        if self.bot.ollama_client.has_web_tools():
+            tools = [
+                self._get_local_knowledge,
+                self._get_bot_game_catalog,
+                self._get_bot_command_catalog,
+                self._get_runtime_model_info,
+                self._search_vrchat_world,
+                self.bot.ollama_client.web_search,
+                self.bot.ollama_client.web_fetch,
+            ]
+        else:
+            tools = [
+                self._get_local_knowledge,
+                self._get_bot_game_catalog,
+                self._get_bot_command_catalog,
+                self._get_runtime_model_info,
+                self._search_vrchat_world,
+            ]
+        combined_history_context = history_context
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_name or str(msg.author.id),
             history_context=combined_history_context,
@@ -1862,9 +2119,20 @@ class MessageLogger(BaseCog):
                 "chat.max_response_length_prompt", 500
             ),
         )
-        progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
-        model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
-        ticket = await self.bot.ai_progress_tracker.create_ticket()
+        chat_messages = [
+            {
+                "role": "system",
+                "content": get_prompt("chat", "system_message").format(
+                    absolute_date=datetime.now(JST).strftime("%Y-%m-%d"),
+                    absolute_datetime=datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST"),
+                    channel_profile_block="",
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
 
         try:
             await self._ai_progress_countdowns.start_countup(
@@ -1876,24 +2144,72 @@ class MessageLogger(BaseCog):
                 ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
+            await self._promote_ai_progress_message(
+                progress_key=progress_key,
+                ticket=ticket,
+                model_name=model_name,
+            )
             try:
-                async with msg.channel.typing():
-                    answer = await self._run_ollama_text(
-                        model=model_name,
-                        prompt=prompt,
-                    )
+                answer, tool_references, tool_queries = await self._run_ollama_chat_with_tools(
+                    model=model_name,
+                    messages=chat_messages,
+                    tools=tools,
+                    guild=msg.guild,
+                    channel_id=msg.channel.id,
+                    user_id=msg.author.id,
+                )
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
 
-            answer = strip_ansi_and_ctrl((answer or "").strip()) or "(応答が空でした)"
+            answer = strip_ansi_and_ctrl((answer or "").strip())
+            web_used = self._has_web_references(references + tool_references)
+            if web_planned and self._should_web_followup(answer, references + tool_references):
+                answer, retry_refs, retry_queries = await self._rewrite_answer_with_web(
+                    model=model_name,
+                    messages=chat_messages,
+                    tools=tools,
+                    user_request=text,
+                    previous_answer=answer,
+                    guild=msg.guild,
+                    channel_id=msg.channel.id,
+                    user_id=msg.author.id,
+                )
+                tool_references.extend(retry_refs)
+                for ref in retry_refs:
+                    if ref not in references:
+                        references.append(ref)
+                answer = strip_ansi_and_ctrl((answer or "").strip())
+                tool_queries.extend(retry_queries)
+            if not answer:
+                answer = "(応答が空でした)"
             max_len = self._cfg_int("chat.max_response_length", 1800)
             if len(answer) > max_len:
                 answer = answer[:max_len] + "\n...(省略)..."
 
             bot_name = self.bot.user.name if self.bot.user else "Bot"
             bot_id = self.bot.user.id if self.bot.user else 0
-            store.add_message(bot_name, answer, msg.id, author_id=bot_id)
-            await msg.channel.send(answer)
+            web_urls = self._merge_unique_strings(
+                self._extract_urls(answer),
+                [ref for ref in references if str(ref).startswith("http")],
+                [ref for ref in tool_references if str(ref).startswith("http")],
+            )
+            display_answer = answer
+            if web_urls:
+                references.extend([url for url in web_urls if url not in references])
+                display_answer = self._build_display_answer_with_references(answer, web_urls)
+            store.add_message(bot_name, display_answer, msg.id, author_id=bot_id)
+            final_message = f"{msg.author.mention}\n{display_answer}"
+            if len(final_message) > 2000:
+                await self._send_chunked_text(
+                    msg.channel,
+                    display_answer,
+                    prefix=f"{msg.author.mention}\n",
+                )
+            else:
+                await msg.channel.send(
+                    final_message,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
             # 総合ログにAI応答を記録
             log_ai_output(
@@ -1901,6 +2217,8 @@ class MessageLogger(BaseCog):
                 response=answer,
                 model=model_name,
                 msg=msg,
+                references=references,
+                web_queries=web_queries + tool_queries,
             )
 
             await self._log_bot_activity_event(
@@ -1913,6 +2231,7 @@ class MessageLogger(BaseCog):
                 title="Bot 会話ログ",
                 description="DM の会話応答を送信しました。",
                 references=references,
+                web_queries=web_queries + tool_queries,
             )
         except Exception as e:
             logger.exception("DM AI response failed")
@@ -1924,6 +2243,8 @@ class MessageLogger(BaseCog):
                 model=model_name,
                 msg=msg,
                 error=str(e)[:200],
+                references=references,
+                web_queries=web_queries + tool_queries,
             )
 
             await self._log_bot_activity_event(
@@ -1937,6 +2258,7 @@ class MessageLogger(BaseCog):
                 error_text=str(e),
                 model_name=model_name,
                 references=references,
+                web_queries=web_queries + tool_queries,
             )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
@@ -2166,6 +2488,57 @@ class MessageLogger(BaseCog):
                 refs.append(label)
         return refs[:12]
 
+    def _is_noisy_reference_label(self, value: str) -> bool:
+        label = strip_ansi_and_ctrl((value or "").strip())
+        if not label:
+            return True
+        if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", label):
+            return True
+        upper_label = label.upper()
+        return upper_label.startswith("BOT /") or upper_label.startswith("HELP /")
+
+    def _filter_event_references(
+        self,
+        references: list[str] | None,
+        *,
+        web_queries: list[str] | None = None,
+    ) -> list[str]:
+        normalized = self._merge_unique_strings(references or [])
+        if not normalized:
+            return []
+        filtered: list[str] = []
+        for ref in normalized:
+            if self._is_noisy_reference_label(ref):
+                continue
+            filtered.append(ref)
+        return filtered
+
+    def _summarize_references(self, references: list[str] | None) -> tuple[bool, list[str], list[str]]:
+        normalized = self._merge_unique_strings(references or [])
+        web_used = any(
+            ref.startswith("tool:web_search")
+            or ref.startswith("tool:web_fetch")
+            or ref.startswith("source:web_search")
+            or ref.startswith("method:")
+            or ref.startswith("web_search")
+            or ref.startswith("web_fetch")
+            for ref in normalized
+        )
+        return (
+            web_used,
+            [ref for ref in normalized if not ref.startswith("http")][:12],
+            [ref for ref in normalized if ref.startswith("http")][:8],
+        )
+
+    def _build_display_answer_with_references(
+        self,
+        answer: str,
+        web_urls: list[str],
+        *,
+        max_display_urls: int = 3,
+    ) -> str:
+        return answer
+
     def _format_activity_location(self, msg: discord.Message) -> str:
         if msg.guild is None:
             return f"DM ({getattr(msg.channel, 'id', 0)})"
@@ -2185,7 +2558,12 @@ class MessageLogger(BaseCog):
         error_text: str = "",
         model_name: str = "",
         references: list[str] | None = None,
+        web_queries: list[str] | None = None,
     ) -> None:
+        normalized_references = self._filter_event_references(
+            references,
+            web_queries=web_queries,
+        )
         fields: list[tuple[str, str, bool]] = [
             ("種別", kind, True),
             ("送信者", f"{msg.author} ({msg.author.id})", False),
@@ -2201,10 +2579,16 @@ class MessageLogger(BaseCog):
             fields.append(("モデル", self._truncate_event_text(model_name), True))
         if error_text:
             fields.append(("エラー", self._truncate_event_text(error_text), False))
-        if references:
+        if normalized_references:
+            web_used, ref_sources, ref_urls = self._summarize_references(normalized_references)
+            fields.append(("Web検索", "あり" if web_used else "なし", True))
+            if web_queries:
+                queries = self._merge_unique_strings(web_queries)[:8]
+                if queries:
+                    fields.append(("検索語", "\n".join(queries), False))
             method_names = [
                 ref.removeprefix("tool:").removeprefix("method:")
-                for ref in references
+                for ref in normalized_references
                 if str(ref).startswith("tool:") or str(ref).startswith("method:")
             ]
             if method_names:
@@ -2215,10 +2599,10 @@ class MessageLogger(BaseCog):
                         False,
                     )
                 )
-        if references:
+        if normalized_references:
             ref_lines = [
                 self._truncate_event_text(ref, 400)
-                for ref in references
+                for ref in normalized_references
                 if str(ref).strip()
             ]
             chunk: list[str] = []
@@ -2227,7 +2611,7 @@ class MessageLogger(BaseCog):
             for line in ref_lines:
                 line_len = len(line) + (1 if chunk else 0)
                 if chunk and chunk_len + line_len > 900:
-                    fields.append((f"参照元{part}", "\n".join(chunk), False))
+                    fields.append((f"出典元{part}", "\n".join(chunk), False))
                     part += 1
                     chunk = [line]
                     chunk_len = len(line)
@@ -2235,8 +2619,24 @@ class MessageLogger(BaseCog):
                     chunk.append(line)
                     chunk_len += line_len
             if chunk:
-                label = "参照元" if part == 1 else f"参照元{part}"
+                label = "出典元" if part == 1 else f"出典元{part}"
                 fields.append((label, "\n".join(chunk), False))
+            if ref_sources:
+                fields.append(
+                    (
+                        "参照概要",
+                        ", ".join(self._truncate_event_text(ref, 120) for ref in ref_sources),
+                        False,
+                    )
+                )
+            if ref_urls:
+                fields.append(
+                    (
+                        "参照URL",
+                        "\n".join(self._truncate_event_text(url, 400) for url in ref_urls),
+                        False,
+                    )
+                )
         await send_event_log(
             self.bot,
             guild=msg.guild,
@@ -2772,6 +3172,7 @@ class MessageLogger(BaseCog):
                                 ),
                                 ("メッセージID", str(msg.id), True),
                             ],
+                            send_discord=False,
                         )
                     except Exception as e:
                         logger.debug(f"Reaction failed: {e}")
@@ -2905,66 +3306,6 @@ class MessageLogger(BaseCog):
             await self.bot.process_commands(msg)
             return
 
-        if is_current_info_intent(text) or is_search_intent(text):
-            web_scope = "news" if any(
-                key in normalize_keyword_match_text(text or "")
-                for key in ("事件", "ニュース", "速報", "今日", "最新", "最近")
-            ) else "web"
-            answer, web_refs = await self._build_current_info_context(
-                text,
-                web_scope=web_scope,
-            )
-            answer = (answer or "").strip()
-            if not answer:
-                await msg.channel.send(
-                    f"{msg.author.mention}\n検索結果から十分な情報を取得できませんでした。",
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                await self._log_bot_activity_event(
-                    msg,
-                    kind="メンション",
-                    processing="Web検索",
-                    level="error",
-                    title="Web検索ログ",
-                    description="検索結果から十分な情報を取得できませんでした。",
-                    input_text=text,
-                    output_text="",
-                    references=web_refs,
-                )
-                await self.bot.process_commands(msg)
-                return
-
-            answer = strip_ansi_and_ctrl(answer)
-            max_len = self._cfg_int("chat.max_response_length", 1800)
-            if len(answer) > max_len:
-                answer = answer[:max_len] + "\n...(省略)..."
-            if self._should_send_letter_file(text):
-                await self._send_letter_file(msg, answer)
-            else:
-                final_message = f"{msg.author.mention}\n{answer}"
-                if len(final_message) > 2000:
-                    await self._send_chunked_text(
-                        msg.channel,
-                        answer,
-                        prefix=f"{msg.author.mention}\n",
-                    )
-                else:
-                    await msg.channel.send(
-                        final_message, allowed_mentions=discord.AllowedMentions.none()
-                    )
-            await self._log_bot_activity_event(
-                msg,
-                kind="メンション",
-                processing="Web検索",
-                input_text=text,
-                output_text=answer,
-                title="Web検索ログ",
-                description="最新情報の検索結果を返しました。",
-                references=web_refs,
-            )
-            await self.bot.process_commands(msg)
-            return
-
         # ユーザー名を取得
         user = msg.author
         user_name = user.display_name or user.name or str(user.id)
@@ -3017,25 +3358,22 @@ class MessageLogger(BaseCog):
         references: list[str] = []
         today_local = datetime.now(JST)
         absolute_date = today_local.strftime("%Y-%m-%d")
+        absolute_datetime = today_local.strftime("%Y-%m-%d %H:%M:%S JST")
         requires_bot_capability_grounding = self._is_bot_capability_or_game_query(text)
         mention_focus_block = ""
-        history_context, planned_refs = await self._resolve_chat_context(
+        history_context, planned_refs, web_queries = await self._resolve_chat_context(
             msg=msg,
             user_display=user_display,
             text=text,
         )
         references.extend(planned_refs)
-        external_context = ""
-        if history_context and self._live_info.needs_external_context(text):
-            external_context = self._build_external_context_text(
-                await asyncio.to_thread(self._live_info.build_context, text)
-            )
-        combined_history_context = history_context + (
-            f"[外部参照情報]\n{external_context}\n\n" if external_context else ""
-        )
+        web_planned = self._has_web_references(planned_refs)
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")
         channel_profile_block = ""
+        ticket = await self.bot.ai_progress_tracker.create_ticket()
+        tool_queries: list[str] = []
+        combined_history_context = history_context
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_display,
             history_context=combined_history_context,
@@ -3044,7 +3382,51 @@ class MessageLogger(BaseCog):
                 "chat.max_response_length_prompt", 500
             ),
         )
-        ticket = await self.bot.ai_progress_tracker.create_ticket()
+        tools: list[object] = []
+        if self.bot.ollama_client.has_web_tools():
+            tools = [
+                self._get_local_knowledge,
+                self._get_bot_game_catalog,
+                self._get_bot_command_catalog,
+                self._get_runtime_model_info,
+                self._search_vrchat_world,
+                self.bot.ollama_client.web_search,
+                self.bot.ollama_client.web_fetch,
+            ]
+        else:
+            tools = [
+                self._get_local_knowledge,
+                self._get_bot_game_catalog,
+                self._get_bot_command_catalog,
+                self._get_runtime_model_info,
+                self._search_vrchat_world,
+            ]
+        chat_messages = [
+            {
+                "role": "system",
+                "content": get_prompt("chat", "system_message").format(
+                    absolute_date=absolute_date,
+                    absolute_datetime=absolute_datetime,
+                    channel_profile_block=channel_profile_block,
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    (
+                        mention_focus_block
+                        if mention_focus_block
+                        else ""
+                    )
+                    + (
+                        "[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n"
+                        if requires_bot_capability_grounding
+                        else ""
+                    )
+                    + prompt
+                ),
+            },
+        ]
 
         try:
             await self._ai_progress_countdowns.start_countup(
@@ -3056,67 +3438,42 @@ class MessageLogger(BaseCog):
                 ),
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
+            await self._promote_ai_progress_message(
+                progress_key=progress_key,
+                ticket=ticket,
+                model_name=model_name,
+            )
             try:
-                async with msg.channel.typing():
-                    tools: list[object] = []
-                    if self.bot.ollama_client.has_web_tools():
-                        tools = [
-                            self._get_local_knowledge,
-                            self._get_bot_game_catalog,
-                            self._get_bot_command_catalog,
-                            self._get_runtime_model_info,
-                            self._search_vrchat_world,
-                            self.bot.ollama_client.web_search,
-                            self.bot.ollama_client.web_fetch,
-                        ]
-                    else:
-                        tools = [
-                            self._get_local_knowledge,
-                            self._get_bot_game_catalog,
-                            self._get_bot_command_catalog,
-                            self._get_runtime_model_info,
-                            self._search_vrchat_world,
-                        ]
-                    answer, tool_references = await self._run_ollama_chat_with_tools(
-                        model=model_name,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": get_prompt("chat", "system_message").format(
-                                    absolute_date=absolute_date,
-                                    channel_profile_block=channel_profile_block,
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": (
-                                    (
-                                        mention_focus_block
-                                        if mention_focus_block
-                                        else ""
-                                    )
-                                    + (
-                                        "[必須: これは Bot 自身の機能・ゲーム・コマンドに関する質問です。回答前に get_local_knowledge を使って確認し、資料にないことは断定しないこと]\n"
-                                        if requires_bot_capability_grounding
-                                        else ""
-                                    )
-                                    + prompt
-                                ),
-                            },
-                        ],
-                        tools=tools,
-                        guild=msg.guild,
-                        channel_id=msg.channel.id,
-                        user_id=msg.author.id,
-                    )
-                    for ref in tool_references:
-                        if ref not in references:
-                            references.append(ref)
+                answer, tool_references, tool_queries = await self._run_ollama_chat_with_tools(
+                    model=model_name,
+                    messages=chat_messages,
+                    tools=tools,
+                    guild=msg.guild,
+                    channel_id=msg.channel.id,
+                    user_id=msg.author.id,
+                )
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
 
-            answer = (answer or "").strip()
-            answer = strip_ansi_and_ctrl(answer)
+            answer = strip_ansi_and_ctrl((answer or "").strip())
+            if web_planned and self._should_web_followup(answer, references + tool_references):
+                answer, retry_refs, retry_queries = await self._rewrite_answer_with_web(
+                    model=model_name,
+                    messages=chat_messages,
+                    tools=tools,
+                    user_request=text,
+                    previous_answer=answer,
+                    guild=msg.guild,
+                    channel_id=msg.channel.id,
+                    user_id=msg.author.id,
+                )
+                for ref in retry_refs:
+                    if ref not in references:
+                        references.append(ref)
+                    if ref not in tool_references:
+                        tool_references.append(ref)
+                tool_queries.extend(retry_queries)
+                answer = strip_ansi_and_ctrl((answer or "").strip())
 
             if not answer:
                 answer = "(応答が空でした)"
@@ -3136,8 +3493,8 @@ class MessageLogger(BaseCog):
             )
             answer_with_refs = answer
             if web_urls:
-                refs_block = "\n".join(f"- {url}" for url in web_urls)
-                answer_with_refs = f"{answer.rstrip()}\n\n参考元:\n{refs_block}"
+                references.extend([url for url in web_urls if url not in references])
+                answer_with_refs = self._build_display_answer_with_references(answer, web_urls)
             store.add_message(bot_name, answer_with_refs, msg.id, author_id=bot_id)
 
             # メッセージ送信（メンションのみ）
@@ -3166,6 +3523,7 @@ class MessageLogger(BaseCog):
                 title="Bot 会話ログ",
                 description="メンションまたはリプライへの AI 応答を送信しました。",
                 references=references,
+                web_queries=web_queries + tool_queries,
             )
 
         except Exception as e:
@@ -3181,6 +3539,7 @@ class MessageLogger(BaseCog):
                 error_text=str(e),
                 model_name=model_name,
                 references=references,
+                web_queries=web_queries + tool_queries,
             )
             if isinstance(e, asyncio.TimeoutError):
                 model_name = self._cfg_str("ollama.model_default", "gpt-oss:120b")

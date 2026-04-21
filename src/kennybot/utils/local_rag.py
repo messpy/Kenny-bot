@@ -140,7 +140,7 @@ def _static_chunks() -> list[RagChunk]:
                 "DM でもそのまま会話できます。"
                 "会話時は本人履歴、チャンネル履歴、意味的に近い過去発言を状況に応じて使い分けます。"
                 "README と knowledge/chat_rag.md/json/toml のローカル知識も参照できます。"
-                "最新情報が必要で web search が使える構成なら、必要時だけ web search/web fetch を使います。"
+                "曖昧な質問や裏取りが必要な質問では、web search/web fetch で確認してから答えることがあります。"
             ),
         ),
         RagChunk(

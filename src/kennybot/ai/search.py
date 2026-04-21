@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 from typing import List, Optional, Dict
 
 from ddgs import DDGS  # uv add ddgs
 from ddgs.exceptions import TimeoutException, DDGSException
+from src.kennybot.utils.text import normalize_keyword_match_text
 
 logger = logging.getLogger(__name__)
+JST = timezone(timedelta(hours=9))
 
 # モード別の最大全文長（最終まとめ用）
 _MODE_TO_MAX_CHARS: Dict[str, int] = {
@@ -66,6 +71,7 @@ class AISearchAnswer:
     """最終的に bot 側に返す結果"""
 
     query: str
+    searched_queries: List[str]
     items: List[WebItem]
     summaries: List[str]
     answer: str  # Discord にそのまま投げる本文
@@ -297,17 +303,317 @@ class AISearchService:
     # クエリ生成・モード判定
     # ------------------------------
     def _build_query(self, question: str) -> str:
-        q = question.strip()
-        q = q.replace("\n", " ")
-        return q
+        raw = normalize_keyword_match_text(question or "")
+        raw = raw.replace("\n", " ")
+        raw = raw.replace("　", " ")
+        raw = raw.strip()
+        if not raw:
+            return ""
+
+        raw = re.sub(
+            r"(ちょっとググってみます。?|ググってみます。?|待っててね。?|待ってて。?)",
+            " ",
+            raw,
+        )
+        raw = re.sub(
+            r"(バグかな。?|もう一回聞くよ。?|いまさらな質問なんだけど。?|質問なんだけど。?)",
+            " ",
+            raw,
+        )
+
+        ascii_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9._+-]*", raw)
+        jp_tokens = re.findall(r"[ぁ-んァ-ヶー一-龥]+", raw)
+
+        stop_words = {
+            "の",
+            "は",
+            "が",
+            "を",
+            "に",
+            "へ",
+            "で",
+            "と",
+            "や",
+            "か",
+            "だ",
+            "です",
+            "ます",
+            "ね",
+            "よ",
+            "かな",
+            "かも",
+            "って",
+            "だけ",
+            "こと",
+            "もの",
+            "今日",
+            "きょう",
+            "今",
+            "いま",
+            "最近",
+            "最新",
+            "調べて",
+            "しらべて",
+            "検索",
+            "検索して",
+            "探して",
+            "ググってみる",
+            "ググる",
+            "聞く",
+            "聞いて",
+            "もう一回",
+            "一回",
+            "私",
+            "自分",
+            "あなた",
+            "さん",
+            "ちゃん",
+            "まだ",
+            "しか",
+            "バグ",
+            "質問",
+            "いまさら",
+            "もう",
+            "一度",
+            "再度",
+            "確認",
+            "確認中",
+        }
+        noisy_jp_fragments = (
+            "したこと",
+            "なんだけど",
+            "だったりする",
+            "っていう",
+            "という",
+            "ってこと",
+            "ついている",
+            "使ったことない",
+            "わざわざ",
+            "あって",
+            "あるんだけど",
+            "みたい",
+        )
+
+        terms: list[str] = []
+        for token in ascii_tokens:
+            item = token.strip().casefold()
+            if len(item) < 2 or item in stop_words:
+                continue
+            if item not in terms:
+                terms.append(item)
+
+        for token in jp_tokens:
+            item = token.strip()
+            if not item or item in stop_words:
+                continue
+            if len(item) > 8:
+                continue
+            if any(fragment in item for fragment in noisy_jp_fragments):
+                continue
+            if item not in terms:
+                terms.append(item)
+
+        if terms:
+            return " ".join(terms[:4])
+        return raw[:60]
 
     def _prefer_web_over_news(self, question: str) -> bool:
         """
-        「意味」「とは」「定義」「由来」「語源」などを含む場合は
-        ニュース限定ではなく通常 Web 検索も有効にする。
+        「意味」「とは」「定義」「由来」「語源」や、
+        ソフトウェア/CLI/GUI の確認はニュース限定ではなく通常 Web 検索も有効にする。
         """
-        keywords = ("意味", "とは", "定義", "由来", "語源")
+        keywords = (
+            "意味",
+            "とは",
+            "定義",
+            "由来",
+            "語源",
+            "CLI",
+            "GUI",
+            "アプリ",
+            "ソフト",
+            "ツール",
+            "バージョン",
+            "version",
+            "API",
+            "GitHub",
+            "OpenAI",
+            "Codex",
+        )
         return any(k in question for k in keywords)
+
+    def _query_terms(self, query: str) -> list[str]:
+        normalized = normalize_keyword_match_text(query or "")
+        raw_terms = re.split(r"[\s\u3000\W_]+", normalized)
+        stop_words = {
+            "の",
+            "は",
+            "が",
+            "を",
+            "に",
+            "へ",
+            "で",
+            "と",
+            "や",
+            "か",
+            "だ",
+            "です",
+            "ます",
+            "ね",
+            "よ",
+            "今日",
+            "きょう",
+            "今",
+            "いま",
+            "最近",
+            "最新",
+            "もう",
+            "一回",
+            "回",
+        }
+        terms: list[str] = []
+        for term in raw_terms:
+            item = term.strip()
+            if not item or item in stop_words:
+                continue
+            if item not in terms:
+                terms.append(item)
+        return terms[:8]
+
+    def _url_domain(self, url: str) -> str:
+        try:
+            parsed = urlparse(url or "")
+            host = (parsed.netloc or "").strip().casefold()
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+        except Exception:
+            return ""
+
+    def _official_domain_hints(self, query: str) -> list[str]:
+        normalized = normalize_keyword_match_text(query or "")
+        hints: list[str] = []
+
+        def add(*domains: str) -> None:
+            for domain in domains:
+                item = domain.strip().casefold()
+                if item and item not in hints:
+                    hints.append(item)
+
+        if any(key in normalized for key in ("openai", "codex")):
+            add("openai.com", "platform.openai.com", "docs.openai.com", "github.com")
+        if "github" in normalized:
+            add("github.com", "docs.github.com", "github.blog")
+        if any(key in normalized for key in ("microsoft", "azure")):
+            add("microsoft.com", "learn.microsoft.com", "azure.microsoft.com")
+        if "apple" in normalized:
+            add("apple.com", "support.apple.com", "developer.apple.com")
+        if "google" in normalized:
+            add("google.com", "developers.google.com", "cloud.google.com")
+        if "anthropic" in normalized or "claude" in normalized:
+            add("anthropic.com", "docs.anthropic.com")
+        if "meta" in normalized or "llama" in normalized:
+            add("meta.com", "ai.meta.com", "github.com")
+        return hints
+
+    def _official_domain_bonus(self, query: str, url: str) -> int:
+        domain = self._url_domain(url)
+        if not domain:
+            return 0
+        hints = self._official_domain_hints(query)
+        if not hints:
+            return 0
+        if any(domain == hint or domain.endswith(f".{hint}") for hint in hints):
+            return 6
+        if any(hint in domain for hint in hints):
+            return 3
+        return 0
+
+    def _prefer_text_first(self, query: str) -> bool:
+        normalized = normalize_keyword_match_text(query or "")
+        keywords = (
+            "CLI",
+            "GUI",
+            "API",
+            "docs",
+            "documentation",
+            "公式",
+            "OpenAI",
+            "GitHub",
+            "Codex",
+            "model",
+            "tool",
+            "app",
+            "アプリ",
+            "インストール",
+            "使い方",
+            "設定",
+            "version",
+            "バージョン",
+        )
+        return any(keyword.casefold() in normalized for keyword in keywords)
+
+    def _search_query_variants(self, query: str) -> list[str]:
+        normalized = query.strip()
+        variants: list[str] = []
+
+        def add(candidate: str) -> None:
+            candidate = candidate.strip()
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+
+        add(normalized)
+        if normalized:
+            add(f"{normalized} +公式")
+            add(f"{normalized} +official")
+            add(f"{normalized} +docs")
+            add(f"{normalized} +documentation")
+            for domain in self._official_domain_hints(normalized):
+                add(f"{normalized} site:{domain}")
+                add(f"{normalized} +公式 site:{domain}")
+        return variants[:6]
+
+    def _result_alignment_score(self, query: str, item: WebItem) -> int:
+        terms = self._query_terms(query)
+        if not terms:
+            return 0
+        title = normalize_keyword_match_text(item.title or "")
+        snippet = normalize_keyword_match_text(item.snippet or "")
+        score = 0
+        for term in terms:
+            if term in title:
+                score += 3
+            if term in snippet:
+                score += 1
+        score += self._official_domain_bonus(query, item.url)
+        return score
+
+    def _looks_off_topic(self, query: str, items: list[WebItem]) -> bool:
+        if not items:
+            return True
+        top_items = items[: min(len(items), 3)]
+        scores = [self._result_alignment_score(query, item) for item in top_items]
+        if not any(score >= 3 for score in scores):
+            return True
+        if any(self._official_domain_bonus(query, item.url) > 0 for item in top_items):
+            return False
+        return max(scores) < 4
+
+    def _rank_items(self, query: str, items: List[WebItem]) -> List[WebItem]:
+        terms = self._query_terms(query)
+        if not terms:
+            return list(items)
+        scored: list[tuple[int, int, WebItem]] = []
+        for idx, item in enumerate(items):
+            score = self._result_alignment_score(query, item)
+            if score > 0:
+                scored.append((score, idx, item))
+        if not scored:
+            return list(items)
+        scored.sort(key=lambda row: (-row[0], row[1]))
+        ranked = [item for _, _, item in scored]
+        ranked.extend(item for item in items if item not in ranked)
+        return ranked
 
     def _build_direct_answer(
         self,
@@ -336,27 +642,24 @@ class AISearchService:
             return "詳細は記事URLを確認してください。"
 
         lines: List[str] = []
-        lines.append("Web検索結果を取得しました。")
-        lines.append("")
-        lines.append("【要点】")
-        for item in items[: self.searcher.config.top_n]:
-            lines.append(f"- {_snippet_summary(item)}")
+        lines.append("回答")
+        lines.append(f"- {question.strip() or query.strip() or '質問'} に対して確認できた範囲では、以下の内容が有力です。")
         if summaries:
-            lines.append("")
-            lines.append("【AI要約】")
             for sm in summaries[: self.searcher.config.top_n]:
                 lines.append(f"- {sm}")
+        else:
+            for item in items[: self.searcher.config.top_n]:
+                lines.append(f"- {_snippet_summary(item)}")
+
         lines.append("")
-        lines.append("【見つかった記事】")
-        for it in items[: self.searcher.config.top_n]:
-            date_str = f"（{it.date}）" if it.date else ""
-            snippet = f" / {it.snippet}" if it.snippet else ""
-            lines.append(f"- {it.title}{date_str}{snippet}\n  {it.url}")
-        lines.append("")
-        lines.append("【参考】")
-        for it in items[: self.searcher.config.top_n]:
-            lines.append(f"- {it.url}")
+        lines.append("補足")
+        for item in items[: self.searcher.config.top_n]:
+            lines.append(f"- {_snippet_summary(item)}")
         return "\n".join(lines)
+
+    def _looks_like_structured_web_answer(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(strip_ansi_and_ctrl(text or ""))
+        return "回答" in normalized or "全体要約" in normalized
 
     def _candidate_final_models(self) -> list[str]:
         candidates: list[str] = []
@@ -405,31 +708,56 @@ class AISearchService:
         prefer_web = self._prefer_web_over_news(question)
         effective_news_only = (not prefer_web) if news_only is None else bool(news_only)
 
-        try:
-            items = await asyncio.to_thread(
-                self.searcher.search,
+        items: list[WebItem] = []
+        tried_queries: list[str] = []
+        query_variants = self._search_query_variants(q)
+        if self._prefer_text_first(q):
+            query_variants = [
+                *[candidate for candidate in query_variants if candidate not in {q}],
                 q,
-                news_only=effective_news_only,
-            )
-        except TimeoutException as e:
-            logger.warning("[ai_search] ddgs timeout: %r", e)
-            msg = "Web検索の実行に失敗しました。クエリを短くするか、時間をおいて再度お試しください。"
-            return AISearchAnswer(query=q, items=[], summaries=[], answer=msg)
-        except DDGSException as e:
-            logger.warning("[ai_search] ddgs error: %r", e)
-            msg = "Web検索の実行に失敗しました。クエリを短くするか、時間をおいて再度お試しください。"
-            return AISearchAnswer(query=q, items=[], summaries=[], answer=msg)
-        except Exception as e:
-            logger.exception("[ai_search] unexpected search error")
-            msg = "Web検索で予期しないエラーが発生しました。時間をおいて再度お試しください。"
-            return AISearchAnswer(query=q, items=[], summaries=[], answer=msg)
+            ]
+
+        last_error: Exception | None = None
+        for idx, candidate_query in enumerate(query_variants):
+            tried_queries.append(candidate_query)
+            try:
+                candidate_items = await asyncio.to_thread(
+                    self.searcher.search,
+                    candidate_query,
+                    news_only=effective_news_only,
+                )
+            except TimeoutException as e:
+                last_error = e
+                logger.warning("[ai_search] ddgs timeout query=%r: %r", candidate_query, e)
+                continue
+            except DDGSException as e:
+                last_error = e
+                logger.warning("[ai_search] ddgs error query=%r: %r", candidate_query, e)
+                continue
+            except Exception as e:
+                last_error = e
+                logger.exception("[ai_search] unexpected search error query=%r", candidate_query)
+                continue
+
+            if not candidate_items:
+                continue
+
+            items = candidate_items
+            if idx == 0 and self._looks_off_topic(q, items):
+                continue
+            if not self._looks_off_topic(candidate_query, items):
+                break
 
         if not items:
+            if last_error is not None:
+                msg = "Web検索の実行に失敗しました。クエリを短くするか、時間をおいて再度お試しください。"
+                return AISearchAnswer(query=q, searched_queries=[q], items=[], summaries=[], answer=msg)
             msg = "検索結果が取得できませんでした。キーワードを変えて再度お試しください。"
-            return AISearchAnswer(query=q, items=[], summaries=[], answer=msg)
+            return AISearchAnswer(query=q, searched_queries=[q], items=[], summaries=[], answer=msg)
 
+        ranked_items = self._rank_items(q, items)
         top_n = self.searcher.config.top_n
-        targets = items[: max(top_n * 2, top_n)]  # 失敗に備えて多めに要約
+        targets = ranked_items[: max(top_n * 2, top_n)]  # 失敗に備えて多めに要約
 
         tasks = [self.summarizer.summarize_one(question, it, mode=mode) for it in targets]
         raw_summaries = await asyncio.gather(*tasks, return_exceptions=True)
@@ -449,14 +777,14 @@ class AISearchService:
                 break
 
         if not summaries:
-            fallback_items = items[:top_n]
+            fallback_items = ranked_items[:top_n]
             answer = self._build_direct_answer(
                 question=question,
                 query=q,
                 items=fallback_items,
                 summaries=[],
             )
-            return AISearchAnswer(query=q, items=fallback_items, summaries=[], answer=answer)
+            return AISearchAnswer(query=q, searched_queries=[q], items=fallback_items, summaries=[], answer=answer)
 
         # Discord 向けにまとめるためのプロンプトを構築
         overall_prompt_parts: List[str] = []
@@ -470,10 +798,17 @@ class AISearchService:
             )
 
         overall_prompt = "\n".join(overall_prompt_parts)
+        today_jst = datetime.now(JST).strftime("%Y-%m-%d")
+        current_jst = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
 
-        final_prompt = f"""あなたはWeb検索結果をもとに回答する日本語アシスタントです。
+        final_prompt = f"""あなたはWeb検索結果を統合して質問に答える日本語アシスタントです。
 以下はユーザーの質問と、それに関連すると判断されたニュース/記事の要約一覧です。
-事実ベースで、分かりやすく、必要に応じて箇条書きで説明してください。
+事実ベースで、分かりやすく、質問への答えを先に述べてください。
+検索結果を単に並べるのではなく、質問に直接関係する情報だけを統合して答えてください。
+冒頭の挨拶、雑談、検索実施の宣言、自己言及は書かないでください。
+今の判断基準として、Today in JST is {today_jst} を使ってください。
+Current time in JST is {current_jst}.
+「今」「この時期」「季節」はこの日付基準で解釈してください。
 
 【ユーザーの質問】
 {question}
@@ -485,15 +820,13 @@ class AISearchService:
 {overall_prompt}
 
 【出力フォーマット（必ずこの形式で）】
-1. まず「AI要約 まとめ」として、全体の結論やポイントを2〜5行でまとめる
-2. そのあと空行を入れて、各記事ごとに以下の形式で列挙する:
-   - 行1: 「記事タイトル 」+ タイトル + スペース + 公開日/更新日（不明なら「日付情報なし」）
-   - 行2: 「記事の内容 要約 」+ その記事の要約（2〜4行程度）
-3. 最後に [参考] セクションを作り、利用した記事の URL を上から順に列挙する
+1. まず「回答」として、質問への答えを2〜5行でまとめる
+2. 必要なら「補足」として、重要なポイントを箇条書きで最大5件まで書く
 
 ※ 検索結果にない情報は推測しないでください。
 ※ 挨拶文、雑談、ユーザー名の言い回し、日付の補完、ニュースの創作はしないでください。
 ※ 記事から確認できない話題は「検索結果からは確認できません」と書いてください。
+※ 形式が崩れそうなら、本文は短くしてもよいので、必ず「回答」「補足」の順で出力してください。
 """
 
         try:
@@ -502,7 +835,7 @@ class AISearchService:
             logger.warning("[ai_search] final answer generation failed: %r", e)
             answer_text = ""
 
-        if not answer_text:
+        if not answer_text or not self._looks_like_structured_web_answer(answer_text):
             answer_text = self._build_direct_answer(
                 question=question,
                 query=q,
@@ -514,7 +847,13 @@ class AISearchService:
         if len(answer_text) > max_chars:
             answer_text = answer_text[:max_chars] + "\n...(省略)..."
 
-        return AISearchAnswer(query=q, items=used_items, summaries=summaries, answer=answer_text)
+        return AISearchAnswer(
+            query=q,
+            searched_queries=tried_queries or [q],
+            items=used_items,
+            summaries=summaries,
+            answer=answer_text,
+        )
 
 
 # 旧名との互換用（main.py は Summarizer を import している）

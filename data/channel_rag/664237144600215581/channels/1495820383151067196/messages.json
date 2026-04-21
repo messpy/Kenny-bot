@@ -1,0 +1,9 @@
+[
+  {
+    "id": 1495831588951294113,
+    "author_id": 387651883847909376,
+    "author": "kenny",
+    "content": "kenny@win:/mnt/c/Users/kenny/work/ai_test$ exit\nlogout\nPS C:\\Users\\kenny\\work\\ai_test>  Get-CimInstance Win32_VideoController | Select Name,AdapterRAM\n\nName                               AdapterRAM\n----                               ----------\nMeta Virtual Monitor\nVirtual Desktop Monitor\nNVIDIA GeForce RTX 4060 Laptop GPU 4293918720\nIntel(R) UHD Graphics              2147479552",
+    "timestamp": "2026-04-21T02:00:42.166946+09:00"
+  }
+]

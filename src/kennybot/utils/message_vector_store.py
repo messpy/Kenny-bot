@@ -6,6 +6,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from src.kennybot.utils.text import looks_like_web_search_artifact
+
 
 class MessageVectorStore:
     def __init__(self, path: Path):
@@ -56,6 +58,8 @@ class MessageVectorStore:
         embedding: list[float] | None,
     ) -> None:
         embedding_json = json.dumps(embedding) if embedding else None
+        if looks_like_web_search_artifact(content):
+            return
         with self._connect() as conn:
             conn.execute(
                 """
@@ -80,6 +84,9 @@ class MessageVectorStore:
         payload = []
         for row in rows:
             embedding = row.get("embedding")
+            content = str(row["content"])
+            if looks_like_web_search_artifact(content):
+                continue
             payload.append(
                 (
                     int(row["guild_id"]),
@@ -151,6 +158,9 @@ class MessageVectorStore:
                 try:
                     candidate = json.loads(embedding_json)
                 except Exception:
+                    continue
+                content = str(row["content"])
+                if looks_like_web_search_artifact(content):
                     continue
                 if not isinstance(candidate, list) or not candidate:
                     continue

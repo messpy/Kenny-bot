@@ -64,16 +64,34 @@ def log_ai_output(
     model: str,
     msg: Any | None = None,
     error: str | None = None,
+    references: list[str] | None = None,
+    web_queries: list[str] | None = None,
 ) -> None:
     author_name = getattr(author, "display_name", None) or getattr(author, "name", "unknown")
     author_id = getattr(author, "id", 0)
+    normalized_references = [str(ref).strip() for ref in references or [] if str(ref).strip()]
+    web_used = any(
+        ref.startswith("tool:web_search")
+        or ref.startswith("tool:web_fetch")
+        or ref.startswith("source:web_search")
+        or ref.startswith("method:")
+        or ref.startswith("web_search")
+        or ref.startswith("web_fetch")
+        for ref in normalized_references
+    )
     parts = [
         _format_common_prefix("AI", msg),
         f"author={author_name}",
         f"author_id={author_id}",
         f"model={model}",
         f"response={response!r}",
+        f"web_used={web_used}",
     ]
+    if normalized_references:
+        parts.append(f"references={normalized_references!r}")
+    normalized_queries = [str(query).strip() for query in web_queries or [] if str(query).strip()]
+    if normalized_queries:
+        parts.append(f"web_queries={normalized_queries!r}")
     if error:
         parts.append(f"error={error!r}")
     line = " ".join(parts)

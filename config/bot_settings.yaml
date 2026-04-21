@@ -37,8 +37,8 @@ global:
       warn_cooldown_seconds: 20.0
   meeting:
     max_minutes: 90
-    audio_max_total_mb: 64
-    audio_max_user_mb: 8
+    audio_max_total_mb: 0
+    audio_max_user_mb: 0
     transcription_provider: whisper
     google_language_code: ja-JP
     google_chunk_seconds: 20

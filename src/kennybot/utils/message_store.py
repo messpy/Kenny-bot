@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Optional, List
 
 from src.kennybot.utils.paths import LEGACY_MESSAGE_LOG_DIR, MESSAGE_LOG_DIR
-from src.kennybot.utils.scoped_data import channel_scope_dir, ensure_scoped_dirs
+from src.kennybot.utils.scoped_data import channel_scope_dir
 from src.kennybot.utils.runtime_settings import get_settings
+from src.kennybot.utils.text import looks_like_web_search_artifact
 
 logger = logging.getLogger(__name__)
 JST = timezone(timedelta(hours=9))
@@ -38,21 +39,43 @@ class MessageStore:
         self.channel_id = channel_id
         self.guild_name = guild_name
         self.channel_name = channel_name
-        self.log_file = channel_scope_dir(guild_id, channel_id) / "messages.json"
-        self.legacy_log_file = LEGACY_MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
+        self.log_file = MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
+        self.legacy_log_files = [
+            LEGACY_MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json",
+            channel_scope_dir(guild_id, channel_id) / "messages.json",
+        ]
 
     def _load_messages(self) -> List[dict]:
         """JSON ファイルからメッセージを読み込む"""
+        def _filter(messages: list[dict]) -> list[dict]:
+            filtered: list[dict] = []
+            changed = False
+            for message in messages:
+                content = str(message.get("content", "") or "")
+                if looks_like_web_search_artifact(content):
+                    changed = True
+                    continue
+                filtered.append(message)
+            if changed:
+                self._save_messages(filtered)
+            return filtered
+
         if self.log_file.exists():
             try:
                 with open(self.log_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, list):
+                        return _filter(loaded)
             except Exception as e:
                 logger.error(f"Failed to load messages: {e}")
-        if self.legacy_log_file.exists():
+        for legacy_log_file in self.legacy_log_files:
+            if not legacy_log_file.exists():
+                continue
             try:
-                with open(self.legacy_log_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                with open(legacy_log_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, list):
+                        return _filter(loaded)
             except Exception as e:
                 logger.error(f"Failed to load legacy messages: {e}")
 
@@ -61,10 +84,8 @@ class MessageStore:
     def _save_messages(self, messages: List[dict]) -> None:
         """メッセージを JSON ファイルに保存"""
         try:
-            ensure_scoped_dirs(self.guild_id, self.channel_id)
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.log_file, "w", encoding="utf-8") as f:
-                json.dump(messages, f, ensure_ascii=False, indent=2)
-            with open(self.legacy_log_file, "w", encoding="utf-8") as f:
                 json.dump(messages, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Failed to save messages: {e}")
@@ -80,6 +101,9 @@ class MessageStore:
             kept: List[dict] = []
             for m in messages:
                 ts = m.get("timestamp", "")
+                content = str(m.get("content", "") or "")
+                if looks_like_web_search_artifact(content):
+                    continue
                 try:
                     dt = datetime.fromisoformat(ts)
                 except Exception:
@@ -104,6 +128,8 @@ class MessageStore:
             author_id: Discord ユーザーID（個人特定用）
         """
         try:
+            if looks_like_web_search_artifact(content):
+                return
             messages = self._load_messages()
 
             # 新しいメッセージを追加

@@ -59,16 +59,22 @@ class LiveInfoService:
 
     def needs_external_context(self, text: str) -> bool:
         lowered = (text or "").lower()
-        return self._looks_like_weather_query(lowered) or self._looks_like_calendar_query(lowered)
+        return (
+            self._looks_like_weather_query(lowered)
+            or (self._looks_like_calendar_query(lowered) and not self._looks_like_news_query(lowered))
+            or self._looks_like_season_query(lowered)
+        )
 
     def build_context(self, text: str) -> list[ExternalContext]:
         contexts: list[ExternalContext] = []
-        if self._looks_like_weather_query(text):
+        weather_query = self._looks_like_weather_query(text)
+        news_query = self._looks_like_news_query(text)
+        if weather_query:
             weather = self._fetch_weather_context(text)
             if weather:
                 contexts.append(weather)
 
-        if self._looks_like_calendar_query(text):
+        if self._looks_like_calendar_query(text) and not weather_query and not news_query:
             calendar = self._build_calendar_context(text)
             if calendar:
                 contexts.append(calendar)
@@ -77,7 +83,17 @@ class LiveInfoService:
 
     def _looks_like_weather_query(self, text: str) -> bool:
         lowered = (text or "").lower()
-        return "天気" in lowered or "weather" in lowered
+        weather_words = (
+            "天気",
+            "気温",
+            "温度",
+            "最高気温",
+            "最低気温",
+            "最高温度",
+            "最低温度",
+            "weather",
+        )
+        return any(word in lowered for word in weather_words)
 
     def _looks_like_calendar_query(self, text: str) -> bool:
         lowered = (text or "").lower()
@@ -87,10 +103,43 @@ class LiveInfoService:
         question_words = any(key in lowered for key in ("何日", "何曜日", "日付", "祝日", "休日"))
         return explicit_date or explicit_jp_date or question_words or (date_words and ("?" in lowered or "？" in lowered or question_words))
 
+    def _looks_like_news_query(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        news_words = (
+            "ニュース",
+            "news",
+            "速報",
+            "記事",
+            "話題",
+            "トレンド",
+            "報道",
+        )
+        return any(word in lowered for word in news_words)
+
+    def _looks_like_season_query(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        season_words = (
+            "季節",
+            "時期",
+            "旬",
+            "今の",
+            "この時期",
+            "服装",
+            "気候",
+            "桜",
+            "紅葉",
+            "雪",
+            "花粉",
+            "熱中症",
+        )
+        return any(word in lowered for word in season_words)
+
     def _extract_weather_location(self, text: str) -> str:
         stripped = re.sub(r"<@!?\d+>", "", text or "").strip()
         patterns = (
             r"(.+?)の天気",
+            r"(.+?)の気温",
+            r"(.+?)の温度",
             r"(.+?)\s+weather",
             r"weather in\s+(.+)",
         )
@@ -115,13 +164,19 @@ class LiveInfoService:
             geo_data = geo.json()
             results = geo_data.get("results") if isinstance(geo_data, dict) else None
             if not isinstance(results, list) or not results:
-                return ExternalContext("天気API", f"場所 `{location}` は見つかりませんでした。")
+                return ExternalContext(
+                    "天気API",
+                    f"場所 `{location}` は見つかりませんでした。\n取得元: Open-Meteo (https://open-meteo.com/)",
+                )
 
             place = results[0]
             lat = place.get("latitude")
             lon = place.get("longitude")
             if lat is None or lon is None:
-                return ExternalContext("天気API", f"場所 `{location}` の座標を取得できませんでした。")
+                return ExternalContext(
+                    "天気API",
+                    f"場所 `{location}` の座標を取得できませんでした。\n取得元: Open-Meteo (https://open-meteo.com/)",
+                )
 
             weather = requests.get(
                 "https://api.open-meteo.com/v1/forecast",
@@ -158,11 +213,14 @@ class LiveInfoService:
                 f"地点: {place_label}\n"
                 f"現在: {summary} / {temp}°C / 風速 {wind} km/h\n"
                 f"今日: 最高 {max_t}°C / 最低 {min_t}°C / 降水確率 {rain_prob}%\n"
-                f"取得元: Open-Meteo"
+                f"取得元: Open-Meteo (https://open-meteo.com/)"
             )
             return ExternalContext("天気API", body)
         except Exception as e:
-            return ExternalContext("天気API", f"取得失敗: {str(e)[:180]}")
+            return ExternalContext(
+                "天気API",
+                f"取得失敗: {str(e)[:180]}\n取得元: Open-Meteo (https://open-meteo.com/)",
+            )
 
     def _build_calendar_context(self, text: str) -> ExternalContext | None:
         target = self._extract_target_date(text)
@@ -178,6 +236,7 @@ class LiveInfoService:
             lines.append("日本の祝日: 該当なし")
         if holiday_error:
             lines.append(f"祝日API備考: {holiday_error}")
+        lines.append("取得元: Nager.Date (https://date.nager.at/)")
         return ExternalContext("日付・祝日API", "\n".join(lines))
 
     def _extract_target_date(self, text: str) -> date:

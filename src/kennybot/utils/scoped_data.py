@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.kennybot.utils.paths import DATA_DIR
+from src.kennybot.utils.paths import DATA_DIR, SCOPED_LOG_DIR
 
 
 SCOPED_DATA_DIR = DATA_DIR / "channel_rag"
@@ -17,11 +17,11 @@ def channel_scope_dir(guild_id: int, channel_id: int) -> Path:
 
 
 def guild_logs_dir(guild_id: int) -> Path:
-    return guild_scope_dir(guild_id) / "logs"
+    return SCOPED_LOG_DIR / str(int(guild_id)) / "logs"
 
 
 def channel_logs_dir(guild_id: int, channel_id: int) -> Path:
-    return channel_scope_dir(guild_id, channel_id) / "logs"
+    return SCOPED_LOG_DIR / str(int(guild_id)) / "channels" / str(int(channel_id)) / "logs"
 
 
 def guild_settings_path(guild_id: int) -> Path:
