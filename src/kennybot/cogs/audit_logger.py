@@ -46,4 +46,5 @@ class AuditLogger(commands.Cog):
                 ("オプション", option_text or "[]", False),
             ],
             source_channel_id=interaction.channel_id,
+            channel_kind="other",
         )

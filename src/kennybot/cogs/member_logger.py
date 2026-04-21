@@ -36,6 +36,7 @@ class MemberLogger(commands.Cog):
                 ("サーバー", f"{guild.name} ({guild.id})", False),
                 ("アカウント作成日", f"{member.created_at.strftime('%Y/%m/%d %H:%M')} (約{age_str}前)", False),
             ],
+            channel_kind="member",
         )
 
     @commands.Cog.listener()
@@ -52,4 +53,5 @@ class MemberLogger(commands.Cog):
                 ("ユーザー", f"{member.name} ({member.id})", False),
                 ("サーバー", f"{guild.name} ({guild.id})", False),
             ],
+            channel_kind="member",
         )

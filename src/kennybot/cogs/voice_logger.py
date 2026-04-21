@@ -118,6 +118,7 @@ class VoiceLogger(commands.Cog):
                 ("サーバー", f"{guild.name} ({guild.id})", False),
                 ("チャンネル", channel.name, False),
             ],
+            channel_kind="voice",
         )
 
     async def _handle_voice_leave(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
@@ -146,6 +147,7 @@ class VoiceLogger(commands.Cog):
                 ("チャンネル", channel.name, False),
                 ("通話時間", duration, False),
             ],
+            channel_kind="voice",
         )
 
     def _calculate_duration(self, join_time: Optional[datetime]) -> str:

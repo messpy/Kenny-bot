@@ -4,6 +4,7 @@ from typing import Iterable
 
 import discord
 
+from src.kennybot.utils.channel import resolve_log_channel
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.scoped_data import append_text, channel_logs_dir, ensure_scoped_dirs, guild_logs_dir
 
@@ -80,12 +81,16 @@ async def send_event_log(
     local_fields: Iterable[tuple[str, str, bool]] | None = None,
     footer: str | None = None,
     source_channel_id: int | None = None,
+    channel_kind: str | None = None,
     send_discord: bool = True,
 ) -> discord.Message | None:
     message: discord.Message | None = None
     channel = None
     if send_discord:
-        channel = await resolve_event_log_channel(bot, guild)
+        if guild is not None and channel_kind:
+            channel = resolve_log_channel(guild, channel_kind)
+        if channel is None:
+            channel = await resolve_event_log_channel(bot, guild)
         if channel is None:
             return None
         if source_channel_id is not None and int(source_channel_id) == int(getattr(channel, "id", 0)):

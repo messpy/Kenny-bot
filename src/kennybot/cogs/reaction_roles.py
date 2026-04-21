@@ -72,6 +72,7 @@ class ReactionRoles(commands.Cog):
                     ("ロール", f"{role.name} ({role.id})", False),
                     ("絵文字", str(payload.emoji), True),
                 ],
+                channel_kind="other",
             )
             return
         if role >= me.top_role:
@@ -87,6 +88,7 @@ class ReactionRoles(commands.Cog):
                     ("ロール", f"{role.name} ({role.id})", False),
                     ("絵文字", str(payload.emoji), True),
                 ],
+                channel_kind="other",
             )
             return
 
@@ -104,6 +106,7 @@ class ReactionRoles(commands.Cog):
                     ("絵文字", str(payload.emoji), True),
                     ("メッセージID", str(payload.message_id), True),
                 ],
+                channel_kind="other",
             )
         except Exception:
             logger.exception("Failed to add role %s to member %s", role.id, member.id)
@@ -119,6 +122,7 @@ class ReactionRoles(commands.Cog):
                     ("絵文字", str(payload.emoji), True),
                     ("メッセージID", str(payload.message_id), True),
                 ],
+                channel_kind="other",
             )
 
     @commands.Cog.listener()
@@ -173,6 +177,7 @@ class ReactionRoles(commands.Cog):
                     ("絵文字", str(payload.emoji), True),
                     ("メッセージID", str(payload.message_id), True),
                 ],
+                channel_kind="other",
             )
         except Exception:
             logger.exception("Failed to remove role %s from member %s", role.id, member.id)
@@ -188,4 +193,5 @@ class ReactionRoles(commands.Cog):
                     ("絵文字", str(payload.emoji), True),
                     ("メッセージID", str(payload.message_id), True),
                 ],
+                channel_kind="other",
             )
