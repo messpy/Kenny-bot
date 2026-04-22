@@ -1,6 +1,7 @@
 # cogs/message_logger.py
 # 会話 + リアクション
 
+import base64
 import json
 import io
 import logging
@@ -8,9 +9,11 @@ import re
 import subprocess
 import time
 import asyncio
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 import discord
 from discord.ext import commands
@@ -585,62 +588,109 @@ class MessageLogger(BaseCog):
                 break
         return normalized
 
-    def _prioritize_mentioned_person_plan(
+    def _preferred_person_target_key(
+        self, target_candidates: dict[str, tuple[int, str]]
+    ) -> str | None:
+        for key in target_candidates.keys():
+            if key.startswith("mentioned_"):
+                return key
+        if "replied_user" in target_candidates:
+            return "replied_user"
+        return None
+
+    def _prefer_explicit_person_target_plan(
         self,
         *,
         plan: list[dict[str, object]],
         text: str,
         target_candidates: dict[str, tuple[int, str]],
+        has_reply_chain: bool,
         user_lines: int,
     ) -> list[dict[str, object]]:
         if not plan or not self._is_person_lookup_query(text):
             return plan
-        preferred_mention_target = next(
-            (
-                key
-                for key in target_candidates.keys()
-                if key.startswith("mentioned_")
-            ),
-            None,
-        )
-        if not preferred_mention_target:
+        preferred_target = self._preferred_person_target_key(target_candidates)
+        if not preferred_target:
             return plan
 
+        forced_prefix: list[dict[str, object]] = []
+        if has_reply_chain and not any(
+            str(item.get("source") or "").strip().lower() == "reply_chain"
+            for item in plan
+        ):
+            forced_prefix.append(
+                {
+                    "source": "reply_chain",
+                    "limit": min(max(4, user_lines // 2), 8),
+                }
+            )
+        if not any(
+            str(item.get("source") or "").strip().lower() == "member_profile"
+            and str(item.get("target") or "").strip().lower() == preferred_target
+            for item in plan
+        ):
+            forced_prefix.append(
+                {
+                    "source": "member_profile",
+                    "target": preferred_target,
+                }
+            )
+        if not any(
+            str(item.get("source") or "").strip().lower() == "member_history"
+            and str(item.get("target") or "").strip().lower() == preferred_target
+            for item in plan
+        ):
+            forced_prefix.append(
+                {
+                    "source": "member_history",
+                    "target": preferred_target,
+                    "limit": min(max(user_lines, 6), 24),
+                }
+            )
+
         adjusted: list[dict[str, object]] = []
-        saw_person_source = False
         for item in plan:
             candidate = dict(item)
             source = str(candidate.get("source") or "").strip().lower()
             target = str(candidate.get("target") or "author").strip().lower()
             if source == "recent_user_history":
                 candidate["source"] = "member_history"
-                candidate["target"] = preferred_mention_target
-                saw_person_source = True
-                adjusted.append(candidate)
-                continue
+                candidate["target"] = preferred_target
+                candidate["limit"] = min(max(user_lines, 6), 24)
             if source in {"member_history", "member_profile"}:
-                saw_person_source = True
                 if target == "author":
-                    candidate["target"] = preferred_mention_target
+                    candidate["target"] = preferred_target
             adjusted.append(candidate)
 
-        if not saw_person_source:
-            adjusted.insert(
-                0,
-                {
-                    "source": "member_profile",
-                    "target": preferred_mention_target,
-                },
+        adjusted = forced_prefix + adjusted
+
+        unique: list[dict[str, object]] = []
+        seen: set[tuple[object, ...]] = set()
+        for item in adjusted:
+            key = (
+                str(item.get("source") or "").strip().lower(),
+                str(item.get("target") or "").strip().lower(),
+                str(item.get("query") or "").strip(),
+                item.get("limit", ""),
+                str(item.get("web_scope") or "").strip().lower(),
+                bool(item.get("capability_only", False)),
             )
-            adjusted.insert(
-                1,
-                {
-                    "source": "member_history",
-                    "target": preferred_mention_target,
-                    "limit": min(max(user_lines, 6), 24),
-                },
-            )
-        return adjusted[:8]
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+            if len(unique) >= 8:
+                break
+        return unique
+
+    @staticmethod
+    def _format_target_candidates(
+        target_candidates: dict[str, tuple[int, str]]
+    ) -> dict[str, dict[str, object]]:
+        return {
+            key: {"user_id": user_id, "display": display}
+            for key, (user_id, display) in target_candidates.items()
+        }
 
     def _fallback_retrieval_plan(
         self,
@@ -1199,10 +1249,11 @@ class MessageLogger(BaseCog):
             text=text,
             channel_profile_available=bool(channel_profile_block),
         )
-        plan = self._prioritize_mentioned_person_plan(
+        plan = self._prefer_explicit_person_target_plan(
             plan=plan,
             text=text,
             target_candidates=target_candidates,
+            has_reply_chain=bool(msg.reference and msg.reference.resolved),
             user_lines=user_lines,
         )
         if self._needs_web_search_for_accuracy(text) and not any(
@@ -1222,28 +1273,28 @@ class MessageLogger(BaseCog):
         references: list[str] = []
         web_queries: list[str] = []
         used_sources: list[str] = []
-        preferred_mention_target = next(
-            (
-                key
-                for key in target_candidates.keys()
-                if key.startswith("mentioned_")
-            ),
-            None,
-        )
+        preferred_mention_target = self._preferred_person_target_key(target_candidates)
         prefer_mentioned_targets = bool(preferred_mention_target) and bool(msg.mentions)
-        mention_focus_block = ""
-        if prefer_mentioned_targets:
-            mention_lines = [
+        person_focus_block = ""
+        if preferred_mention_target and (msg.mentions or "replied_user" in target_candidates):
+            focus_lines = [
                 "[この会話で明示された人物候補]",
             ]
-            for key, (member_id, display_name) in target_candidates.items():
-                if not key.startswith("mentioned_"):
-                    continue
-                mention_lines.append(f"- {key}: {display_name} ({member_id})")
-            mention_lines.append(
-                "この質問に人物が関わるなら、上の mention 候補を author より優先して解釈すること。"
-            )
-            mention_focus_block = "\n".join(mention_lines) + "\n\n"
+            if msg.mentions:
+                for key, (member_id, display_name) in target_candidates.items():
+                    if not key.startswith("mentioned_"):
+                        continue
+                    focus_lines.append(f"- {key}: {display_name} ({member_id})")
+                focus_lines.append(
+                    "この質問に人物が関わるなら、上の mention 候補を author より優先して解釈すること。"
+                )
+            elif "replied_user" in target_candidates:
+                member_id, display_name = target_candidates["replied_user"]
+                focus_lines.append(f"- replied_user: {display_name} ({member_id})")
+                focus_lines.append(
+                    "返信が基準なら replied_user を author より優先して解釈すること。"
+                )
+            person_focus_block = "\n".join(focus_lines) + "\n\n"
 
         for item in plan:
             source = str(item.get("source") or "").strip().lower()
@@ -1261,6 +1312,22 @@ class MessageLogger(BaseCog):
                 and target == "author"
             ):
                 target = preferred_mention_target or target
+            if (
+                source == "recent_user_history"
+                and self._is_person_lookup_query(text)
+                and preferred_mention_target
+            ):
+                source = "member_history"
+                target = preferred_mention_target
+            if source == "reply_chain" and msg.reference and msg.reference.resolved:
+                body = get_reply_chain(int(limit) if isinstance(limit, int) else 4)
+                title = "直前の会話チェーン"
+                if body:
+                    blocks.append((title, body))
+                    references.extend(self._collect_reference_labels(body))
+                    if source not in used_sources:
+                        used_sources.append(source)
+                continue
 
             if source == "recent_user_history":
                 lines = int(limit) if isinstance(limit, int) else user_lines
@@ -1394,6 +1461,29 @@ class MessageLogger(BaseCog):
             references.extend(self._collect_reference_labels(channel_profile_block))
             if "channel_profile" not in used_sources:
                 used_sources.append("channel_profile")
+
+        if self._is_person_lookup_query(text) or bool(preferred_mention_target):
+            try:
+                log_system_event(
+                    "AI コンテキスト選択",
+                    msg=msg,
+                    level="info",
+                    details={
+                        "preferred_target": preferred_mention_target,
+                        "has_reply_chain": bool(msg.reference and msg.reference.resolved),
+                        "person_lookup": self._is_person_lookup_query(text),
+                        "plan_sources": [
+                            str(item.get("source") or "").strip().lower()
+                            for item in plan
+                        ],
+                        "used_sources": used_sources,
+                        "target_candidates": self._format_target_candidates(
+                            target_candidates
+                        ),
+                    },
+                )
+            except Exception:
+                logger.debug("Failed to log AI context selection", exc_info=True)
 
         for source in used_sources:
             source_ref = f"source:{source}"
@@ -1687,7 +1777,7 @@ class MessageLogger(BaseCog):
         return out
 
     def _is_capability_query(self, text: str) -> bool:
-        t = (text or "").lower()
+        t = re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "").lower()
         keys = (
             "どういう機能",
             "何ができる",
@@ -1713,7 +1803,9 @@ class MessageLogger(BaseCog):
         return any(k in t for k in keys)
 
     def _is_channel_profile_query(self, text: str) -> bool:
-        normalized = normalize_keyword_match_text(text or "")
+        normalized = normalize_keyword_match_text(
+            re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "")
+        )
         capability_terms = (
             "機能",
             "コマンド",
@@ -1750,7 +1842,9 @@ class MessageLogger(BaseCog):
         return any(term in normalized for term in profile_terms)
 
     def _is_runtime_model_query(self, text: str) -> bool:
-        normalized = normalize_keyword_match_text(text or "")
+        normalized = normalize_keyword_match_text(
+            re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "")
+        )
         model_keys = tuple(
             normalize_keyword_match_text(key)
             for key in ("model", "モデル", "aiモデル", "使用モデル", "利用モデル")
@@ -1786,7 +1880,9 @@ class MessageLogger(BaseCog):
         )
 
     def _is_bot_capability_or_game_query(self, text: str) -> bool:
-        normalized = normalize_keyword_match_text(text or "")
+        normalized = normalize_keyword_match_text(
+            re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "")
+        )
         capability_keys = (
             "何ができる",
             "できること",
@@ -1813,7 +1909,9 @@ class MessageLogger(BaseCog):
         )
 
     def _is_local_activity_query(self, text: str) -> bool:
-        normalized = normalize_keyword_match_text(text or "")
+        normalized = normalize_keyword_match_text(
+            re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "")
+        )
         keywords = (
             "最近の行動",
             "最近の発言",
@@ -1833,7 +1931,9 @@ class MessageLogger(BaseCog):
         return any(keyword in normalized for keyword in keywords)
 
     def _is_person_lookup_query(self, text: str) -> bool:
-        normalized = normalize_keyword_match_text(text or "")
+        normalized = normalize_keyword_match_text(
+            re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "")
+        )
         keywords = (
             "どんな人",
             "どんなやつ",
@@ -1865,6 +1965,193 @@ class MessageLogger(BaseCog):
         if max_len > 0 and len(v) > max_len:
             return v[:max_len]
         return v
+
+    def _looks_like_non_natural_language(self, text: str) -> bool:
+        raw = strip_ansi_and_ctrl(text or "").strip()
+        if not raw:
+            return False
+
+        if "```" in raw:
+            return True
+
+        long_tokens = re.findall(r"[A-Za-z0-9+/=_-]{16,}", raw)
+        if long_tokens:
+            return True
+
+        japanese_chars = 0
+        latin_chars = 0
+        symbol_chars = 0
+        for ch in raw:
+            if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff":
+                japanese_chars += 1
+            elif ch.isascii() and ch.isalpha():
+                latin_chars += 1
+            category = unicodedata.category(ch)
+            if category.startswith(("P", "S")):
+                symbol_chars += 1
+
+        length = len(raw)
+        if length >= 16 and japanese_chars == 0:
+            ratio = (latin_chars + symbol_chars) / max(length, 1)
+            if ratio > 0.7:
+                return True
+
+        if japanese_chars == 0 and " " not in raw and length >= 12:
+            if re.fullmatch(r"[A-Za-z0-9._+\-=/]+", raw):
+                return True
+
+        return False
+
+    def _decode_obfuscated_text(self, text: str) -> tuple[str | None, str | None]:
+        raw = strip_ansi_and_ctrl(text or "").strip()
+        if not raw:
+            return None, None
+
+        # まず URL エンコード系を試す
+        if "%" in raw:
+            unquoted = unquote(raw).strip()
+            if unquoted and unquoted != raw:
+                return unquoted, "url"
+
+        compact = re.sub(r"\s+", "", raw)
+        if len(compact) < 12:
+            return None, None
+
+        if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact):
+            return None, None
+
+        for candidate in (compact, compact.replace("-", "+").replace("_", "/")):
+            padded = candidate + "=" * (-len(candidate) % 4)
+            try:
+                decoded = base64.b64decode(padded, validate=True)
+            except Exception:
+                continue
+            try:
+                text = decoded.decode("utf-8").strip()
+            except Exception:
+                continue
+            if text:
+                return text, "base64"
+
+        return None, None
+
+    def _looks_like_disallowed_post_conversion(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        if any(
+            keyword in normalized
+            for keyword in (
+                "初期設定",
+                "内部設定",
+                "隠し設定",
+                "秘密",
+                "instructions",
+                "developer message",
+                "developerprompt",
+                "hidden prompt",
+                "systemmessage",
+            )
+        ):
+            return True
+
+        prompt_patterns = (
+            r"(?:プロンプト|prompt|system prompt|systemprompt|developer prompt|developerprompt).{0,8}"
+            r"(?:教えて|おしえて|見せて|開示|表示|晒|晒して|教えろ|出して)",
+            r"(?:教えて|おしえて|見せて|開示|表示|晒|晒して|教えろ|出して).{0,8}"
+            r"(?:プロンプト|prompt|system prompt|systemprompt|developer prompt|developerprompt)",
+        )
+        return any(re.search(pattern, normalized) for pattern in prompt_patterns)
+
+    async def _send_natural_language_only_reply(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        msg: discord.Message,
+        text: str,
+        source: str,
+    ) -> None:
+        await channel.send(
+            f"{msg.author.mention}\n自然言語で聞いてください。"
+            "コード、エンコード文字列、記号だけの入力には答えません。",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        try:
+            await asyncio.to_thread(
+                log_system_event,
+                "自然言語以外を拒否",
+                msg=msg,
+                level="warning",
+                description="非自然言語の入力を検出したため応答を拒否しました。",
+                details={
+                    "source": source,
+                    "input_preview": text[:120],
+                },
+            )
+        except Exception:
+            logger.debug("Failed to log natural language rejection", exc_info=True)
+
+    async def _prepare_user_text_for_ai(
+        self,
+        text: str,
+        *,
+        max_len: int,
+        source: str,
+        msg: discord.Message,
+        channel: discord.abc.Messageable,
+    ) -> str | None:
+        sanitized = self._sanitize_for_prompt(text, max_len)
+        if not sanitized:
+            return None
+
+        if not self._looks_like_non_natural_language(sanitized):
+            return sanitized
+
+        decoded_text, decode_source = self._decode_obfuscated_text(sanitized)
+        if not decoded_text:
+            await self._send_natural_language_only_reply(
+                channel,
+                msg=msg,
+                text=sanitized,
+                source=source,
+            )
+            return None
+
+        decoded_text = self._sanitize_for_prompt(decoded_text, max_len)
+        if not decoded_text or self._looks_like_non_natural_language(decoded_text):
+            await self._send_natural_language_only_reply(
+                channel,
+                msg=msg,
+                text=decoded_text or sanitized,
+                source=f"{source}:{decode_source or 'decoded'}",
+            )
+            return None
+
+        if self._looks_like_disallowed_post_conversion(decoded_text):
+            await self._send_natural_language_only_reply(
+                channel,
+                msg=msg,
+                text=decoded_text,
+                source=f"{source}:{decode_source or 'decoded'}",
+            )
+            return None
+
+        try:
+            await asyncio.to_thread(
+                log_system_event,
+                "入力を変換",
+                msg=msg,
+                level="info",
+                description="非自然言語の入力をデコードして自然文として扱いました。",
+                details={
+                    "source": source,
+                    "decode_source": decode_source or "unknown",
+                    "input_preview": sanitized[:120],
+                    "converted_preview": decoded_text[:120],
+                },
+            )
+        except Exception:
+            logger.debug("Failed to log input conversion", exc_info=True)
+
+        return decoded_text
 
     def _build_external_context_text(self, contexts: list[ExternalContext]) -> str:
         if not contexts:
@@ -2084,15 +2371,256 @@ class MessageLogger(BaseCog):
     def _should_send_letter_file(self, text: str) -> bool:
         return "ぽっぷこーんきめら" in normalize_keyword_match_text(text or "")
 
+    def _build_file_reply_summary(self, text: str, *, max_chars: int = 120) -> str:
+        normalized = " ".join((text or "").split()).strip()
+        if not normalized:
+            return "概要: なし"
+        summary = normalized[:max_chars]
+        if len(normalized) > max_chars:
+            summary = summary.rstrip() + "..."
+        return f"概要: {summary}"
+
+    def _normalize_code_language(self, language: str) -> str:
+        raw = (language or "").strip().lower()
+        if not raw:
+            return ""
+        aliases = {
+            "py": "Python",
+            "python": "Python",
+            "python3": "Python",
+            "js": "JavaScript",
+            "javascript": "JavaScript",
+            "node": "JavaScript",
+            "ts": "TypeScript",
+            "typescript": "TypeScript",
+            "sh": "Shell",
+            "bash": "Shell",
+            "zsh": "Shell",
+            "shell": "Shell",
+            "powershell": "PowerShell",
+            "ps1": "PowerShell",
+            "sql": "SQL",
+            "json": "JSON",
+            "yaml": "YAML",
+            "yml": "YAML",
+            "toml": "TOML",
+            "html": "HTML",
+            "css": "CSS",
+            "md": "Markdown",
+            "markdown": "Markdown",
+            "c": "C",
+            "cpp": "C++",
+            "c++": "C++",
+            "cc": "C++",
+            "cxx": "C++",
+            "java": "Java",
+            "go": "Go",
+            "golang": "Go",
+            "rust": "Rust",
+            "rb": "Ruby",
+            "ruby": "Ruby",
+            "php": "PHP",
+            "perl": "Perl",
+            "rs": "Rust",
+        }
+        return aliases.get(raw, language.strip())
+
+    def _detect_code_language(self, text: str) -> str:
+        raw = strip_ansi_and_ctrl(text or "").strip()
+        if not raw:
+            return ""
+
+        fenced_blocks = re.findall(r"```([^\n`]*)\n(.*?)```", raw, re.DOTALL)
+        for language, block in fenced_blocks:
+            normalized = self._normalize_code_language(language)
+            if normalized:
+                return normalized
+            candidate = block.strip()
+            if not candidate:
+                continue
+
+        normalized_raw = normalize_keyword_match_text(raw)
+        markers: tuple[tuple[str, str], ...] = (
+            ("Python", "def "),
+            ("Python", "import "),
+            ("Python", "async def "),
+            ("JavaScript", "console.log"),
+            ("JavaScript", "function "),
+            ("JavaScript", "const "),
+            ("JavaScript", "let "),
+            ("TypeScript", ": string"),
+            ("TypeScript", "interface "),
+            ("Shell", "#!/bin/bash"),
+            ("Shell", "#!/usr/bin/env bash"),
+            ("Shell", "curl "),
+            ("Shell", "git "),
+            ("SQL", "select "),
+            ("SQL", "insert into "),
+            ("SQL", "create table "),
+            ("HTML", "<html"),
+            ("HTML", "<div"),
+        )
+        for language, marker in markers:
+            if marker in normalized_raw:
+                return language
+
+        stripped = raw.lstrip()
+        if (
+            stripped.startswith("{")
+            or stripped.startswith("[")
+        ) and ":" in raw and '"' in raw:
+            return "JSON"
+
+        if "```" in raw:
+            return "コード"
+        return ""
+
+    def _infer_code_points(self, text: str) -> list[str]:
+        raw = strip_ansi_and_ctrl(text or "").strip()
+        if not raw:
+            return []
+
+        normalized = normalize_keyword_match_text(raw)
+        points: list[str] = []
+        patterns: list[tuple[str, tuple[str, ...]]] = [
+            ("Discord botの処理", ("discord.", "discord.py", "commands.", "interactions.")),
+            ("HTTP/API通信", ("requests.", "httpx", "aiohttp", "fetch(", "axios", "urllib", "curl ")),
+            ("ファイル入出力", ("open(", "pathlib", "read_text", "write_text", "read_bytes", "write_bytes")),
+            ("データベース操作", ("sqlite", "sqlalchemy", "psycopg", "cursor.execute", "select ", "insert into ")),
+            ("非同期処理", ("async def", "await ", "asyncio", "create_task")),
+            ("CLI引数処理", ("argparse", "click", "typer", "sys.argv")),
+            ("設定/データ変換", ("json", "yaml", "toml", "dict(", "dataclass")),
+            ("関数/クラスで整理", ("def ", "class ")),
+        ]
+        for label, needles in patterns:
+            if any(needle in normalized for needle in needles):
+                points.append(label)
+
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if len(lines) >= 4 and any(line.startswith(("if ", "for ", "while ", "try:", "except ")) for line in lines):
+            points.append("分岐やループを使った処理")
+
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for point in points:
+            if point in seen:
+                continue
+            seen.add(point)
+            deduped.append(point)
+        return deduped[:3]
+
+    def _build_code_reply_summary(self, text: str) -> str:
+        language = self._detect_code_language(text)
+        points = self._infer_code_points(text)
+        if language:
+            head = f"{language}のコードです。"
+        else:
+            head = "コードです。"
+        if not points:
+            return f"{head} ポイント: 構造を見直して、役割ごとに分けて読むと分かりやすいです。"
+        return f"{head} ポイント: {' / '.join(points)}。"
+
+    def _looks_like_code_reply(self, text: str) -> bool:
+        raw = strip_ansi_and_ctrl(text or "").strip()
+        if not raw:
+            return False
+        if "```" in raw:
+            return True
+        normalized = normalize_keyword_match_text(raw)
+        code_markers = (
+            "def ",
+            "class ",
+            "import ",
+            "from ",
+            "if __name__ == \"__main__\"",
+            "console.log",
+            "function ",
+            "const ",
+            "let ",
+            "var ",
+            "#include",
+            "public ",
+            "private ",
+            "protected ",
+            "select ",
+            "insert into ",
+            "create table ",
+            "curl ",
+            "git ",
+            "python ",
+            "pip ",
+            "npm ",
+            "bash ",
+        )
+        if any(marker in normalized for marker in code_markers):
+            return True
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if len(lines) >= 4:
+            code_like_lines = sum(
+                1
+                for line in lines
+                if line.startswith(("    ", "\t", "#", ">", "$"))
+                or re.match(r"^(def|class|import|from|if|for|while|return|const|let|var|function)\b", line)
+                or re.match(r"^[\w./-]+(?:\s+[\w./:=-]+)+$", line)
+            )
+            if code_like_lines >= max(2, len(lines) // 2):
+                return True
+        return False
+
+    def _extract_code_payload(self, text: str) -> str:
+        raw = strip_ansi_and_ctrl(text or "").strip()
+        if not raw:
+            return ""
+        fenced_blocks = re.findall(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", raw, re.DOTALL)
+        if fenced_blocks:
+            payload = "\n\n".join(block.strip("\n") for block in fenced_blocks if block.strip())
+            if payload.strip():
+                return payload.strip()
+        return raw
+
     async def _send_letter_file(self, msg: discord.Message, answer: str) -> None:
         display_name = (
             getattr(msg.author, "display_name", None) or msg.author.name or "user"
         ).strip() or "user"
-        filename = f"{display_name}への手紙.txt"
-        payload = io.BytesIO(answer.encode("utf-8"))
-        discord_file = discord.File(payload, filename=filename)
+        prefix = (
+            f"{msg.author.mention}\n"
+            f"手紙を書きました。{self._build_file_reply_summary(answer)}\n"
+        )
+        if len(prefix) + len(answer) > 2000:
+            await self._send_chunked_text(
+                msg.channel,
+                answer,
+                prefix=prefix,
+            )
+            return
         await msg.channel.send(
-            content=f"{msg.author.mention}\n{answer}",
+            content=f"{prefix}{answer}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    def _should_send_text_file(self, answer: str, *, mention: str | None = None) -> bool:
+        return self._looks_like_code_reply(answer)
+
+    async def _send_text_file_reply(
+        self,
+        channel: discord.abc.Messageable,
+        *,
+        answer: str,
+        mention: str | None = None,
+        filename: str = "kennybot_reply.txt",
+    ) -> None:
+        prefix = f"{mention}\n" if mention else ""
+        is_code_reply = self._looks_like_code_reply(answer)
+        if not is_code_reply:
+            await self._send_chunked_text(channel, answer, prefix=prefix)
+            return
+        payload_text = self._extract_code_payload(answer) if is_code_reply else answer
+        payload = io.BytesIO(payload_text.encode("utf-8"))
+        discord_file = discord.File(payload, filename=filename)
+        summary = self._build_code_reply_summary(answer)
+        message_text = f"{prefix}{summary}" if prefix else summary
+        await channel.send(
+            content=message_text,
             file=discord_file,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -2118,10 +2646,15 @@ class MessageLogger(BaseCog):
         text = normalize_user_text(msg.content or "")
         if not text:
             return
-        text = self._sanitize_for_prompt(
+        text = await self._prepare_user_text_for_ai(
             text,
-            self._cfg_int("security.max_user_message_chars", 1200),
+            max_len=self._cfg_int("security.max_user_message_chars", 1200),
+            source="dm",
+            msg=msg,
+            channel=msg.channel,
         )
+        if not text:
+            return
 
         if self._is_runtime_model_query(text):
             await self._send_runtime_model_reply(
@@ -2294,9 +2827,6 @@ class MessageLogger(BaseCog):
                 tool_queries.extend(retry_queries)
             if not answer:
                 answer = "(応答が空でした)"
-            max_len = self._cfg_int("chat.max_response_length", 1800)
-            if len(answer) > max_len:
-                answer = answer[:max_len] + "\n...(省略)..."
 
             bot_name = self.bot.user.name if self.bot.user else "Bot"
             bot_id = self.bot.user.id if self.bot.user else 0
@@ -2310,18 +2840,25 @@ class MessageLogger(BaseCog):
                 references.extend([url for url in web_urls if url not in references])
                 display_answer = self._build_display_answer_with_references(answer, web_urls)
             store.add_message(bot_name, display_answer, msg.id, author_id=bot_id)
-            final_message = f"{msg.author.mention}\n{display_answer}"
-            if len(final_message) > 2000:
-                await self._send_chunked_text(
+            if self._should_send_text_file(display_answer, mention=msg.author.mention):
+                await self._send_text_file_reply(
                     msg.channel,
-                    display_answer,
-                    prefix=f"{msg.author.mention}\n",
+                    answer=display_answer,
+                    mention=msg.author.mention,
                 )
             else:
-                await msg.channel.send(
-                    final_message,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                final_message = f"{msg.author.mention}\n{display_answer}"
+                if len(final_message) > 2000:
+                    await self._send_chunked_text(
+                        msg.channel,
+                        display_answer,
+                        prefix=f"{msg.author.mention}\n",
+                    )
+                else:
+                    await msg.channel.send(
+                        final_message,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
 
             # 総合ログにAI応答を記録
             log_ai_output(
@@ -2927,7 +3464,7 @@ class MessageLogger(BaseCog):
                 chunk = remaining[:split_at].rstrip()
                 remaining = remaining[split_at:].lstrip()
             content = f"{prefix}{chunk}" if first and prefix else chunk
-            await channel.send(content)
+            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
             first = False
 
     async def _answer_capability_query(
@@ -2940,6 +3477,9 @@ class MessageLogger(BaseCog):
         channel_id: int | None = None,
     ) -> None:
         channel_id = int(channel_id or getattr(channel, "id", 0))
+        guild_id = int(getattr(getattr(source_msg, "guild", None), "id", 0) or 0)
+        if not guild_id:
+            guild_id = int(getattr(getattr(channel, "guild", None), "id", 0) or 0)
         if self._is_ai_channel_rate_limited(channel_id):
             prefix = f"{mention}\n" if mention else ""
             await channel.send(
@@ -2973,7 +3513,7 @@ class MessageLogger(BaseCog):
                     limit=12,
                     capability_only=True,
                     body_limit=None,
-                    guild_id=msg.guild.id,
+                    guild_id=guild_id,
                     channel_id=channel_id,
                 ),
                 self._build_rag_context(
@@ -2981,7 +3521,7 @@ class MessageLogger(BaseCog):
                     limit=6,
                     capability_only=False,
                     body_limit=None,
-                    guild_id=msg.guild.id,
+                    guild_id=guild_id,
                     channel_id=channel_id,
                 ),
             ]
@@ -3312,10 +3852,17 @@ class MessageLogger(BaseCog):
                 return
             await self.bot.process_commands(msg)
             return
-        text = self._sanitize_for_prompt(
+        text = await self._prepare_user_text_for_ai(
             text,
-            self._cfg_int("security.max_user_message_chars", 1200),
+            max_len=self._cfg_int("security.max_user_message_chars", 1200),
+            source="guild",
+            msg=msg,
+            channel=msg.channel,
         )
+        if not text:
+            self._arm_recent_mention_window(msg)
+            await self.bot.process_commands(msg)
+            return
 
         lowered = text.lower()
         start_words = ("議事録開始", "議事録スタート", "minutes start", "start minutes")
@@ -3552,8 +4099,8 @@ class MessageLogger(BaseCog):
                 "role": "user",
                 "content": (
                     (
-                        mention_focus_block
-                        if mention_focus_block
+                        person_focus_block
+                        if person_focus_block
                         else ""
                     )
                     + (
@@ -3616,11 +4163,6 @@ class MessageLogger(BaseCog):
             if not answer:
                 answer = "(応答が空でした)"
 
-            # 応答文字数制限（メンション部分を考慮：メンション約25文字 + 改行）
-            max_len = self._cfg_int("chat.max_response_length", 1800)
-            if len(answer) > max_len:
-                answer = answer[:max_len] + "\n...(省略)..."
-
             # Bot の応答も履歴に保存
             bot_name = self.bot.user.name if self.bot.user else "Bot"
             bot_id = self.bot.user.id if self.bot.user else 0
@@ -3635,22 +4177,28 @@ class MessageLogger(BaseCog):
                 answer_with_refs = self._build_display_answer_with_references(answer, web_urls)
             store.add_message(bot_name, answer_with_refs, msg.id, author_id=bot_id)
 
-            # メッセージ送信（メンションのみ）
-            final_message = f"{msg.author.mention}\n{answer_with_refs}"
-
             if self._should_send_letter_file(text):
                 await self._send_letter_file(msg, answer_with_refs)
             else:
-                if len(final_message) > 2000:
-                    await self._send_chunked_text(
+                if self._should_send_text_file(answer_with_refs, mention=msg.author.mention):
+                    await self._send_text_file_reply(
                         msg.channel,
-                        answer_with_refs,
-                        prefix=f"{msg.author.mention}\n",
+                        answer=answer_with_refs,
+                        mention=msg.author.mention,
                     )
                 else:
-                    await msg.channel.send(
-                        final_message, allowed_mentions=discord.AllowedMentions.none()
-                    )
+                    final_message = f"{msg.author.mention}\n{answer_with_refs}"
+                    if len(final_message) > 2000:
+                        await self._send_chunked_text(
+                            msg.channel,
+                            answer_with_refs,
+                            prefix=f"{msg.author.mention}\n",
+                        )
+                    else:
+                        await msg.channel.send(
+                            final_message,
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",

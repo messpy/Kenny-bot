@@ -57,8 +57,9 @@ def _purge_message_embeddings(db_path: Path) -> int:
 def _purge_runtime_logs(root: Path) -> int:
     total = 0
     for log_path in (
-        root / RUNTIME_LOG_DIR / "messages.log",
+        root / RUNTIME_LOG_DIR / "events.log",
         root / LEGACY_LOG_DIR / "messages.log",
+        root / "runtime" / "old" / "log" / "messages.log",
     ):
         if not log_path.exists():
             continue

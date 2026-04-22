@@ -27,6 +27,7 @@ from src.kennybot.utils.command_catalog import (
     get_slash_command_meta,
 )
 from src.kennybot.utils.event_logger import send_event_log
+from src.kennybot.utils.message_logger import log_system_event
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.vrchat_world import format_vrchat_world_lines, search_vrchat_worlds
@@ -377,45 +378,88 @@ class SlashCommands(commands.Cog):
         vc.play(source, after=_after_playback)
         return None
 
+    def _build_help_text(self) -> str:
+        lines: list[str] = ["Kenny Bot 使い方"]
+        for section in HELP_SECTIONS:
+            lines.append(f"[{section.title}]")
+            lines.extend(section.lines)
+
+        commands_by_category: dict[str, list[str]] = {category: [] for category in COMMAND_CATEGORY_ORDER}
+        for meta in SLASH_COMMANDS.values():
+            commands_by_category.setdefault(meta.category, []).append(
+                f"/{meta.name}: {meta.description}"
+            )
+        for category in COMMAND_CATEGORY_ORDER:
+            lines_for_category = commands_by_category.get(category, [])
+            if lines_for_category:
+                lines.append(f"[コマンド: {category}]")
+                lines.extend(lines_for_category)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _split_text(text: str, limit: int = 1900) -> list[str]:
+        body = (text or "").strip()
+        if not body:
+            return []
+        chunks: list[str] = []
+        while body:
+            if len(body) <= limit:
+                chunks.append(body)
+                break
+            split_at = body.rfind("\n", 0, limit)
+            if split_at < max(200, limit // 2):
+                split_at = body.rfind(" ", 0, limit)
+            if split_at < max(200, limit // 2):
+                split_at = limit
+            chunks.append(body[:split_at].rstrip())
+            body = body[split_at:].lstrip()
+        return chunks
+
+    async def _send_help_text(self, destination, *, ephemeral: bool = False) -> None:
+        text = self._build_help_text()
+        chunks = self._split_text(text)
+        if not chunks:
+            return
+        send_kwargs = {"ephemeral": ephemeral}
+        await destination.send(chunks[0], **send_kwargs)
+        for chunk in chunks[1:]:
+            await destination.send(chunk, **send_kwargs)
+
     @app_commands.command(name=HELP_META.name, description=HELP_META.description)
     async def slash_help(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="Kenny Bot 使い方",
-            description="このBotで使える主な機能です。",
-            color=discord.Color.blurple(),
-        )
-        for section in HELP_SECTIONS:
-            embed.add_field(name=section.title, value="\n".join(section.lines), inline=False)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        interaction_message = getattr(interaction, "message", None)
+        try:
+            await self._send_help_text(interaction.followup, ephemeral=True)
+            log_system_event(
+                "help 実行",
+                msg=interaction_message,
+                level="info",
+                details={
+                    "command": "help",
+                    "user_id": getattr(interaction.user, "id", 0),
+                    "channel_id": interaction.channel_id,
+                    "status": "ok",
+                },
+            )
+        except Exception as e:
+            log_system_event(
+                "help 実行失敗",
+                msg=interaction_message,
+                level="error",
+                details={
+                    "command": "help",
+                    "user_id": getattr(interaction.user, "id", 0),
+                    "channel_id": interaction.channel_id,
+                    "status": "error",
+                    "error": str(e)[:1000],
+                },
+            )
+            raise
 
-        registered_commands = {
-            command.name: command
-            for command in self.bot.tree.walk_commands()
-            if isinstance(command, app_commands.Command)
-        }
-        category_lines: dict[str, list[str]] = {category: [] for category in COMMAND_CATEGORY_ORDER}
-        uncategorized: list[str] = []
-
-        for key, meta in SLASH_COMMANDS.items():
-            if key not in registered_commands:
-                continue
-            line = f"- `/{meta.name}`: {meta.description}"
-            category_lines.setdefault(meta.category, []).append(line)
-
-        known_names = set(SLASH_COMMANDS)
-        for name, command in sorted(registered_commands.items()):
-            if name in known_names:
-                continue
-            uncategorized.append(f"- `/{name}`: {command.description or '説明なし'}")
-
-        for category in COMMAND_CATEGORY_ORDER:
-            lines = category_lines.get(category, [])
-            if lines:
-                embed.add_field(name=f"コマンド: {category}", value="\n".join(lines), inline=False)
-
-        if uncategorized:
-            embed.add_field(name="コマンド: その他", value="\n".join(uncategorized), inline=False)
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    @commands.command(name=HELP_META.name)
+    async def prefix_help(self, ctx: commands.Context):
+        await self._send_help_text(ctx)
 
     def _git_short_commit(self) -> str:
         build_info = load_build_info()
@@ -1953,6 +1997,19 @@ class SlashCommands(commands.Cog):
                 await interaction.response.send_message(text, ephemeral=True)
             return
         logger.exception("Slash command failed", exc_info=error)
+        interaction_message = getattr(interaction, "message", None)
+        log_system_event(
+            "スラッシュコマンド失敗",
+            msg=interaction_message,
+            level="error",
+            details={
+                "command": interaction.command.qualified_name if interaction.command else "unknown",
+                "user_id": getattr(interaction.user, "id", 0),
+                "channel_id": interaction.channel_id,
+                "error": str(error)[:1000],
+                "handled_by": "cog_app_command_error",
+            },
+        )
         await send_event_log(
             self.bot,
             guild=interaction.guild,

@@ -12,7 +12,7 @@ OLLAMA_TIMEOUT_SEC = int(_settings.get("ollama.timeout_sec", 180))
 
 CHAT_HISTORY_LINES = int(_settings.get("chat.history_lines", 100))
 MAX_RESPONSE_LENGTH = int(_settings.get("chat.max_response_length", 1800))
-MAX_RESPONSE_LENGTH_PROMPT = int(_settings.get("chat.max_response_length_prompt", 500))
+MAX_RESPONSE_LENGTH_PROMPT = int(_settings.get("chat.max_response_length_prompt", 1800))
 KEYWORD_REACTIONS = dict(_settings.get("keyword_reactions", {}))
 
 _user_nicks_raw = dict(_settings.get("user_nicknames", {}))

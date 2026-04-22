@@ -31,7 +31,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "history_max_messages": 1000,
             "history_retention_days": 30,
             "max_response_length": 1800,
-            "max_response_length_prompt": 500,
+            "max_response_length_prompt": 1800,
         },
         "summarize_recent_default_messages": 30,
         "summarize_recent": {

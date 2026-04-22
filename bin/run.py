@@ -6,21 +6,26 @@
 # - bot.run()
 
 import sys
+import logging
 from pathlib import Path
 
 # プロジェクトルートを sys.path に追加（絶対インポート対応）
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.kennybot.utils.env import load_env_file, require_env
+from src.kennybot.utils.logger import setup_logging
 from src.kennybot.utils.single_instance import SingleInstanceError, acquire_lock
 from src.kennybot.bootstrap import create_bot
 
 
 def main():
     """Discord Bot メイン実行"""
+    setup_logging()
+    logger = logging.getLogger("kennybot.bootstrap")
     try:
         acquire_lock(Path("data") / "kennybot.lock")
     except SingleInstanceError as exc:
+        logger.warning("Another kennybot instance is already running: %s", exc)
         print(f"[BOOT] Another kennybot instance is already running: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 

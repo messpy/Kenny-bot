@@ -3,6 +3,8 @@
 
 import logging
 import os
+import time
+import traceback
 
 import discord
 from discord import app_commands
@@ -28,6 +30,7 @@ from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.voice_recv_patch import apply_voice_recv_resilience_patch
 from src.kennybot.utils.ai_progress import AIProgressTracker
+from src.kennybot.utils.logger import install_asyncio_exception_handler
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,7 @@ class MyBot(commands.Bot):
         )
         self.meeting_minutes = MeetingMinutesManager()
         self.ai_progress_tracker = AIProgressTracker(ai_concurrency)
+        self._recent_event_errors: dict[tuple[str, str], float] = {}
 
         # AI: Ollama（2つの方法を用意）
         # 方法1: subprocess/asyncio ベース（旧）
@@ -198,6 +202,9 @@ class MyBot(commands.Bot):
             self._tree_synced = True
         logger.info("=== Bot Ready as %s ===", self.user)
 
+    async def setup_hook(self) -> None:
+        install_asyncio_exception_handler(self.loop)
+
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         logger.exception("Unhandled app command error", exc_info=error)
         await send_event_log(
@@ -223,6 +230,15 @@ class MyBot(commands.Bot):
             logger.exception("Failed to send global slash command error response")
 
     async def on_error(self, event_method: str, *args, **kwargs):
+        tb = traceback.format_exc(limit=8)
+        tb_key = "\n".join(tb.strip().splitlines()[-4:]) if tb else ""
+        error_key = (event_method, tb_key)
+        now = time.monotonic()
+        last_seen = self._recent_event_errors.get(error_key, 0.0)
+        if now - last_seen < 3.0:
+            logger.warning("Suppressed duplicate Discord event error: %s", event_method)
+            return
+        self._recent_event_errors[error_key] = now
         logger.exception("Unhandled Discord event error: %s", event_method)
         await send_event_log(
             self,
@@ -231,5 +247,6 @@ class MyBot(commands.Bot):
             description="Discord イベント処理中に未処理例外が発生しました。",
             fields=[
                 ("イベント", event_method, True),
+                ("例外", tb[:1000] if tb else "traceback unavailable", False),
             ],
         )
