@@ -187,6 +187,152 @@ flowchart LR
   - `どんな人？` 系は人物本人の発言履歴とプロフィールを優先する
   - `このサーバーは何のやつ？` 系は場所プロフィールを優先する
 
+### 5.5 現在の会話フロー詳細
+
+現在の会話処理は、単純な「ユーザー入力 -> LLM 応答」ではなく、以下の順で段階的に処理される。
+
+1. `on_message` で受信
+   - Bot 自身の発言や対象外メッセージを除外する
+   - 文字正規化、制御文字除去、メンション判定を行う
+2. 不満・不具合の検出
+   - `txt`, `text`, `添付`, `不具合`, `反映`, `動いてない`, `Unknown interaction` などの指摘を検出する
+   - Bot への不満と判断した場合は `codex修正モード開始` を記録する
+   - この記録は `events.log` と Discord 管理ログの両方を対象にする
+   - その際、直前のユーザープロンプトと直前の Bot 応答を履歴から抜き出し、修正対象の文脈として一緒に記録する
+   - 修正が必要なケースでは、`判定AI -> ユーザー返信AI -> Codex依頼AI` の 3 段で処理する
+3. 取得プランの決定
+   - まず AI に `retrieval_plan_prompt` を渡し、どの情報源を使うかを JSON で返させる
+   - 失敗時は `_fallback_retrieval_plan()` がルールベースで代替する
+   - `web_search` は「最新」「今」「今日」「ニュース」など、ローカル情報だけでは危ない場合に追加される
+4. コンテキスト収集
+   - `recent_user_history`
+   - `member_history`
+   - `recent_turns`
+   - `reply_chain`
+   - `channel_profile`
+   - `local_knowledge`
+   - `bot_command_catalog`
+   - `bot_game_catalog`
+   - `runtime_model`
+   - `vrchat_world`
+   - `web_search`
+   を必要に応じて積み上げる
+5. プロンプト組み立て
+   - `PROMPT_TEMPLATE` に収集した履歴を埋める
+   - `system_message` を先頭に付け、現在日時、チャンネル情報、注意事項を与える
+   - AI に渡すツール一覧を組み立てる
+6. AI に tool call を許可して応答生成
+   - `web_search` / `web_fetch` を含むホワイトリスト型のツールだけを使わせる
+   - モデルが `tool_calls` を返したら Python 側が実関数を実行する
+   - `web_search` / `web_fetch` 実行時は管理ログへも記録する
+   - tool 結果をモデルへ戻し、最大数ラウンドまで再実行する
+   - 修正モードが有効な場合は `codex_mode` として別経路に分岐し、ユーザー返信用と Discord 管理システムログ向けの Codex 依頼を分ける
+7. 応答後処理
+   - 返答本文を無害化・整形する
+   - 長文は分割送信する
+   - コード以外の `txt` 添付は使わない
+   - 必要な場合だけコード寄り返信を整形する
+
+```mermaid
+flowchart TD
+    A[on_message] --> B{Bot 自身 / 対象外?}
+    B -- Yes --> Z[Ignore]
+    B -- No --> C[Text Normalize]
+    C --> D{Fix request?}
+    D -- Yes --> D1[codex修正モード開始を記録]
+    D -- No --> E[Build retrieval plan]
+    D1 --> E
+    E --> F{AI plan ok?}
+    F -- Yes --> G[Collect contexts]
+    F -- No --> H[Fallback retrieval plan]
+    H --> G
+    G --> I[Assemble prompt]
+    I --> J[LLM chat with tools]
+    J --> K{tool_calls?}
+    K -- Yes --> L[Run whitelisted tool functions]
+    L --> J
+    K -- No --> M[Sanitize / chunk response]
+    M --> N[Discord reply]
+```
+
+### 5.6 取得プランナーの役割
+
+取得プランナーは、AI 応答前に「何を参照するか」を決める層である。
+
+- まず JSON で取得ソース一覧を返させる
+- 明示メンションがある場合は、`mentioned_1`, `mentioned_2`, `replied_user` を優先する
+- `この人`, `その人`, `最後の投稿の人` などは対象人物の履歴とプロフィールを優先する
+- `このサーバー`, `このチャンネル`, `このワールド` は `channel_profile` を優先する
+- Bot 自身への不満・不具合・反映漏れは `local_knowledge`, `runtime_model`, `bot_command_catalog` を優先し、`web_search` は原則使わない
+
+この層の失敗は fallback で吸収するが、fallback も完全な推測ではなく、既知のルールに基づいて最小限の情報を選ぶ。
+
+### 5.7 Web 検索・関数呼び出し設計
+
+web 検索は「AI が必要と判断したら Python 側で実行する」方式である。LLM に任意コード実行権限は与えていない。
+
+- `src/kennybot/cogs/message_logger.py` でツール一覧を組み立てる
+- ツールはホワイトリスト方式で、`web_search`, `web_fetch`, `local_knowledge` 系の補助関数だけを公開する
+- モデルが `tool_calls` を返したら、Python 側が関数名を照合して実行する
+- 実行結果を `tool` メッセージとして再投入し、必要なら再度 tool call を回す
+- `web_search` / `web_fetch` の使用は `events.log` と管理ログへ記録する
+- Gemini 系でも同じ構造で、`functionDeclarations` と `functionCall` に変換しているだけである
+
+#### codex_mode
+
+- `codex_mode=true` のときは、通常の AI 応答とは別に Codex 依頼ログを作る
+- `codex_mode` では、直前のユーザープロンプトと直前の Bot 応答を含む修正依頼プロンプトを生成し、別ログに送る
+- `codex_mode` の出力先は、ユーザー向け返信とは分離した Discord 管理システムログとする
+- `codex_mode` の判定は、苦情・不具合・反映漏れ・起動失敗などの修正対象イベントをトリガーにする
+
+`参照概要` と `参照詳細` の違いは次の通り。
+
+- `参照概要`
+  - 参照した情報源を短くまとめた要約
+  - 何を見たかを一目で把握するためのラベル群であり、詳細本文ではない
+- `参照詳細`
+  - 実際に参照した候補やツール結果の詳細を細かく出す
+  - メッセージ ID、URL、ツール名、web 検索クエリ、個別の参照断片を含む
+
+### 5.8 エラーと修正モード
+
+エラーと不満は、できるだけ早い段階でログ化する。
+
+- 未捕捉例外
+  - `sys.excepthook`
+  - `threading.excepthook`
+  - asyncio loop exception handler
+- Discord イベント例外
+  - `on_error`
+  - `on_app_command_error`
+  - `cog_app_command_error`
+- ユーザーの指摘
+  - Bot への不満、反映漏れ、`txt` 化、`Unknown interaction`、動作不良など
+
+これらは `events.log` に残し、必要なら Discord 管理ログにも送る。
+ユーザー指摘が Bot の挙動修正対象だと判定された場合は `codex修正モード開始` として扱い、`issue` と `planned_fix` を併記する。
+加えて、直前のユーザープロンプトと直前の Bot 応答を必ず参照し、どの応答に対する不満かを切り分けられるようにする。
+修正モードの目的は「指摘内容を記録すること」ではなく、「次に直すべき実装箇所を明確にすること」である。
+
+修正モードの内部は次の 3 段に分かれる。
+
+1. 判定AI
+   - ユーザーの発話が修正対象か、どの領域が問題かを判断する
+   - 直前のユーザープロンプトと直前の Bot 応答を入力に含める
+2. ユーザー返信AI
+   - ユーザーに返す短い説明だけを生成する
+   - 内部実装や Codex の詳細は出さない
+3. Codex依頼AI
+   - 修正担当に渡す依頼文を生成する
+   - 問題、直前の入出力、対象領域、予定修正を含める
+
+### 5.9 現行の注意点
+
+- `web_search` は万能ではなく、ローカル情報で十分なら使わない
+- `txt` はコード以外では使わない
+- 修正モードはユーザー指摘の自動仕分けであり、無関係な外部検索を増やすためのものではない
+- 設計上の判断は `doc/` に、利用者向けの案内は `README.md` に分ける
+
 ## 6. メッセージ保存設計
 
 メッセージ保存は二層で行う。

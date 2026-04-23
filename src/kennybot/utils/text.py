@@ -136,6 +136,7 @@ def looks_like_web_search_artifact(text: str) -> bool:
         "補足",
         "参考URL",
         "出典元",
+        "参照詳細",
         "検索結果の要約",
     )
     if not any(marker in raw for marker in summary_markers):

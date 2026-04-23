@@ -40,16 +40,16 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
     HelpSection(
         title="チャンネル知識",
         lines=(
-            "- チャンネル固有のQ&Aを `data/channel_rag/<channel_id>/faq.json` に蓄積可能",
-            "- 追加したQ&Aはそのチャンネルのメンション応答や機能説明の文脈で参照される",
-            "- 直接ファイルを編集して管理する",
+            "- チャンネル固有のQ&Aを蓄積して参照可能",
+            "- 追加したQ&Aは会話応答や機能説明の文脈で参照される",
+            "- 管理者が設定可能",
         ),
     ),
     HelpSection(
         title="議事録機能",
         lines=(
-            "- VC参加者が `/minutes_start` で開始",
-            "- `/minutes_stop` またはVC無人で停止",
+            "- VC参加者が開始できる",
+            "- VC無人または停止コマンドで終了する",
             "- Google Speech-to-Text を優先して文字起こし",
             "- Google失敗時だけ faster-whisper にフォールバック",
             "- 音声を文字起こしし、長文はAI要約して投稿",

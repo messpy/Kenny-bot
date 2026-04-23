@@ -181,8 +181,8 @@ class MessageStore:
                     try:
                         # "2026-02-17T23:48:00+09:00" → "23:48"
                         time_str = timestamp.split("T")[1][:5]
-                    except:
-                        pass
+                    except Exception:
+                        logger.exception("Failed to parse timestamp in recent context")
 
                 # ユーザーIDがあれば表示（同じ名前の人の区別用）
                 author_display = author
@@ -195,8 +195,8 @@ class MessageStore:
                     context_lines.append(f"{author_display}: {content}")
 
             return "\n".join(context_lines)
-        except Exception as e:
-            logger.error(f"Failed to get recent context: {e}")
+        except Exception:
+            logger.exception("Failed to get recent context")
             return ""
 
     def get_recent_messages(
@@ -218,8 +218,8 @@ class MessageStore:
             if lines > 0:
                 messages = messages[-lines:]
             return messages
-        except Exception as e:
-            logger.error(f"Failed to get recent messages: {e}")
+        except Exception:
+            logger.exception("Failed to get recent messages")
             return []
 
     def format_messages(self, messages: List[dict]) -> str:
@@ -240,7 +240,7 @@ class MessageStore:
                     try:
                         time_str = timestamp.split("T")[1][:5]
                     except Exception:
-                        pass
+                        logger.exception("Failed to parse timestamp in formatted messages")
 
                 author_display = author
                 if author_id:
@@ -251,8 +251,8 @@ class MessageStore:
                 else:
                     context_lines.append(f"{author_display}: {content}")
             return "\n".join(context_lines)
-        except Exception as e:
-            logger.error(f"Failed to format messages: {e}")
+        except Exception:
+            logger.exception("Failed to format messages")
             return ""
 
     def get_recent_context_for_user(self, author_id: int, lines: int = 5) -> str:

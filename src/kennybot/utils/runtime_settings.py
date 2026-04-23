@@ -17,7 +17,7 @@ from src.kennybot.utils.scoped_data import SCOPED_DATA_DIR, guild_settings_path
 DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
         "ollama": {
-            "model_default": "gpt-oss:120b",
+            "model_default": "gemini-2.5-flash",
             "model_chat": "gpt-oss:120b",
             "model_summary": "gpt-oss:120b",
             "model_embedding": "embeddinggemma",

@@ -5,9 +5,9 @@ from src.kennybot.utils.runtime_settings import get_settings
 
 _settings = get_settings()
 
-OLLAMA_MODEL_DEFAULT = str(_settings.get("ollama.model_default", "gpt-oss:120b"))
-OLLAMA_MODEL_CHAT = str(_settings.get("ollama.model_chat", OLLAMA_MODEL_DEFAULT))
-OLLAMA_MODEL_SUMMARY = str(_settings.get("ollama.model_summary", OLLAMA_MODEL_DEFAULT))
+OLLAMA_MODEL_DEFAULT = str(_settings.get("ollama.model_default", "gemini-2.5-flash"))
+OLLAMA_MODEL_CHAT = str(_settings.get("ollama.model_chat", "gpt-oss:120b"))
+OLLAMA_MODEL_SUMMARY = str(_settings.get("ollama.model_summary", "gpt-oss:120b"))
 OLLAMA_TIMEOUT_SEC = int(_settings.get("ollama.timeout_sec", 180))
 
 CHAT_HISTORY_LINES = int(_settings.get("chat.history_lines", 100))

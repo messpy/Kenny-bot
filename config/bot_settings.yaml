@@ -1,7 +1,7 @@
 global:
   ollama:
     model_default: gemini-2.5-flash
-    model_chat: mistral-large-3:675b-cloud
+    model_chat: gpt-oss:120b
     model_summary: gpt-oss:120b
     model_embedding: embeddinggemma
     timeout_sec: 180
@@ -19,11 +19,9 @@ global:
     history_fetch_limit: 300
     transcript_lines_limit: 120
     max_messages: 300
-    max_minutes: 720
   kenny_chat:
     cooldown_seconds: 12
     block_invite_and_mass_mention: true
-    cross_server_bridge: false
   security:
     ai_max_concurrency: 2
     ai_channel_cooldown_seconds: 4
@@ -39,7 +37,7 @@ global:
     max_minutes: 90
     audio_max_total_mb: 0
     audio_max_user_mb: 0
-    transcription_provider: whisper
+    transcription_provider: google
     google_language_code: ja-JP
     google_chunk_seconds: 20
     google_timeout_sec: 90
@@ -64,9 +62,7 @@ global:
     おやすみ: 🌙
     天使: て、て、て、天使の羽👼
   reaction_roles:
-    bindings:
-      '1489788137512108203':
-        😂: 1162405024475922523
+    bindings: {}
   tts:
     voicevox_url: http://127.0.0.1:50021
     speaker_id: 3
@@ -84,5 +80,4 @@ global:
     auto_cook_formats:
     - flac
     - mix
-  summarize_recent_default_minutes: 30
 guilds: {}
