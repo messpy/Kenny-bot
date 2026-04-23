@@ -18,7 +18,8 @@ Bot の説明、チャンネル内ルール、よくある質問、返答方針�
 追加したい内容はこのファイルを直接編集して反映する。
 
 ## 説明ルール
-Bot 自身の機能やコマンドの使い方を説明するときは、README とこのファイルに書いてある確認済み情報を優先する。
+Bot 自身の機能やコマンドの使い方を説明するときは、README と `src/kennybot/utils/command_catalog.py` にある確認済み情報を一次ソースとして優先する。
+このファイルは補助メモなので、README や command_catalog にないコマンド名や引数をここから補完しない。
 未確認の表示項目、引数、出力例を作って補わない。
 実装にない項目は「現状の実装では出ない」と明言してよい。
 使い方を聞かれたら、まずコマンド名、必要な引数、実行条件、返ってくる内容を短く案内する。
@@ -38,7 +39,7 @@ Bot 自身の機能やコマンドの使い方を説明するときは、README 
   - 稼働時間
   - 参加サーバー数
   - 総メンバー数
-  - 利用モデル
+  - 会話モデル
   - Version
   - Commit
 - 現状の実装では出ないもの:
@@ -54,6 +55,26 @@ Bot 自身の機能やコマンドの使い方を説明するときは、README 
   - `request`: 要約の仕方の要望
 - 返る内容: このチャンネルの直近メッセージ要約
 - 補足: このチャンネルで実行するコマンド
+
+### `/set_recent_window`
+- 使い方: `/set_recent_window window:<件数>`
+- 返る内容: 要約の既定件数を更新した結果
+
+### `/config_show`
+- 使い方: `/config_show`
+- 返る内容: 現在の設定値一覧
+
+### `/config_set`
+- 使い方: `/config_set key:<設定名> value:<設定値>`
+- 返る内容: 設定更新結果
+
+### `/model_list`
+- 使い方: `/model_list`
+- 返る内容: 利用可能なモデル一覧
+
+### `/model_change`
+- 使い方: `/model_change model:<モデル名>`
+- 返る内容: モデル切替結果
 
 ### `/minutes_start`
 - 使い方: `/minutes_start`
@@ -104,12 +125,28 @@ Bot 自身の機能やコマンドの使い方を説明するときは、README 
   - 話者
   - 待機キュー件数
 
+### `/reaction_role_set`
+- 使い方: `/reaction_role_set`
+- 返る内容: リアクションロール設定の追加結果
+
+### `/reaction_role_remove`
+- 使い方: `/reaction_role_remove`
+- 返る内容: リアクションロール設定の解除結果
+
+### `/reaction_role_list`
+- 使い方: `/reaction_role_list`
+- 返る内容: リアクションロール設定一覧
+
 ### `/group_match`
 - 使い方: `/group_match size:<2 or 3>`
 - 任意引数:
   - `visibility`
   - `title`
 - 返る内容: リアクション参加型の募集メッセージ
+
+### `/vc_control`
+- 使い方: `/vc_control`
+- 返る内容: VC 操作パネル
 
 ### `/timer`
 - 使い方: `/timer`

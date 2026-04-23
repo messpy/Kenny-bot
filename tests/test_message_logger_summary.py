@@ -161,6 +161,37 @@ async def main():
             },
         )
 
+    def test_collect_message_ids_deduplicates_and_preserves_order(self) -> None:
+        messages = [
+            {"id": 101},
+            {"id": "102"},
+            {"id": 101},
+            {"id": 0},
+            {"id": None},
+            {"id": 103},
+        ]
+
+        ids = self.logger._collect_message_ids(messages)
+
+        self.assertEqual(ids, ["101", "102", "103"])
+
+    def test_sanitize_user_visible_answer_rewrites_reference_detail_label(self) -> None:
+        text = "参照概要と参照詳細を確認してください。"
+
+        sanitized = self.logger._sanitize_user_visible_answer(text)
+
+        self.assertIn("参照元の概要", sanitized)
+        self.assertIn("参照元の詳細", sanitized)
+
+    def test_sanitize_user_visible_answer_keeps_confirmed_commands_only(self) -> None:
+        text = "関連コマンド: /help /totally_fake_command"
+
+        sanitized = self.logger._sanitize_user_visible_answer(text)
+
+        self.assertIn("/help", sanitized)
+        self.assertIn("totally_fake_command", sanitized)
+        self.assertNotIn("/totally_fake_command", sanitized)
+
     def test_decode_obfuscated_text_decodes_base64(self) -> None:
         decoded, source = self.logger._decode_obfuscated_text("44K344K544OG44OgUHJvbXB0")
 

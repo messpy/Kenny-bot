@@ -27,7 +27,7 @@ from src.kennybot.utils.command_catalog import (
     get_slash_command_meta,
 )
 from src.kennybot.utils.event_logger import send_event_log
-from src.kennybot.utils.message_logger import log_system_event
+from src.kennybot.utils.message_logger import log_system_event, log_codex_repair_mode
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.vrchat_world import format_vrchat_world_lines, search_vrchat_worlds
@@ -775,7 +775,14 @@ class SlashCommands(commands.Cog):
         ping_ms = round(self.bot.latency * 1000, 1)
         commit = self._git_short_commit()
         version = self._git_version()
-        ai_model = self._display_model_name(str(_settings.get("ollama.model_default", "gpt-oss:120b")))
+        ai_model = self._display_model_name(
+            str(
+                _settings.get(
+                    "ollama.model_default",
+                    "gemini-2.5-flash",
+                )
+            )
+        )
 
         embed = discord.Embed(
             title="Kenny Bot 情報",
@@ -787,7 +794,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="稼働時間", value=f"{h}h {m}m {s}s", inline=True)
         embed.add_field(name="参加サーバー", value=str(guild_count), inline=True)
         embed.add_field(name="総メンバー数(概算)", value=str(member_count), inline=True)
-        embed.add_field(name="利用モデル", value=f"`{ai_model}`", inline=True)
+        embed.add_field(name="会話モデル", value=f"`{ai_model}`", inline=True)
         embed.add_field(name="Version", value=f"`{version}`", inline=True)
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1998,6 +2005,14 @@ class SlashCommands(commands.Cog):
             return
         logger.exception("Slash command failed", exc_info=error)
         interaction_message = getattr(interaction, "message", None)
+        log_codex_repair_mode(
+            msg=interaction_message,
+            trigger="slash_command_error",
+            issue=str(error),
+            planned_fix="スラッシュコマンド例外と管理ログの記録経路を再確認する",
+            target_area=interaction.command.qualified_name if interaction.command else "unknown",
+            level="error",
+        )
         log_system_event(
             "スラッシュコマンド失敗",
             msg=interaction_message,

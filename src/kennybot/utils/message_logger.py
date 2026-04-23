@@ -49,6 +49,7 @@ def log_ai_output(
     msg: Any | None = None,
     error: str | None = None,
     references: list[str] | None = None,
+    reference_details: list[str] | None = None,
     web_queries: list[str] | None = None,
 ) -> None:
     author_name = getattr(author, "display_name", None) or getattr(author, "name", "unknown")
@@ -73,6 +74,11 @@ def log_ai_output(
     ]
     if normalized_references:
         parts.append(f"references={normalized_references!r}")
+    normalized_reference_details = [
+        str(detail).strip() for detail in reference_details or [] if str(detail).strip()
+    ]
+    if normalized_reference_details:
+        parts.append(f"reference_details={normalized_reference_details!r}")
     normalized_queries = [str(query).strip() for query in web_queries or [] if str(query).strip()]
     if normalized_queries:
         parts.append(f"web_queries={normalized_queries!r}")
@@ -100,3 +106,99 @@ def log_system_event(
         parts.append(f"details={details!r}")
     line = " ".join(parts)
     _append_line(line)
+
+
+def log_fix_request(
+    title: str,
+    *,
+    msg: Any | None = None,
+    issue: str,
+    planned_fix: str,
+    target_area: str = "",
+    evidence: str = "",
+    previous_prompt: str = "",
+    previous_response: str = "",
+    level: str = "warning",
+) -> None:
+    details = {
+        "issue": issue[:500],
+        "planned_fix": planned_fix[:500],
+    }
+    if target_area:
+        details["target_area"] = target_area[:200]
+    if evidence:
+        details["evidence"] = evidence[:300]
+    if previous_prompt:
+        details["previous_prompt"] = previous_prompt[:500]
+    if previous_response:
+        details["previous_response"] = previous_response[:500]
+    log_system_event(
+        title,
+        msg=msg,
+        level=level,
+        description="ユーザーの指摘に基づく修正対象を記録しました。",
+        details=details,
+    )
+
+
+def log_codex_repair_mode(
+    *,
+    msg: Any | None = None,
+    trigger: str,
+    issue: str,
+    planned_fix: str,
+    target_area: str = "",
+    previous_prompt: str = "",
+    previous_response: str = "",
+    level: str = "warning",
+) -> None:
+    details = {
+        "trigger": trigger[:80],
+        "issue": issue[:500],
+        "planned_fix": planned_fix[:500],
+    }
+    if target_area:
+        details["target_area"] = target_area[:200]
+    if previous_prompt:
+        details["previous_prompt"] = previous_prompt[:500]
+    if previous_response:
+        details["previous_response"] = previous_response[:500]
+    log_system_event(
+        "codex修正モード開始",
+        msg=msg,
+        level=level,
+        description="AI 判定で修正モードへ切り替えました。",
+        details=details,
+    )
+
+
+def log_codex_request(
+    *,
+    msg: Any | None = None,
+    issue: str,
+    codex_prompt: str,
+    target_area: str = "",
+    planned_fix: str = "",
+    previous_prompt: str = "",
+    previous_response: str = "",
+    level: str = "warning",
+) -> None:
+    details = {
+        "issue": issue[:500],
+        "codex_prompt": codex_prompt[:2000],
+    }
+    if target_area:
+        details["target_area"] = target_area[:200]
+    if planned_fix:
+        details["planned_fix"] = planned_fix[:500]
+    if previous_prompt:
+        details["previous_prompt"] = previous_prompt[:500]
+    if previous_response:
+        details["previous_response"] = previous_response[:500]
+    log_system_event(
+        "codex依頼",
+        msg=msg,
+        level=level,
+        description="Codex に渡す修正依頼を記録しました。",
+        details=details,
+    )

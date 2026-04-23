@@ -86,12 +86,32 @@ async def send_event_log(
 ) -> discord.Message | None:
     message: discord.Message | None = None
     channel = None
+    if guild is not None:
+        try:
+            scoped_channel_id = source_channel_id or 0
+            summary_lines = [
+                f"title={title}",
+                f"description={description}",
+                f"level={level}",
+                f"channel_id={scoped_channel_id or 0}",
+            ]
+            for name, value, inline in local_fields or fields or ():
+                if value:
+                    summary_lines.append(f"{name}={value[:240]}")
+            summary = " | ".join(summary_lines)
+            ALL_EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with ALL_EVENTS_LOG.open("a", encoding="utf-8") as fp:
+                fp.write(summary.rstrip("\n") + "\n")
+        except Exception:
+            logger.exception("Failed to write scoped event log: %s", title)
+
     if send_discord:
         if guild is not None and channel_kind:
             channel = resolve_log_channel(guild, channel_kind)
         if channel is None:
             channel = await resolve_event_log_channel(bot, guild)
         if channel is None:
+            logger.warning("No event log channel resolved for title=%s guild=%s", title, getattr(guild, "id", 0) if guild else 0)
             return None
         if source_channel_id is not None and int(source_channel_id) == int(getattr(channel, "id", 0)):
             return None
@@ -113,24 +133,5 @@ async def send_event_log(
         except Exception:
             logger.exception("Failed to send event log: %s", title)
             return None
-
-    if guild is not None:
-        try:
-            scoped_channel_id = source_channel_id or getattr(channel, "id", None)
-            summary_lines = [
-                f"title={title}",
-                f"description={description}",
-                f"level={level}",
-                f"channel_id={scoped_channel_id or 0}",
-            ]
-            for name, value, inline in local_fields or fields or ():
-                if value:
-                    summary_lines.append(f"{name}={value[:240]}")
-            summary = " | ".join(summary_lines)
-            ALL_EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
-            with ALL_EVENTS_LOG.open("a", encoding="utf-8") as fp:
-                fp.write(summary.rstrip("\n") + "\n")
-        except Exception:
-            logger.exception("Failed to write scoped event log: %s", title)
 
     return message

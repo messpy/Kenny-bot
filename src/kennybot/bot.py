@@ -27,6 +27,7 @@ from src.kennybot.cogs.tts_reader import TTSReader
 from src.kennybot.cogs.game_commands import GameCommands
 from src.kennybot.utils.meeting_minutes import MeetingMinutesManager
 from src.kennybot.utils.event_logger import send_event_log
+from src.kennybot.utils.message_logger import log_codex_repair_mode
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.voice_recv_patch import apply_voice_recv_resilience_patch
 from src.kennybot.utils.ai_progress import AIProgressTracker
@@ -152,6 +153,7 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         """Bot セットアップ（Cog登録）"""
+        install_asyncio_exception_handler(self.loop)
         self.tree.on_error = self.on_app_command_error
         await self.add_cog(VoiceLogger(self))
         await self.add_cog(MemberLogger(self))
@@ -167,20 +169,22 @@ class MyBot(commands.Bot):
         """Bot 起動完了"""
         if not self._tree_synced:
             try:
-                global_commands = list(self.tree.get_commands())
-                self.tree.clear_commands(guild=None)
-                await self.tree.sync()
-                logger.info("Cleared remote global slash commands")
-                for command in global_commands:
-                    self.tree.add_command(command)
+                global_synced = await self.tree.sync()
+                logger.info("Global slash commands synced: count=%d", len(global_synced))
                 for guild in self.guilds:
                     try:
-                        self.tree.clear_commands(guild=guild)
                         self.tree.copy_global_to(guild=guild)
                         guild_synced = await self.tree.sync(guild=guild)
                         logger.info("Guild slash commands synced: guild=%s count=%d", guild.id, len(guild_synced))
                     except Exception:
                         logger.exception("Failed to sync guild slash commands: %s", guild.id)
+                        log_codex_repair_mode(
+                            trigger="slash_sync_error",
+                            issue=f"guild={guild.id} slash command sync failed",
+                            planned_fix="スラッシュコマンド同期の失敗原因を確認し、再試行や分割同期の必要性を見直す",
+                            target_area=f"slash sync guild={guild.id}",
+                            level="error",
+                        )
                         await send_event_log(
                             self,
                             guild=guild,
@@ -193,6 +197,13 @@ class MyBot(commands.Bot):
                         )
             except Exception:
                 logger.exception("Failed to sync slash commands")
+                log_codex_repair_mode(
+                    trigger="slash_sync_error",
+                    issue="global slash command sync failed",
+                    planned_fix="グローバルスラッシュコマンド同期の失敗原因を確認し、再試行や同期順序を見直す",
+                    target_area="slash sync global",
+                    level="error",
+                )
                 await send_event_log(
                     self,
                     level="error",
@@ -202,11 +213,16 @@ class MyBot(commands.Bot):
             self._tree_synced = True
         logger.info("=== Bot Ready as %s ===", self.user)
 
-    async def setup_hook(self) -> None:
-        install_asyncio_exception_handler(self.loop)
-
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         logger.exception("Unhandled app command error", exc_info=error)
+        log_codex_repair_mode(
+            msg=getattr(interaction, "message", None),
+            trigger="app_command_error",
+            issue=str(error),
+            planned_fix="スラッシュコマンド例外の再発防止と詳細ログ記録を確認する",
+            target_area=interaction.command.qualified_name if interaction.command else "unknown",
+            level="error",
+        )
         await send_event_log(
             self,
             guild=interaction.guild,
@@ -240,6 +256,13 @@ class MyBot(commands.Bot):
             return
         self._recent_event_errors[error_key] = now
         logger.exception("Unhandled Discord event error: %s", event_method)
+        log_codex_repair_mode(
+            trigger="discord_event_error",
+            issue=tb or event_method,
+            planned_fix="Discord イベント例外の詳細を追跡し、再発する箇所を修正する",
+            target_area=event_method,
+            level="error",
+        )
         await send_event_log(
             self,
             level="error",
