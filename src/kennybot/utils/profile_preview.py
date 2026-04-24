@@ -3,18 +3,51 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from src.kennybot.utils.local_rag import LocalRAG, RagChunk
+from src.kennybot.utils.local_rag import RagChunk, load_rag_chunks_from_directory
+from src.kennybot.utils.paths import CHANNEL_RAG_DIR
 
 
 GENERIC_TITLE_TOKENS = {"README", "定義", "概要", "紹介", "説明"}
 
 
-def profile_candidate_ids(guild_id: int | None = None, channel_id: int | None = None) -> list[int]:
-    if guild_id:
-        return [int(guild_id)]
-    if channel_id:
-        return [int(channel_id)]
-    return []
+def _scoped_directories(
+    *,
+    root: Path,
+    guild_id: int | None,
+    channel_id: int | None,
+    scope: str,
+) -> list[Path]:
+    channel_root = None
+    if guild_id is not None and channel_id is not None:
+        channel_root = root / CHANNEL_RAG_DIR / str(int(guild_id)) / "channels" / str(int(channel_id))
+    elif channel_id is not None:
+        channel_root = root / CHANNEL_RAG_DIR / str(int(channel_id))
+
+    if guild_id is not None:
+        guild_root = root / CHANNEL_RAG_DIR / str(int(guild_id))
+    else:
+        guild_root = None
+
+    normalized_scope = (scope or "auto").strip().lower()
+    if normalized_scope == "guild":
+        return [guild_root] if guild_root is not None else []
+    if normalized_scope == "channel":
+        return [channel_root] if channel_root is not None else []
+    if normalized_scope == "legacy_channel":
+        if channel_id is None:
+            return []
+        return [root / CHANNEL_RAG_DIR / str(int(channel_id))]
+
+    out: list[Path] = []
+    if channel_root is not None:
+        out.append(channel_root)
+    if guild_root is not None:
+        out.append(guild_root)
+    if channel_id is not None:
+        legacy_root = root / CHANNEL_RAG_DIR / str(int(channel_id))
+        if legacy_root not in out:
+            out.append(legacy_root)
+    return out
 
 
 def build_profile_chunks(
@@ -22,20 +55,21 @@ def build_profile_chunks(
     root: Path,
     guild_id: int | None = None,
     channel_id: int | None = None,
+    scope: str = "auto",
     limit: int = 6,
 ) -> list[RagChunk]:
-    rag = LocalRAG(root)
     normalized_limit = max(1, min(int(limit or 6), 6))
-    for candidate_id in profile_candidate_ids(guild_id, channel_id):
-        chunks = rag.retrieve(
-            "",
-            limit=normalized_limit,
-            guild_id=guild_id,
-            channel_id=candidate_id,
-            channel_only=True,
-        )
+    for directory in _scoped_directories(
+        root=root,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        scope=scope,
+    ):
+        if directory is None:
+            continue
+        chunks = load_rag_chunks_from_directory(directory)
         if chunks:
-            return chunks
+            return chunks[:normalized_limit]
     return []
 
 
@@ -100,16 +134,24 @@ def build_channel_profile_preview(
     root: Path,
     guild_id: int | None = None,
     channel_id: int | None = None,
+    scope: str = "auto",
     question: str = "このサーバーはなにするところ？",
     limit: int = 6,
     max_chars: int = 2600,
 ) -> dict[str, Any]:
-    chunks = build_profile_chunks(root=root, guild_id=guild_id, channel_id=channel_id, limit=limit)
+    chunks = build_profile_chunks(
+        root=root,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        scope=scope,
+        limit=limit,
+    )
     profile_block = format_profile_chunks(chunks, max_chars=max_chars)
     answer = summarize_profile_chunks(chunks, question=question)
     return {
         "guild_id": guild_id,
         "channel_id": channel_id,
+        "scope": scope,
         "question": question,
         "profile": profile_block,
         "answer": answer,

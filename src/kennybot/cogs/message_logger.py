@@ -20,13 +20,14 @@ from src.kennybot.utils.config import (
 )
 from src.kennybot.utils.message_fetcher import MessageFetcher, format_messages_for_context
 from src.kennybot.utils.live_info import ExternalContext, LiveInfoService
-from src.kennybot.utils.local_rag import LocalRAG
+from src.kennybot.utils.local_rag import LocalRAG, RagChunk, load_rag_chunks_from_directory
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.message_vector_store import MessageVectorStore
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import MESSAGE_VECTOR_DB_PATH
+from src.kennybot.utils.paths import CHANNEL_RAG_DIR, MESSAGE_VECTOR_DB_PATH
+from src.kennybot.utils.scoped_data import channel_scope_dir, guild_scope_dir
 from src.kennybot.utils.message_logger import (
     log_user_message,
     log_ai_output,
@@ -2434,13 +2435,23 @@ class MessageLogger(BaseCog):
     ) -> str:
         if not channel_id:
             return ""
-        chunks = self._local_rag.retrieve(
-            "",
-            limit=max(1, min(int(limit or 4), 6)),
-            guild_id=guild_id,
-            channel_id=channel_id,
-            channel_only=True,
-        )
+        candidate_dirs: list[Path] = []
+        if guild_id and channel_id:
+            candidate_dirs.append(channel_scope_dir(guild_id, channel_id))
+            candidate_dirs.append(guild_scope_dir(guild_id))
+        elif guild_id:
+            candidate_dirs.append(guild_scope_dir(guild_id))
+        else:
+            candidate_dirs.append(self.root / CHANNEL_RAG_DIR / str(channel_id))
+
+        chunks: list[RagChunk] = []
+        for directory in candidate_dirs:
+            chunks = load_rag_chunks_from_directory(directory)
+            if chunks:
+                break
+        if not chunks:
+            return ""
+        chunks = chunks[: max(1, min(int(limit or 4), 6))]
         blocks: list[str] = []
         for chunk in chunks:
             body = chunk.body.strip()
@@ -2456,6 +2467,8 @@ class MessageLogger(BaseCog):
         channel_id: int | None = None,
         guild_id: int | None = None,
     ) -> list[int]:
+        if guild_id and channel_id:
+            return [int(channel_id), int(guild_id)]
         if guild_id:
             return [int(guild_id)]
         if channel_id:

@@ -589,6 +589,7 @@ async def _run_channel_profile_preview(args: argparse.Namespace) -> int:
     guild_name = str(_get("guild_name", "debug-guild"))
     channel_id = int(_get("channel_id", 1493246078357606430))
     channel_name = str(_get("channel_name", "debug-channel"))
+    scope = str(_get("scope", "auto"))
     question = str(_get("question", "このサーバーはなにするところ？"))
     limit = int(_get("limit", 6))
     max_chars = int(_get("max_chars", 2600))
@@ -598,6 +599,7 @@ async def _run_channel_profile_preview(args: argparse.Namespace) -> int:
         root=ROOT_DIR,
         guild_id=guild_id,
         channel_id=channel_id,
+        scope=scope,
         question=question,
         limit=limit,
         max_chars=max_chars,
@@ -900,6 +902,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Question to ask against the local channel profile",
     )
     p_profile.add_argument("--message-id", type=int, default=1)
+    p_profile.add_argument(
+        "--scope",
+        type=str,
+        default="auto",
+        choices=["auto", "guild", "channel", "legacy_channel"],
+        help="Which scoped RAG to read",
+    )
     p_profile.add_argument("--limit", type=int, default=6)
     p_profile.add_argument("--max-chars", type=int, default=2600)
     p_profile.add_argument("--direct", action="store_true", help="Print the profile block only, without LLM summarization")
