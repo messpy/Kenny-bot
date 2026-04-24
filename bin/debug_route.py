@@ -344,6 +344,56 @@ class MockOllamaClient:
             add("recent_turns")
         return json.dumps({"plan": plan}, ensure_ascii=False)
 
+    def _extract_channel_profile_block(self, prompt: str) -> str:
+        marker = "[プロフィール]"
+        if marker not in prompt:
+            return ""
+        tail = prompt.split(marker, 1)[1].strip()
+        if not tail:
+            return ""
+        lines = [line.rstrip() for line in tail.splitlines()]
+        start_index = 0
+        for idx, line in enumerate(lines):
+            normalized = line.strip()
+            if normalized.startswith("[") and " / " in normalized:
+                start_index = idx
+                break
+        cleaned: list[str] = []
+        for line in lines[start_index:]:
+            if line.strip().startswith("[質問]"):
+                break
+            cleaned.append(line)
+        return "\n".join(cleaned).strip()
+
+    def _build_channel_profile_answer(self, prompt: str) -> str:
+        block = self._extract_channel_profile_block(prompt)
+        if not block:
+            return "（モック応答）場所の説明を作れませんでした。"
+
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        title = ""
+        bullets: list[str] = []
+        for line in lines:
+            if line.startswith("#"):
+                title = line.lstrip("#").strip()
+                continue
+            if line.startswith("-"):
+                bullets.append(line.lstrip("-").strip())
+            if len(bullets) >= 3:
+                break
+
+        if not title:
+            title = lines[0][:80]
+        summary = bullets[:3]
+        if not summary:
+            summary = lines[1:4] if len(lines) > 1 else []
+
+        answer_lines = [f"（モック応答）{title}"]
+        answer_lines.extend(f"- {item}" for item in summary if item)
+        if not summary and len(lines) > 1:
+            answer_lines.append(f"- {lines[1][:120]}")
+        return "\n".join(answer_lines)
+
     def _build_tool_answer(self, text: str) -> str:
         text = text.strip()
         if not text:
@@ -358,6 +408,8 @@ class MockOllamaClient:
         if not text:
             return "（モック応答）"
         lowered = text.lower()
+        if "[プロフィール]" in text and "この場所の正式プロフィール" in text:
+            return self._build_channel_profile_answer(text)
         if any(keyword in lowered for keyword in ("今日のニュース", "ニュース", "速報", "事件")):
             return "（モック応答）ニュース検索の結果を要約しました。"
         if any(keyword in lowered for keyword in ("どんな人", "最後の投稿", "最後の発言", "プロフィール")):
@@ -514,6 +566,123 @@ def _install_mock_llm(bot: discord.Client, *, seed_text: str) -> None:
     MessageStore.get_recent_context = _mock_recent_context  # type: ignore[assignment]
     MessageStore.get_recent_messages = _mock_recent_messages  # type: ignore[assignment]
     MessageStore.format_messages = _mock_format_messages  # type: ignore[assignment]
+
+
+async def _run_channel_profile_preview(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {}
+    if getattr(args, "input_json", ""):
+        try:
+            loaded = json.loads(args.input_json)
+            if isinstance(loaded, dict):
+                payload = loaded
+        except Exception as e:
+            raise SystemExit(f"Invalid --input-json: {e}") from e
+
+    def _get(name: str, default: Any) -> Any:
+        if name in payload and payload[name] is not None:
+            return payload[name]
+        return getattr(args, name, default)
+
+    guild_id = int(_get("guild_id", 972052382315855912))
+    guild_name = str(_get("guild_name", "debug-guild"))
+    channel_id = int(_get("channel_id", 1493246078357606430))
+    channel_name = str(_get("channel_name", "debug-channel"))
+    author_id = int(_get("author_id", 1190939100514103357))
+    author_name = str(_get("author_name", "debug-user"))
+    author_display_name = str(_get("author_display_name", author_name))
+    question = str(_get("question", "このサーバーはなにするところ？"))
+    message_id = int(_get("message_id", 1))
+    limit = int(_get("limit", 6))
+    max_chars = int(_get("max_chars", 2600))
+    direct = bool(_get("direct", False))
+    json_output = bool(_get("json", False))
+    mock_llm = bool(_get("mock_llm", True))
+
+    bot = create_bot()
+    await bot.setup_hook()
+    bot._connection.user = FakeMember(args.bot_user_id, args.bot_user_name, bot=True)
+    if mock_llm:
+        _install_mock_llm(bot, seed_text=question or "このサーバーはなにするところ？")
+
+    capture_channel = CaptureChannel(channel_id, name=channel_name)
+    guild = FakeGuild(
+        guild_id,
+        guild_name,
+        members=[bot._connection.user, FakeMember(author_id, author_name, display_name=author_display_name)],
+    )
+    guild.text_channels = [capture_channel]
+    user = guild.get_member(author_id)
+    assert user is not None
+    msg = FakeMessage(
+        message_id=message_id,
+        content=question,
+        author=user,
+        guild=guild,
+        channel=capture_channel,
+        mentions=[bot._connection.user],
+    )
+    cog = bot.get_cog("MessageLogger")
+    if cog is None:
+        raise RuntimeError("MessageLogger cog not available")
+
+    channel_profile_block = cog._build_channel_profile_block(
+        channel=capture_channel,
+        channel_id=channel_id,
+        guild_id=guild_id,
+        limit=limit,
+        max_chars=max_chars,
+    )
+    if not channel_profile_block:
+        if json_output:
+            print(json.dumps({"guild_id": guild_id, "channel_id": channel_id, "profile": "", "answer": ""}, ensure_ascii=False))
+        else:
+            print("=== channel profile preview ===")
+            print("profile=<empty>")
+        return 0
+
+    if direct:
+        if json_output:
+            print(json.dumps({"guild_id": guild_id, "channel_id": channel_id, "profile": channel_profile_block, "answer": ""}, ensure_ascii=False))
+        else:
+            print("=== channel profile preview ===")
+            print(f"guild_id={guild_id}")
+            print(f"channel_id={channel_id}")
+            print(channel_profile_block)
+        return 0
+
+    if not mock_llm:
+        _install_mock_llm(bot, seed_text=question)
+
+    prompt = message_logger_module.get_prompt("chat", "channel_profile_prompt").format(
+        query=question,
+        channel_profile_block=channel_profile_block,
+    )
+    answer = await cog._run_ollama_text(
+        model=cog._current_chat_model_name(),
+        prompt=prompt,
+    )
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "question": question,
+                    "profile": channel_profile_block,
+                    "answer": answer or "",
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print("=== channel profile preview ===")
+        print(f"guild_id={guild_id}")
+        print(f"channel_id={channel_id}")
+        print("=== profile block ===")
+        print(channel_profile_block)
+        print("=== answer preview ===")
+        print(answer or "")
+    return 0
 async def _run_mention_preview(args: argparse.Namespace) -> int:
     bot = create_bot()
     await bot.setup_hook()
@@ -773,6 +942,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use a built-in text preset when text is omitted",
     )
 
+    p_profile = sub.add_parser("profile", parents=[base], help="Preview a channel/server profile lookup")
+    p_profile.add_argument(
+        "--question",
+        type=str,
+        default="このサーバーはなにするところ？",
+        help="Question to ask against the local channel profile",
+    )
+    p_profile.add_argument("--message-id", type=int, default=1)
+    p_profile.add_argument("--limit", type=int, default=6)
+    p_profile.add_argument("--max-chars", type=int, default=2600)
+    p_profile.add_argument("--direct", action="store_true", help="Print the profile block only, without LLM summarization")
+    p_profile.add_argument("--input-json", type=str, default="", help="Override profile preview arguments from a JSON object")
+    p_profile.add_argument("--json", action="store_true", help="Print a JSON response instead of human-readable text")
+
     p_slash = sub.add_parser("slash", parents=[base], help="Preview a slash command callback")
     p_slash.add_argument("command", type=str)
     p_slash.add_argument("--args-json", type=str, default="")
@@ -793,6 +976,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.mode == "mention":
         return asyncio.run(_run_mention_preview(args))
+    if args.mode == "profile":
+        return asyncio.run(_run_channel_profile_preview(args))
     if args.mode == "slash":
         return asyncio.run(_run_slash_preview(args))
     raise SystemExit(f"Unknown mode: {args.mode}")
