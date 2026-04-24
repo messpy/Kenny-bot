@@ -272,14 +272,14 @@ class LocalRAG:
         for path in self._channel_extra_paths(guild_id, channel_id):
             if not path.exists():
                 continue
-                try:
-                    extra_chunks = _load_extra_rag_file(path)
-                    for chunk in extra_chunks:
-                        if _should_skip_chunk(chunk):
-                            continue
-                        chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
-                except Exception:
-                    pass
+            try:
+                extra_chunks = _load_extra_rag_file(path)
+                for chunk in extra_chunks:
+                    if _should_skip_chunk(chunk):
+                        continue
+                    chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
+            except Exception:
+                pass
         if not channel_only:
             for path in self._global_extra_paths:
                 if not path.exists():
