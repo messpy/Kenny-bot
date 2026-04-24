@@ -130,6 +130,39 @@ def _load_extra_rag_file(path: Path) -> list[RagChunk]:
     return []
 
 
+def load_rag_chunks_from_directory(directory: Path) -> list[RagChunk]:
+    chunks: list[RagChunk] = []
+    if not directory.exists():
+        return chunks
+
+    extra_names = (
+        "faq.json",
+        "faq.md",
+        "chat_rag.md",
+        "chat_rag.json",
+        "chat_rag.toml",
+        "rules.md",
+        "rules.json",
+        "rules.toml",
+        "settings.yaml",
+        "settings.json",
+        "settings.toml",
+    )
+    for name in extra_names:
+        path = directory / name
+        if not path.exists():
+            continue
+        try:
+            extra_chunks = _load_extra_rag_file(path)
+            for chunk in extra_chunks:
+                if _should_skip_chunk(chunk):
+                    continue
+                chunks.append(RagChunk(source=f"RAG:{path.name}", title=chunk.title, body=chunk.body))
+        except Exception:
+            pass
+    return chunks
+
+
 def _static_chunks() -> list[RagChunk]:
     chunks = [
         RagChunk(
@@ -232,22 +265,13 @@ class LocalRAG:
         )
         if guild_id:
             guild_root = guild_scope_dir(guild_id)
-            for name in extra_names:
-                path = guild_root / name
-                if path.exists():
-                    paths.append(path)
+            paths.extend(guild_root / name for name in extra_names if (guild_root / name).exists())
         if guild_id and channel_id:
             channel_root = channel_scope_dir(guild_id, channel_id)
-            for name in extra_names:
-                path = channel_root / name
-                if path.exists():
-                    paths.append(path)
+            paths.extend(channel_root / name for name in extra_names if (channel_root / name).exists())
         if channel_id:
             channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
-            for name in extra_names:
-                path = channel_root / name
-                if path.exists():
-                    paths.append(path)
+            paths.extend(channel_root / name for name in extra_names if (channel_root / name).exists())
         return paths
 
     def _load_chunks(
