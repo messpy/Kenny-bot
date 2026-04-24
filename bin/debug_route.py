@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.kennybot.bootstrap import create_bot
 from src.kennybot.utils.env import load_env_file
+from src.kennybot.utils.paths import ROOT_DIR
+from src.kennybot.utils.profile_preview import build_channel_profile_preview
 import src.kennybot.cogs.message_logger as message_logger_module
 import src.kennybot.cogs.slash_commands as slash_commands_module
 import src.kennybot.cogs.member_logger as member_logger_module
@@ -587,54 +589,22 @@ async def _run_channel_profile_preview(args: argparse.Namespace) -> int:
     guild_name = str(_get("guild_name", "debug-guild"))
     channel_id = int(_get("channel_id", 1493246078357606430))
     channel_name = str(_get("channel_name", "debug-channel"))
-    author_id = int(_get("author_id", 1190939100514103357))
-    author_name = str(_get("author_name", "debug-user"))
-    author_display_name = str(_get("author_display_name", author_name))
     question = str(_get("question", "このサーバーはなにするところ？"))
-    message_id = int(_get("message_id", 1))
     limit = int(_get("limit", 6))
     max_chars = int(_get("max_chars", 2600))
     direct = bool(_get("direct", False))
     json_output = bool(_get("json", False))
-    mock_llm = bool(_get("mock_llm", True))
-
-    bot = create_bot()
-    await bot.setup_hook()
-    bot._connection.user = FakeMember(args.bot_user_id, args.bot_user_name, bot=True)
-    if mock_llm:
-        _install_mock_llm(bot, seed_text=question or "このサーバーはなにするところ？")
-
-    capture_channel = CaptureChannel(channel_id, name=channel_name)
-    guild = FakeGuild(
-        guild_id,
-        guild_name,
-        members=[bot._connection.user, FakeMember(author_id, author_name, display_name=author_display_name)],
-    )
-    guild.text_channels = [capture_channel]
-    user = guild.get_member(author_id)
-    assert user is not None
-    msg = FakeMessage(
-        message_id=message_id,
-        content=question,
-        author=user,
-        guild=guild,
-        channel=capture_channel,
-        mentions=[bot._connection.user],
-    )
-    cog = bot.get_cog("MessageLogger")
-    if cog is None:
-        raise RuntimeError("MessageLogger cog not available")
-
-    channel_profile_block = cog._build_channel_profile_block(
-        channel=capture_channel,
-        channel_id=channel_id,
+    preview = build_channel_profile_preview(
+        root=ROOT_DIR,
         guild_id=guild_id,
+        channel_id=channel_id,
+        question=question,
         limit=limit,
         max_chars=max_chars,
     )
-    if not channel_profile_block:
+    if not preview["profile"]:
         if json_output:
-            print(json.dumps({"guild_id": guild_id, "channel_id": channel_id, "profile": "", "answer": ""}, ensure_ascii=False))
+            print(json.dumps(preview, ensure_ascii=False))
         else:
             print("=== channel profile preview ===")
             print("profile=<empty>")
@@ -642,46 +612,26 @@ async def _run_channel_profile_preview(args: argparse.Namespace) -> int:
 
     if direct:
         if json_output:
-            print(json.dumps({"guild_id": guild_id, "channel_id": channel_id, "profile": channel_profile_block, "answer": ""}, ensure_ascii=False))
+            output = dict(preview)
+            output["answer"] = ""
+            print(json.dumps(output, ensure_ascii=False))
         else:
             print("=== channel profile preview ===")
             print(f"guild_id={guild_id}")
             print(f"channel_id={channel_id}")
-            print(channel_profile_block)
+            print(preview["profile"])
         return 0
 
-    if not mock_llm:
-        _install_mock_llm(bot, seed_text=question)
-
-    prompt = message_logger_module.get_prompt("chat", "channel_profile_prompt").format(
-        query=question,
-        channel_profile_block=channel_profile_block,
-    )
-    answer = await cog._run_ollama_text(
-        model=cog._current_chat_model_name(),
-        prompt=prompt,
-    )
     if json_output:
-        print(
-            json.dumps(
-                {
-                    "guild_id": guild_id,
-                    "channel_id": channel_id,
-                    "question": question,
-                    "profile": channel_profile_block,
-                    "answer": answer or "",
-                },
-                ensure_ascii=False,
-            )
-        )
+        print(json.dumps(preview, ensure_ascii=False))
     else:
         print("=== channel profile preview ===")
         print(f"guild_id={guild_id}")
         print(f"channel_id={channel_id}")
         print("=== profile block ===")
-        print(channel_profile_block)
+        print(preview["profile"])
         print("=== answer preview ===")
-        print(answer or "")
+        print(preview["answer"])
     return 0
 async def _run_mention_preview(args: argparse.Namespace) -> int:
     bot = create_bot()
