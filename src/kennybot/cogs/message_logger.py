@@ -99,6 +99,7 @@ class MessageLogger(BaseCog):
         self._ai_channel_last: dict[int, float] = {}
         # (guild_id, channel_id, user_id) -> expires_at (monotonic seconds)
         self._recent_mention_windows: dict[tuple[int, int, int], float] = {}
+        self._spam_guard_disabled_guilds: set[int] = set()
         self._local_rag = LocalRAG(Path(__file__).resolve().parent.parent)
         self._live_info = LiveInfoService()
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
@@ -3854,9 +3855,17 @@ class MessageLogger(BaseCog):
         if is_bot_account or is_webhook:
             return
 
+        spam_guard_disabled = ModActions.should_disable_spam_guard(self.bot, msg.guild)
+        if spam_guard_disabled and msg.guild is not None and msg.guild.id not in self._spam_guard_disabled_guilds:
+            self._spam_guard_disabled_guilds.add(msg.guild.id)
+            logger.warning(
+                "Spam guard disabled for guild %s because bot lacks kick/ban permissions.",
+                msg.guild.id,
+            )
+
         # 全メッセージ共通のスパム検出
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
-        if not guard.allow_message(msg.author.id, content):
+        if not spam_guard_disabled and not guard.allow_message(msg.author.id, content):
             violation = guard.add_violation(msg.author.id, msg.guild.id)
             await self._handle_spam_violation(
                 msg=msg,
@@ -4082,7 +4091,7 @@ class MessageLogger(BaseCog):
 
         # スパム対策（AI 呼び出しレート制限）
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
-        if not guard.allow_ai(msg.author.id):
+        if not spam_guard_disabled and not guard.allow_ai(msg.author.id):
             remain = max(1, int(guard.ai_retry_after(msg.author.id)) + 1)
             if guard.should_warn(msg.author.id):
                 await self._ai_retry_countdowns.start_or_replace(

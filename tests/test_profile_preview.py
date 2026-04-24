@@ -1,4 +1,5 @@
 import sys
+import json
 import tempfile
 from pathlib import Path
 import unittest
@@ -11,8 +12,10 @@ if str(ROOT) not in sys.path:
 
 from src.kennybot.utils.profile_preview import (
     build_channel_profile_preview,
+    build_profile_management_log,
     build_profile_chunks,
     summarize_profile_chunks,
+    write_jsonl_log,
 )
 
 
@@ -106,6 +109,41 @@ class ProfilePreviewTests(unittest.TestCase):
         self.assertTrue(summary.startswith("このサーバーはなにするところ？ に対しては"))
         self.assertIn("このサーバーはなにするところ？ に対しては", summary)
         self.assertIn("旅行体験イベント", summary)
+
+    def test_build_profile_management_log_contains_summary_fields(self) -> None:
+        preview = build_channel_profile_preview(
+            root=ROOT,
+            guild_id=972052382315855912,
+            channel_id=972052382315855912,
+            scope="auto",
+            question="このサーバーはなにするところ？",
+        )
+
+        log = build_profile_management_log(preview)
+
+        self.assertEqual(log["title"], "Bot 管理ログ")
+        self.assertEqual(log["description"], "サーバー・チャンネル・ワールドの説明に応答しました。")
+        self.assertEqual(log["level"], "info")
+        self.assertTrue(any(name == "質問" for name, _, _ in log["fields"]))
+        self.assertTrue(any(name == "返信" for name, _, _ in log["fields"]))
+
+    def test_write_jsonl_log_appends_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "profile_preview.log"
+            entry = {
+                "title": "Bot 管理ログ",
+                "description": "test",
+                "level": "info",
+                "fields": [("質問", "テスト", False)],
+            }
+
+            write_jsonl_log(path, entry)
+
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            decoded = json.loads(lines[0])
+            self.assertEqual(decoded["title"], "Bot 管理ログ")
+            self.assertEqual(decoded["level"], "info")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -156,3 +157,31 @@ def build_channel_profile_preview(
         "profile": profile_block,
         "answer": answer,
     }
+
+
+def build_profile_management_log(preview: dict[str, Any]) -> dict[str, Any]:
+    profile = str(preview.get("profile") or "")
+    answer = str(preview.get("answer") or "")
+    scope = str(preview.get("scope") or "auto")
+    guild_id = preview.get("guild_id")
+    channel_id = preview.get("channel_id")
+    question = str(preview.get("question") or "")
+    return {
+        "title": "Bot 管理ログ",
+        "description": "サーバー・チャンネル・ワールドの説明に応答しました。",
+        "level": "info",
+        "fields": [
+            ("種別", "メンション", True),
+            ("カテゴリ", "場所説明", True),
+            ("場所", f"guild_id={guild_id} channel_id={channel_id} scope={scope}", False),
+            ("質問", question, False),
+            ("プロフィール", profile[:800], False),
+            ("返信", answer[:800], False),
+        ],
+    }
+
+
+def write_jsonl_log(path: Path, entry: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fp:
+        fp.write(json.dumps(entry, ensure_ascii=False) + "\n")

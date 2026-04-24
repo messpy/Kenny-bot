@@ -67,6 +67,7 @@ if "discord" not in sys.modules:
     sys.modules["discord.utils"] = utils
 
 from src.kennybot.cogs.message_logger import MessageLogger
+from src.kennybot.guards.mod_actions import ModActions
 
 
 class MessageLoggerSummaryTests(unittest.TestCase):
@@ -120,6 +121,34 @@ class MessageLoggerSummaryTests(unittest.TestCase):
     def test_channel_profile_query_detection(self) -> None:
         self.assertTrue(self.logger._is_channel_profile_query("このサーバーは何のやつ？"))
         self.assertFalse(self.logger._is_channel_profile_query("このBotの機能を教えて"))
+
+    def test_spam_guard_disables_without_kick_or_ban_permissions(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            guild_permissions=SimpleNamespace(kick_members=False, ban_members=False),
+        )
+        guild = SimpleNamespace(me=bot_member, get_member=lambda _member_id: None)
+
+        self.assertTrue(
+            ModActions.should_disable_spam_guard(
+                SimpleNamespace(user=SimpleNamespace(id=999)),
+                guild,
+            )
+        )
+
+    def test_spam_guard_stays_enabled_when_kick_or_ban_is_available(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            guild_permissions=SimpleNamespace(kick_members=True, ban_members=False),
+        )
+        guild = SimpleNamespace(me=bot_member, get_member=lambda _member_id: None)
+
+        self.assertFalse(
+            ModActions.should_disable_spam_guard(
+                SimpleNamespace(user=SimpleNamespace(id=999)),
+                guild,
+            )
+        )
 
     def test_collect_message_ids_deduplicates_and_preserves_order(self) -> None:
         messages = [

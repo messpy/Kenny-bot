@@ -11,7 +11,11 @@ sys_root = Path(__file__).resolve().parent.parent
 if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
-from src.kennybot.utils.profile_preview import build_channel_profile_preview
+from src.kennybot.utils.profile_preview import (
+    build_channel_profile_preview,
+    build_profile_management_log,
+    write_jsonl_log,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -29,6 +33,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--question", type=str, default="このサーバーはなにするところ？")
     parser.add_argument("--limit", type=int, default=6)
     parser.add_argument("--max-chars", type=int, default=2600)
+    parser.add_argument("--emit-log", action="store_true", help="Append a local management-log style JSONL entry")
+    parser.add_argument("--log-file", type=Path, default=sys_root / "runtime" / "logs" / "profile_preview.log")
     parser.add_argument("--input-json", type=str, default="", help="Override arguments from a JSON object")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of human-readable text")
     return parser
@@ -63,14 +69,22 @@ def main() -> int:
         limit=int(_get("limit", 6)),
         max_chars=int(_get("max_chars", 2600)),
     )
+    management_log = build_profile_management_log(preview)
+    if bool(_get("emit_log", False)):
+        write_jsonl_log(Path(_get("log_file", sys_root / "runtime" / "logs" / "profile_preview.log")), management_log)
 
     if args.json:
-        print(json.dumps(preview, ensure_ascii=False))
+        payload = dict(preview)
+        payload["management_log"] = management_log
+        print(json.dumps(payload, ensure_ascii=False))
     else:
         print("=== profile block ===")
         print(preview["profile"] or "<empty>")
         print("=== answer preview ===")
         print(preview["answer"] or "<empty>")
+        if bool(_get("emit_log", False)):
+            print("=== management log ===")
+            print(json.dumps(management_log, ensure_ascii=False))
     return 0
 
 

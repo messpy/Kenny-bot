@@ -126,6 +126,19 @@ class ModActions:
         return None
 
     @staticmethod
+    def should_disable_spam_guard(bot: commands.Bot, guild: discord.Guild | None) -> bool:
+        """キック/バンができないならスパム処理を無効化する。"""
+        if guild is None:
+            return True
+
+        bot_member = ModActions._resolve_bot_member(bot, guild)
+        if bot_member is None:
+            return True
+
+        perms = bot_member.guild_permissions
+        return not (perms.kick_members or perms.ban_members)
+
+    @staticmethod
     def _validate_target(bot_member: discord.Member | None, member: discord.Member) -> str | None:
         """処罰可能な対象かを判定"""
         if bot_member is None:
