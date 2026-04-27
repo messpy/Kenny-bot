@@ -11,13 +11,19 @@ import shutil
 
 import yaml
 from src.kennybot.utils.paths import LEGACY_RUNTIME_SETTINGS_PATH, RUNTIME_SETTINGS_PATH
-from src.kennybot.utils.scoped_data import SCOPED_DATA_DIR, guild_settings_path
+from src.kennybot.utils.scoped_data import (
+    LEGACY_SCOPED_DATA_DIR,
+    SCOPED_DATA_DIR,
+    guild_settings_path,
+    legacy_guild_settings_path,
+)
+from src.kennybot.utils.server_registry import get_server_registry
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
         "ollama": {
-            "model_default": "gemini-2.5-flash",
+            "model_default": "gpt-oss:120b",
             "model_chat": "gpt-oss:120b",
             "model_summary": "gpt-oss:120b",
             "model_embedding": "embeddinggemma",
@@ -162,36 +168,65 @@ class SettingsStore:
             )
 
     def _load_guild_sidecars(self) -> None:
-        if not SCOPED_DATA_DIR.exists():
-            return
         guilds = self._data.setdefault("guilds", {})
         if not isinstance(guilds, dict):
             guilds = {}
             self._data["guilds"] = guilds
-        for path in sorted(SCOPED_DATA_DIR.glob("*/settings.yaml")):
-            try:
-                guild_id = path.parent.name
-                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-                if not isinstance(raw, dict):
-                    continue
-                current = guilds.get(guild_id, {})
-                if not isinstance(current, dict):
-                    current = {}
-                guilds[guild_id] = self._deep_merge(current, raw)
-            except Exception:
+        scan_roots = [SCOPED_DATA_DIR, LEGACY_SCOPED_DATA_DIR]
+        seen: set[Path] = set()
+        for root in scan_roots:
+            if not root.exists():
                 continue
+            for path in sorted(root.glob("*/settings.yaml")):
+                if path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    guild_id = path.parent.name
+                    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                    if not isinstance(raw, dict):
+                        continue
+                    current = guilds.get(guild_id, {})
+                    if not isinstance(current, dict):
+                        current = {}
+                    merged = self._deep_merge(current, raw)
+                    guilds[guild_id] = merged
+                    try:
+                        get_server_registry().upsert_guild(
+                            int(guild_id),
+                            settings=merged,
+                            metadata={"source": str(path)},
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
 
     def _save_guild_sidecar(self, guild_id: int) -> None:
         try:
+            guild_data = self._data.get("guilds", {}).get(str(guild_id), {})
+            if not isinstance(guild_data, dict):
+                guild_data = {}
             path = guild_settings_path(guild_id)
             path.parent.mkdir(parents=True, exist_ok=True)
-            data = self._data.get("guilds", {}).get(str(guild_id), {})
-            if not isinstance(data, dict):
-                data = {}
             path.write_text(
-                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                yaml.safe_dump(guild_data, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
+            legacy_path = legacy_guild_settings_path(guild_id)
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_path.write_text(
+                yaml.safe_dump(guild_data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            try:
+                get_server_registry().upsert_guild(
+                    guild_id,
+                    settings=guild_data,
+                    metadata={"source": str(path)},
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 

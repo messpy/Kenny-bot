@@ -178,34 +178,31 @@ def _build_natural_answer(chunks: list[RagChunk]) -> str:
     if not chunks:
         return ""
 
-    subject = _extract_subject(chunks)
-    definition = _extract_definition_summary(chunks)
-    bullets = _collect_bullets(
-        _collect_chunks_by_keywords(chunks, ("体験内容", "特徴")),
-        max_items=3,
+    priority_chunks: list[RagChunk] = []
+    priority_chunks.extend(_collect_chunks_by_keywords(chunks, ("定義", "概要", "紹介", "説明")))
+    priority_chunks.extend(_collect_chunks_by_keywords(chunks, ("体験内容", "特徴")))
+    priority_chunks.extend(
+        chunk for chunk in chunks if _chunk_matches(chunk, ("活動カテゴリ", "主催", "運営"))
     )
-    activity_chunks = [chunk for chunk in chunks if _chunk_matches(chunk, ("活動カテゴリ", "主催", "運営"))]
-    activity_bullets = _collect_bullets(activity_chunks, max_items=2) if activity_chunks else []
+    if not priority_chunks:
+        priority_chunks = chunks[:3]
 
-    intro = f"ここは、{subject}のサーバーです。" if subject else "ここは、イベントや案内をまとめたサーバーです。"
+    sentences: list[str] = []
+    for chunk in priority_chunks:
+        first = _normalize_display_text(_first_sentence(chunk.body))
+        if not first:
+            continue
+        if first not in sentences:
+            sentences.append(first)
+        if len(sentences) >= 3:
+            break
 
-    second_parts: list[str] = []
-    if definition:
-        second_parts.append(_normalize_display_text(definition))
-    if bullets:
-        second_parts.append(" ".join(bullets[:3]))
-    if not second_parts:
-        second_parts.append("旅行イベントの案内や参加情報を扱っています。")
-    second = " ".join(second_parts).strip()
-    if second and not second.endswith("。"):
-        second += "。"
-
-    paragraphs = [intro, second]
-    if activity_bullets:
-        third = "主な活動は、" + "、".join(activity_bullets[:3]) + "です。"
-        paragraphs.append(third)
-    paragraphs = [para for para in paragraphs if para]
-    return "\n\n".join(paragraphs[:3])
+    if not sentences:
+        return ""
+    return "\n\n".join(
+        sentence if sentence.endswith("。") else f"{sentence}。"
+        for sentence in sentences[:3]
+    )
 
 
 def summarize_profile_chunks(chunks: list[RagChunk], question: str = "") -> str:

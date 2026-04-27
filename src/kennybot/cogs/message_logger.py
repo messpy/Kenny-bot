@@ -513,7 +513,6 @@ class MessageLogger(BaseCog):
         if self._is_channel_profile_query(text):
             if has_profile:
                 plan.append({"source": "channel_profile"})
-            plan.append({"source": "recent_turns", "limit": min(max(channel_lines, 4), 8)})
             return plan
         if self._is_local_activity_query(text):
             plan.append(
@@ -2235,6 +2234,27 @@ class MessageLogger(BaseCog):
             max_chars=max_chars,
         )
 
+    def _build_location_meta_block(
+        self,
+        *,
+        msg: discord.Message,
+    ) -> str:
+        guild = msg.guild
+        channel = msg.channel
+        lines = ["[現在の場所のメタ情報]"]
+        lines.append(f"サーバー名: {guild.name if guild else 'DM'}")
+        lines.append(
+            f"チャンネル名: {channel.name if hasattr(channel, 'name') else str(channel.id)}"
+        )
+        category = getattr(channel, "category", None)
+        category_name = getattr(category, "name", "") if category is not None else ""
+        if category_name:
+            lines.append(f"カテゴリ: {category_name}")
+        topic = getattr(channel, "topic", "")
+        if topic:
+            lines.append(f"チャンネル説明: {strip_ansi_and_ctrl(str(topic))}")
+        return "\n".join(lines)
+
     async def _build_planned_context(
         self,
         *,
@@ -2248,10 +2268,6 @@ class MessageLogger(BaseCog):
         channel_name = (
             msg.channel.name if hasattr(msg.channel, "name") else str(msg.channel.id)
         )
-        fetcher = MessageFetcher.get_instance()
-        planner_history_lines = max(2, min(self._cfg_int("chat.planner_history_lines", 4), 8))
-        recent_messages = await fetcher.fetch_recent(msg.channel, planner_history_lines)
-        recent_history = format_messages_for_context(recent_messages)
         channel_profile_block = self._build_channel_profile_block(
             channel=msg.channel,
             channel_id=channel_id,
@@ -2259,6 +2275,41 @@ class MessageLogger(BaseCog):
             limit=6,
             max_chars=2600,
         )
+        location_meta_block = self._build_location_meta_block(msg=msg)
+
+        if self._is_channel_profile_query(text):
+            blocks: list[tuple[str, str]] = []
+            references: list[str] = []
+            details: list[str] = [
+                "planner_response_mode=serverinfo_strict",
+                f"serverinfo guild_id={guild_id} channel_id={channel_id}",
+            ]
+            if location_meta_block:
+                blocks.append(("現在の場所のメタ情報", location_meta_block))
+                references.append("source:location_meta")
+                details.append("location_meta=on")
+            if channel_profile_block:
+                blocks.append(("この場所の正式プロフィール", channel_profile_block))
+                references.extend(self._collect_reference_labels(channel_profile_block))
+                references.append("source:serverinfo")
+                details.append("serverinfo=channel_profile")
+            else:
+                details.append("channel_profile_missing=true")
+            context_parts: list[str] = [f"[応答モード]\nserverinfo_strict"]
+            context_parts.extend(
+                f"[{title}]\n{body}" for title, body in blocks if str(body or "").strip()
+            )
+            return (
+                "\n\n".join(context_parts).strip() + ("\n\n" if context_parts else ""),
+                self._merge_unique_strings(references),
+                [],
+                self._merge_unique_strings(details),
+            )
+
+        fetcher = MessageFetcher.get_instance()
+        planner_history_lines = max(2, min(self._cfg_int("chat.planner_history_lines", 4), 8))
+        recent_messages = await fetcher.fetch_recent(msg.channel, planner_history_lines)
+        recent_history = format_messages_for_context(recent_messages)
         tool_menu = "\n".join(
             [
                 "- serverinfo: サーバー説明、目的、参加方法、Bot の使い方など",
@@ -2308,6 +2359,9 @@ class MessageLogger(BaseCog):
 
         if plan["serverinfo"] and not channel_profile_block:
             plan["serverinfo"] = False
+        if self._is_channel_profile_query(text):
+            plan["rag"] = {"enabled": False, "query": None, "limit": 0}
+            plan["web_search"] = {"enabled": False, "query": None, "limit": 0}
 
         blocks: list[tuple[str, str]] = []
         references: list[str] = []
@@ -2416,6 +2470,18 @@ class MessageLogger(BaseCog):
             )
             return
 
+        location_meta_block = self._build_location_meta_block(
+            msg=source_msg
+            if source_msg is not None
+            else type(
+                "_PreviewMsg",
+                (),
+                {
+                    "guild": getattr(channel, "guild", None),
+                    "channel": channel,
+                },
+            )(),
+        )
         channel_profile_block = self._build_channel_profile_block(
             channel=channel,
             channel_id=channel_id,
@@ -2423,13 +2489,6 @@ class MessageLogger(BaseCog):
             limit=6,
             max_chars=2600,
         )
-
-        if not channel_profile_block:
-            prefix = f"{mention}\n" if mention else ""
-            await channel.send(
-                f"{prefix}この場所の情報はまだ十分にまとまっていません。"
-            )
-            return
 
         progress_key = f"ai-progress:{channel_id}:profile:{mention or 'anon'}"
         ticket = await self.bot.ai_progress_tracker.create_ticket()
@@ -2442,7 +2501,13 @@ class MessageLogger(BaseCog):
             limit=6,
             max_chars=2600,
         )
-        fallback_answer = self._sanitize_user_visible_answer(str(preview.get("answer") or "").strip())
+        fallback_answer = self._sanitize_user_visible_answer(
+            str(
+                preview.get("answer")
+                or preview.get("profile_summary")
+                or ""
+            ).strip()
+        )
         self._last_context_trace = {
             "mode": "channel_profile",
             "guild_id": getattr(getattr(channel, "guild", None), "id", None),
@@ -2452,10 +2517,13 @@ class MessageLogger(BaseCog):
             "profile_summary": preview.get("profile_summary"),
             "answer": fallback_answer,
             "references": self._collect_reference_labels(channel_profile_block),
+            "location_meta": location_meta_block,
         }
         prompt = get_prompt("chat", "channel_profile_prompt").format(
             query=query,
-            channel_profile_block=channel_profile_block,
+            channel_profile_block="\n\n".join(
+                part for part in [location_meta_block, channel_profile_block] if str(part or "").strip()
+            ),
         )
         model_name = self._current_chat_model_name()
 
@@ -2478,7 +2546,13 @@ class MessageLogger(BaseCog):
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
 
-            answer = strip_ansi_and_ctrl((answer or "").strip()) or fallback_answer or "この場所の情報はまだ十分にまとまっていません。"
+            answer = strip_ansi_and_ctrl((answer or "").strip()) or fallback_answer
+            if not answer:
+                answer = self._sanitize_user_visible_answer(
+                    "\n\n".join(
+                        part for part in [location_meta_block, channel_profile_block] if str(part or "").strip()
+                    ).strip()
+                )
             answer = self._sanitize_user_visible_answer(answer)
             prefix = f"{mention}\n" if mention else ""
             await self._send_chunked_text(channel, answer, prefix=prefix)
@@ -2507,7 +2581,11 @@ class MessageLogger(BaseCog):
                     ("エラー", str(e)[:1000], False),
                 ],
             )
-            answer = fallback_answer or "この場所の情報はまだ十分にまとまっていません。"
+            answer = fallback_answer or self._sanitize_user_visible_answer(
+                "\n\n".join(
+                    part for part in [location_meta_block, channel_profile_block] if str(part or "").strip()
+                ).strip()
+            )
             await channel.send(f"{prefix}{answer}", allowed_mentions=discord.AllowedMentions.none())
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)

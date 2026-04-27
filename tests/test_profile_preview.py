@@ -48,9 +48,9 @@ class ProfilePreviewTests(unittest.TestCase):
 
         self.assertIn("VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。", preview["profile"])
         self.assertIn("開始日は2022年04月09日", preview["profile"])
-        self.assertTrue(preview["answer"].startswith("ここは、VRC世界旅行のサーバーです。"))
+        self.assertIn("VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。", preview["answer"])
         self.assertIn("VRChat上で世界各地の観光地を巡る旅行体験イベント", preview["answer"])
-        self.assertNotIn("に対しては", preview["answer"])
+        self.assertNotIn("ここは、", preview["answer"])
 
     def test_local_rag_returns_scoped_chunks_for_vrc_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,9 +126,9 @@ class ProfilePreviewTests(unittest.TestCase):
 
         summary = summarize_profile_chunks(chunks, question="このサーバーはなにするところ？")
 
-        self.assertTrue(summary.startswith("ここは、VRC世界旅行のサーバーです。"))
+        self.assertIn("VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。", summary)
         self.assertIn("VRChat上で世界各地の観光地を巡る旅行体験イベント", summary)
-        self.assertNotIn("に対しては", summary)
+        self.assertNotIn("ここは、", summary)
 
     def test_build_profile_management_log_contains_summary_fields(self) -> None:
         preview = build_channel_profile_preview(
@@ -197,7 +197,7 @@ class ProfilePreviewTests(unittest.TestCase):
 
             def chat_simple(self, model: str, prompt: str, stream: bool = False, **kwargs: object) -> str:
                 self.calls.append((model, prompt))
-                return "ここは、AIで整形したサーバー説明です。"
+                return "AIで整形したサーバー説明です。"
 
         fake_client = FakeClient()
         response = build_profile_preview_response(
@@ -213,7 +213,7 @@ class ProfilePreviewTests(unittest.TestCase):
             ai_client=fake_client,
         )
 
-        self.assertEqual(response["answer"], "ここは、AIで整形したサーバー説明です。")
+        self.assertEqual(response["answer"], "AIで整形したサーバー説明です。")
         self.assertTrue(fake_client.calls)
         prompt = fake_client.calls[0][1]
         self.assertIn("ユーザーに見せる最終回答だけ", prompt)
@@ -229,7 +229,7 @@ class ProfilePreviewTests(unittest.TestCase):
 
             def json(self) -> dict[str, object]:
                 return {
-                    "message": {"content": "ここは、AIで整形したサーバー説明です。"}
+                    "message": {"content": "AIで整形したサーバー説明です。"}
                 }
 
         old_host = os.environ.get("OLLAMA_HOST")
@@ -253,18 +253,18 @@ class ProfilePreviewTests(unittest.TestCase):
             else:
                 os.environ["OLLAMA_HOST"] = old_host
 
-        self.assertEqual(response["answer"], "ここは、AIで整形したサーバー説明です。")
+        self.assertEqual(response["answer"], "AIで整形したサーバー説明です。")
         self.assertEqual(response["ai_status"]["mode"], "ai")
         self.assertEqual(response["ai_status"]["reason"], "ollama_http_ok")
         self.assertEqual(mocked_post.call_count, 1)
 
     def test_normalize_ai_answer_strips_meta_prefixes(self) -> None:
         answer = _normalize_ai_answer(
-            "（モック応答）場所の説明を優先して返しました。ここは、VRC世界旅行のサーバーです。",
+            "（モック応答）場所の説明を優先して返しました。VRC世界旅行のサーバーです。",
             "このサーバーはなにするところ？",
         )
 
-        self.assertEqual(answer, "ここは、VRC世界旅行のサーバーです。")
+        self.assertEqual(answer, "VRC世界旅行のサーバーです。")
 
     def test_normalize_ai_answer_strips_internal_labels_anywhere(self) -> None:
         answer = _normalize_ai_answer(

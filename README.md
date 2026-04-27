@@ -41,6 +41,17 @@ DM でも同样的に応答できます。
 
 VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が自動でチャンネルに投稿されます。
 
+### ローカル検証
+
+- `bin/debug_route.py` でルート判定や応答生成の preview ができます
+- `--mock-llm` は AI / 検索の backend をモック化します
+- `--dry-run-send` は送信だけ抑止して、それ以外の処理はできるだけそのまま流します
+- `--trace-llm` を併用すると `trace/debug_route_trace.txt` にトレースを書き出します
+
+## 設計
+
+- 応答経路とモデル責務: [docs/response_architecture.md](/home/kennypi/work/Kenny-bot/docs/response_architecture.md)
+
 ## 注意
 
 - AI 応答は間隔制限があります。連続送信しすぎないようご注意ください。

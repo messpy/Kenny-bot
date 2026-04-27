@@ -1,6 +1,6 @@
 global:
   ollama:
-    model_default: gemini-2.5-flash
+    model_default: gpt-oss:120b
     model_chat: gpt-oss:120b
     model_summary: gpt-oss:120b
     model_embedding: embeddinggemma
@@ -80,4 +80,7 @@ global:
     auto_cook_formats:
     - flac
     - mix
-guilds: {}
+guilds:
+  '123':
+    logging:
+      event_channel_id: 456

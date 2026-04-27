@@ -43,7 +43,7 @@ class ProfilePreviewAPITests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["scope"], "auto")
         self.assertIn("VRC世界旅行とは", body["profile"])
-        self.assertTrue(body["answer"].startswith("ここは、VRC世界旅行のサーバーです。"))
+        self.assertIn("VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。", body["answer"])
         self.assertIn("VRChat上で世界各地の観光地を巡る旅行体験イベント", body["answer"])
         self.assertIn("management_log", body)
         self.assertIn("ai_status", body)
@@ -68,7 +68,7 @@ class ProfilePreviewAPITests(unittest.TestCase):
             def json(self) -> dict[str, object]:
                 return {
                     "message": {
-                        "content": "ここは、AIで整形したサーバー説明です。",
+                        "content": "AIで整形したサーバー説明です。",
                     }
                 }
 
@@ -90,7 +90,7 @@ class ProfilePreviewAPITests(unittest.TestCase):
             )
 
         self.assertEqual(response[0], 200)
-        self.assertEqual(response[1]["answer"], "ここは、AIで整形したサーバー説明です。")
+        self.assertEqual(response[1]["answer"], "AIで整形したサーバー説明です。")
         self.assertEqual(mocked_post.call_count, 1)
 
 

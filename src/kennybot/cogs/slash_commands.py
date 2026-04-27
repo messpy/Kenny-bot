@@ -779,7 +779,7 @@ class SlashCommands(commands.Cog):
             str(
                 _settings.get(
                     "ollama.model_default",
-                    "gemini-2.5-flash",
+                    "gpt-oss:120b",
                 )
             )
         )
@@ -1086,9 +1086,6 @@ class SlashCommands(commands.Cog):
             names = self._list_local_models_via_cli()
         except Exception:
             names = self._list_remote_models_via_tags_api("http://127.0.0.1:11434")
-        for gemini_name in self._list_gemini_models():
-            if gemini_name not in names:
-                names.append(gemini_name)
         return names
 
     def _list_remote_models_via_tags_api(self, host: str) -> list[str]:
@@ -1149,11 +1146,6 @@ class SlashCommands(commands.Cog):
             except Exception as e:
                 remote_body = f"取得失敗: `{str(e)[:200]}`"
             sections.append(f"リモート ({remote_host}):\n{remote_body}")
-
-        gemini_names = self._list_gemini_models()
-        if gemini_names:
-            gemini_body = "\n".join(f"- `{name}`" for name in gemini_names)
-            sections.append(f"Gemini:\n{gemini_body}")
 
         await interaction.followup.send("\n\n".join(sections), ephemeral=True)
 

@@ -493,6 +493,10 @@ class OllamaClientService:
             if not model_name or model_name in candidates:
                 continue
             candidates.append(model_name)
+            if not self._is_gemini_model(model_name) and not model_name.endswith("-cloud"):
+                cloud_variant = f"{model_name}-cloud"
+                if cloud_variant not in candidates:
+                    candidates.append(cloud_variant)
         return candidates
 
     def _try_local_chat_fallback(
@@ -646,10 +650,6 @@ class OllamaClientService:
                     names.append(name)
         except Exception:
             logger.exception("Failed to list Ollama models")
-        if self._gemini_api_key():
-            for model in _KNOWN_GEMINI_MODELS:
-                if model not in names:
-                    names.append(model)
         return names
 
     def _format_web_search_response(self, response: object) -> str:
