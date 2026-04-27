@@ -1596,9 +1596,15 @@ class MessageLogger(BaseCog):
             return False
         profile_terms = (
             "サーバー",
+            "さーばー",
+            "サーバ",
+            "さーば",
             "チャンネル",
             "ワールド",
             "このサーバー",
+            "このさーばー",
+            "このサーバ",
+            "このさーば",
             "このチャンネル",
             "このワールド",
             "ここ",
@@ -1618,6 +1624,7 @@ class MessageLogger(BaseCog):
             "概要",
             "説明",
             "何の場",
+            "情報",
         )
         return any(term in normalized for term in profile_terms)
 

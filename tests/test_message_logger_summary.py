@@ -128,6 +128,8 @@ class MessageLoggerSummaryTests(unittest.TestCase):
     def test_channel_profile_query_detection(self) -> None:
         self.assertTrue(self.logger._is_channel_profile_query("このサーバーは何のやつ？"))
         self.assertTrue(self.logger._is_channel_profile_query("このサーバーってなにをするところ？"))
+        self.assertTrue(self.logger._is_channel_profile_query("このサーバの情報を教えて"))
+        self.assertTrue(self.logger._is_channel_profile_query("サーバの説明を教えて"))
         self.assertFalse(self.logger._is_channel_profile_query("このBotの機能を教えて"))
 
     def test_build_planned_context_channel_profile_is_strict(self) -> None:
