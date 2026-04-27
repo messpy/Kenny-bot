@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ class MessageVectorStore:
         return conn
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS message_embeddings (
@@ -44,6 +45,7 @@ class MessageVectorStore:
                 "CREATE INDEX IF NOT EXISTS idx_msg_embed_author_time "
                 "ON message_embeddings (guild_id, channel_id, author_id, timestamp DESC)"
             )
+            conn.commit()
 
     def upsert_message(
         self,
@@ -60,7 +62,7 @@ class MessageVectorStore:
         embedding_json = json.dumps(embedding) if embedding else None
         if looks_like_web_search_artifact(content):
             return
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO message_embeddings (
@@ -77,6 +79,7 @@ class MessageVectorStore:
                 """,
                 (guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json),
             )
+            conn.commit()
 
     def upsert_messages(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
@@ -99,7 +102,7 @@ class MessageVectorStore:
                     json.dumps(embedding) if embedding else None,
                 )
             )
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.executemany(
                 """
                 INSERT INTO message_embeddings (
@@ -116,9 +119,10 @@ class MessageVectorStore:
                 """,
                 payload,
             )
+            conn.commit()
 
     def has_message(self, message_id: int) -> bool:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT 1 FROM message_embeddings WHERE message_id = ? LIMIT 1",
                 (int(message_id),),
@@ -150,7 +154,7 @@ class MessageVectorStore:
         params.append(max(limit, sample_limit))
 
         scored: list[tuple[float, dict[str, Any]]] = []
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             for row in conn.execute(sql, params):
                 embedding_json = row["embedding_json"]
                 if not embedding_json:

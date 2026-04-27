@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import CHANNEL_RAG_DIR, KNOWLEDGE_DIR
+from src.kennybot.utils.paths import CHANNEL_RAG_DIR, KNOWLEDGE_DIR, SERVER_RAG_DIR
 from src.kennybot.utils.scoped_data import channel_scope_dir, guild_scope_dir
+from src.kennybot.utils.server_registry import get_server_registry
 
 
 @dataclass
@@ -264,14 +265,20 @@ class LocalRAG:
             "settings.toml",
         )
         if guild_id:
-            guild_root = guild_scope_dir(guild_id)
-            paths.extend(guild_root / name for name in extra_names if (guild_root / name).exists())
+            server_guild_root = self.root / SERVER_RAG_DIR / str(guild_id)
+            legacy_guild_root = guild_scope_dir(guild_id)
+            paths.extend(server_guild_root / name for name in extra_names if (server_guild_root / name).exists())
+            paths.extend(legacy_guild_root / name for name in extra_names if (legacy_guild_root / name).exists())
         if guild_id and channel_id:
-            channel_root = channel_scope_dir(guild_id, channel_id)
-            paths.extend(channel_root / name for name in extra_names if (channel_root / name).exists())
+            server_channel_root = self.root / SERVER_RAG_DIR / str(guild_id) / "channels" / str(channel_id)
+            legacy_channel_root = channel_scope_dir(guild_id, channel_id)
+            paths.extend(server_channel_root / name for name in extra_names if (server_channel_root / name).exists())
+            paths.extend(legacy_channel_root / name for name in extra_names if (legacy_channel_root / name).exists())
         if channel_id:
-            channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
-            paths.extend(channel_root / name for name in extra_names if (channel_root / name).exists())
+            server_channel_root = self.root / SERVER_RAG_DIR / str(channel_id)
+            legacy_channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
+            paths.extend(server_channel_root / name for name in extra_names if (server_channel_root / name).exists())
+            paths.extend(legacy_channel_root / name for name in extra_names if (legacy_channel_root / name).exists())
         return paths
 
     def _load_chunks(
@@ -359,6 +366,7 @@ class LocalRAG:
     def append_channel_qa(
         self,
         *,
+        guild_id: int | None = None,
         channel_id: int,
         question: str,
         answer: str,
@@ -372,7 +380,10 @@ class LocalRAG:
         if not answer:
             raise ValueError("answer is required")
 
-        channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
+        if guild_id is not None:
+            channel_root = self.root / SERVER_RAG_DIR / str(int(guild_id)) / "channels" / str(int(channel_id))
+        else:
+            channel_root = self.root / SERVER_RAG_DIR / str(channel_id)
         channel_root.mkdir(parents=True, exist_ok=True)
         faq_path = channel_root / "faq.json"
         entries: list[dict[str, object]] = []
@@ -402,6 +413,24 @@ class LocalRAG:
             json.dumps(entries, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            get_server_registry().upsert_rag_document(
+                scope="channel",
+                guild_id=guild_id,
+                channel_id=channel_id,
+                source_path=faq_path,
+                doc_type="faq.json",
+                title=question,
+                summary=answer[:500],
+                body=answer,
+                metadata={
+                    "tags": cleaned_tags,
+                    "question": question,
+                    **(metadata or {}),
+                },
+            )
+        except Exception:
+            pass
         return faq_path
 
     def append_guild_qa(self, **kwargs: object) -> Path:
@@ -410,7 +439,7 @@ class LocalRAG:
             guild_id = kwargs.pop("channel_id", None)
         if guild_id is None:
             raise TypeError("guild_id is required")
-        guild_root = guild_scope_dir(int(guild_id))
+        guild_root = self.root / SERVER_RAG_DIR / str(int(guild_id))
         guild_root.mkdir(parents=True, exist_ok=True)
         question = str(kwargs.pop("question", "")).strip()
         answer = str(kwargs.pop("answer", "")).strip()
@@ -447,4 +476,21 @@ class LocalRAG:
             json.dumps(entries, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            get_server_registry().upsert_rag_document(
+                scope="guild",
+                guild_id=int(guild_id),
+                source_path=faq_path,
+                doc_type="faq.json",
+                title=question,
+                summary=answer[:500],
+                body=answer,
+                metadata={
+                    "tags": cleaned_tags,
+                    "question": question,
+                    "guild_id": int(guild_id),
+                },
+            )
+        except Exception:
+            pass
         return faq_path
