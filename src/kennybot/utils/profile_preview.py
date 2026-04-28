@@ -12,6 +12,13 @@ from src.kennybot.utils.paths import CHANNEL_RAG_DIR, SERVER_RAG_DIR
 GENERIC_TITLE_TOKENS = {"README", "定義", "概要", "紹介", "説明"}
 SECTION_PRIORITY = ("定義", "体験内容", "主催", "運営", "活動カテゴリ")
 DISPLAY_REPLACEMENTS = (("出典", "出展"),)
+OPERATIONAL_TITLE_TOKENS = (
+    "運用方針",
+    "メモ",
+    "向けメモ",
+    "管理メモ",
+    "内部メモ",
+)
 
 
 def _scoped_directories(
@@ -74,6 +81,18 @@ def build_profile_chunks(
         if chunks:
             return chunks[:normalized_limit]
     return []
+
+
+def is_user_facing_profile_chunk(chunk: RagChunk) -> bool:
+    title = (chunk.title or "").strip()
+    if not title:
+        return True
+    return not any(token in title for token in OPERATIONAL_TITLE_TOKENS)
+
+
+def select_display_profile_chunks(chunks: list[RagChunk]) -> list[RagChunk]:
+    display_chunks = [chunk for chunk in chunks if is_user_facing_profile_chunk(chunk)]
+    return display_chunks or chunks
 
 
 def format_profile_chunks(chunks: list[RagChunk], max_chars: int = 1800) -> str:
@@ -227,9 +246,10 @@ def build_channel_profile_preview(
         scope=scope,
         limit=limit,
     )
-    profile_block = format_profile_chunks(chunks, max_chars=max_chars)
-    answer = summarize_profile_chunks(chunks, question=question)
-    profile_summary = _summarize_for_log(chunks, max_chars=500)
+    display_chunks = select_display_profile_chunks(chunks)
+    profile_block = format_profile_chunks(display_chunks, max_chars=max_chars)
+    answer = summarize_profile_chunks(display_chunks, question=question)
+    profile_summary = _summarize_for_log(display_chunks, max_chars=500)
     return {
         "guild_id": guild_id,
         "channel_id": channel_id,

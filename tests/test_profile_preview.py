@@ -16,6 +16,7 @@ from src.kennybot.utils.profile_preview import (
     build_channel_profile_preview,
     build_profile_management_log,
     build_profile_chunks,
+    select_display_profile_chunks,
     summarize_profile_chunks,
     write_jsonl_log,
 )
@@ -129,6 +130,48 @@ class ProfilePreviewTests(unittest.TestCase):
         self.assertIn("VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。", summary)
         self.assertIn("VRChat上で世界各地の観光地を巡る旅行体験イベント", summary)
         self.assertNotIn("ここは、", summary)
+
+    def test_display_profile_filters_operational_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guild_dir = root / "data" / "server" / "10"
+            guild_dir.mkdir(parents=True, exist_ok=True)
+            (guild_dir / "chat_rag.md").write_text(
+                textwrap.dedent(
+                    """\
+                    # ワールド概要
+                    - このワールドは交流用の場所です。
+
+                    # 運用方針
+                    - 前提は簡潔に説明する。
+
+                    # オーナー向けメモ
+                    - 交流の場として扱う。
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            chunks = build_profile_chunks(
+                root=root,
+                guild_id=10,
+                channel_id=10,
+                scope="guild",
+            )
+            display_chunks = select_display_profile_chunks(chunks)
+            preview = build_channel_profile_preview(
+                root=root,
+                guild_id=10,
+                channel_id=10,
+                scope="guild",
+                question="このサーバーはなにするところ？",
+            )
+
+            self.assertEqual([chunk.title for chunk in display_chunks], ["ワールド概要"])
+            self.assertIn("このワールドは交流用の場所です。", preview["profile"])
+            self.assertNotIn("運用方針", preview["profile"])
+            self.assertNotIn("オーナー向けメモ", preview["profile"])
+            self.assertNotIn("交流の場として扱う", preview["answer"])
 
     def test_build_profile_management_log_contains_summary_fields(self) -> None:
         preview = build_channel_profile_preview(

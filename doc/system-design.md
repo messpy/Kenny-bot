@@ -1,465 +1,492 @@
 # Kenny Bot 設計書
 
-## 1. 概要
+## 1. 目的
 
-Kenny Bot は Discord サーバー向けの多機能 Bot であり、主に以下を提供する。
+この文書は、Kenny Bot の現行実装を前提にした実装者向け設計書である。  
+README は利用者向けの概要、`docs/response_architecture.md` は応答品質に関する規範、`doc/message-flow.md` は詳細フローに特化し、本書はそれらをつなぐ全体設計を扱う。
 
-- AI 会話応答
-- スパム検知とモデレーション補助
-- 音声読み上げ、文字起こし、要約
-- ゲーム系コマンド
-- メッセージ履歴と意味検索ベースの補助記憶
+## 2. システム概要
 
-README は利用者向けの概要とセットアップに絞り、本書は実装者向けの設計資料として扱う。
+Kenny Bot は Discord 上で動作する多機能 Bot で、主に次の責務を持つ。
 
-## 2. 設計目標
+- メンション、リプライ、DM を起点にした AI 会話
+- チャンネルやサーバーに閉じた履歴、RAG、プロフィール参照
+- スラッシュコマンドによる補助機能
+- スパム抑止と簡易モデレーション
+- 議事録、音声、ゲーム、リアクションなどの周辺機能
 
-- Discord 上のイベントを安定して処理する
-- AI 機能を Bot 本体から分離し、差し替えや拡張をしやすくする
-- メッセージ履歴、ローカル知識、外部情報を組み合わせて応答品質を上げる
-- スパムや過剰な AI 呼び出しを抑制し、運用コストを下げる
-- 既存コードをルート直下の構成で維持しつつ、設定・ログ・RAG は `data/channel_rag/<guild_id>/` にスコープ分離できるようにする
-- 将来の生成物は `runtime/` に集約し、移行は段階的に行う
+現行の実装本体は `src/kennybot/` 配下にあり、リポジトリ直下の `bot.py` や `ai/` などは互換レイヤーまたは移行途中の入口として残っている。
 
-## 3. 論理構成
+## 3. 設計方針
 
-### 3.1 モジュール責務
+- Discord イベント処理を止めないことを優先する
+- AI 応答は単発生成ではなく、履歴、ローカル知識、プロフィール、必要時の外部情報を合成する
+- ギルド境界を壊さないことを最重要制約とする
+- 最新性が必要な問い合わせだけ外部検索へ逃がす
+- 実装の中心は `src/kennybot/` に寄せ、互換レイヤーは薄く保つ
+- ログ、キャッシュ、RAG、状態は `data/` と `runtime/` に分離して置く
+
+## 4. ディレクトリ責務
 
 - `bin/`
-  - 起動シェルラッパー
-  - `.env` 読み込み
-  - 多重起動防止
+  起動、再索引、プレビュー、補助メンテナンス用スクリプト。
 - `src/kennybot/`
-  - 将来の機能分割に向けた canonical な起動・初期化入口
-  - `features/chat/` から順に機能実装を移す受け皿
-  - `ai/`, `cogs/`, `guards/`, `commands/`, `utils/` は既存互換ラッパーとして mirror する
-- `bot.py`
-  - Bot インスタンス生成
-  - 主要サービス初期化
-  - Cog 登録
-  - グローバルエラーハンドリング
-- `cogs/`
-  - Discord イベントや slash command の受け口
-  - 個別機能単位のユースケース制御
-- `ai/`
-  - Ollama 実行
-  - 会話生成
-  - 外部検索や要約
-  - 音声認識や画像補助
-- `guards/`
-  - スパム判定
-  - モデレーション実行
-- `utils/`
-  - 設定、スコープ付きデータ、ログ、履歴、ベクトル保存、RAG、補助処理
-- `doc/`
-  - 設計書、仕様書、運用文書
+  現行の実装本体。
+- `src/kennybot/cogs/`
+  Discord イベントと slash command の受け口。
+- `src/kennybot/ai/`
+  Ollama 呼び出し、検索、要約など AI 周辺処理。
+- `src/kennybot/features/`
+  機能単位で分離を進める層。現状は chat が先行している。
+- `src/kennybot/utils/`
+  設定、ログ、RAG、履歴、ベクトル保存、ツール実行などの基盤処理。
+- `src/kennybot/guards/`
+  スパム判定とモデレーション実行。
+- `data/`
+  永続データ。メッセージログ、ギルド別 RAG、サーバー情報など。
 - `runtime/`
-  - 生成物、キャッシュ、状態、移行中の成果物を集約する予約領域
-- `src/`
-  - 将来の実装コードの集約先候補
+  実行中生成物。キャッシュ、履歴、状態、一時ファイル。
+- `doc/`
+  実装者向け設計文書。
+- `docs/`
+  応答方針やローカル検証など、特定テーマの補足文書。
 
-### 3.2 全体アーキテクチャ
+## 5. 起動アーキテクチャ
 
-```mermaid
-flowchart TD
-    U[Discord User] --> D[Discord Gateway / Interaction]
-    D --> B[MyBot]
-    B --> C1[MessageLogger]
-    B --> C2[SlashCommands]
-    B --> C3[TTSReader]
-    B --> C4[GameCommands]
-    B --> C5[VoiceLogger / MemberLogger / AuditLogger]
+起動入口は `bin/run.py` である。ここで排他制御、環境変数読み込み、Bot 生成を行い、`src/kennybot.bot.MyBot` を起動する。
 
-    C1 --> G[SpamGuard]
-    C1 --> R1[LocalRAG]
-    C1 --> R2[LiveInfoService]
-    C1 --> R3[MessageStore]
-    C1 --> R4[MessageVectorStore]
-    C1 --> A1[OllamaClient / ChatService]
+### 5.1 起動シーケンス
 
-    G --> M[ModActions]
-    A1 --> O[Ollama]
-    R2 --> W[Web / External Sources]
-    R3 --> DS[(JSON Logs)]
-    R4 --> DB[(SQLite Vector DB)]
-```
+1. `setup_logging()` でログ設定を初期化
+2. `acquire_lock(data/kennybot.lock)` で多重起動を防止
+3. `.env` を読み込み、`DISCORD_TOKEN` を必須検証
+4. `src/kennybot.bootstrap.create_bot()` で `MyBot` を生成
+5. `bot.run(token)` で Discord Gateway に接続
 
-## 4. 起動設計
+### 5.2 `MyBot` 初期化責務
 
-起動は `bin/run.py` を起点とし、環境読み込みと排他制御を先に行ってから `src/kennybot/bootstrap.py` の初期化ヘルパーへ渡す。
+`src/kennybot/bot.py` の `MyBot` がアプリケーションの構成ルートである。
 
-### 4.1 起動シーケンス
+- `SpamGuard` を設定値から構築
+- `MeetingMinutesManager` を初期化
+- `AIProgressTracker` を初期化
+- Ollama 実行系として `OllamaRunner` を準備
+- 会話系として `ChatMemory` と `ChatService` を準備
+- 検索系として `AISearchService` を準備
+- `OLLAMA_HOST` / `OLLAMA_EMBED_HOST` を見て Ollama Client API を構築
+- `setup_hook()` で Cog 群を登録
+- `on_ready()` で slash command を同期
+- `on_app_command_error()` と `on_error()` でグローバル例外を集約
 
-```mermaid
-sequenceDiagram
-    participant CLI as bin/run.py
-    participant Lock as SingleInstance
-    participant Env as utils.env
-    participant Boot as src/kennybot/bootstrap
-    participant Bot as MyBot
-    participant Discord as Discord API
+## 6. 実行時コンポーネント
 
-    CLI->>Lock: acquire_lock(data/kennybot.lock)
-    Lock-->>CLI: success / fail
-    CLI->>Env: load_env_file()
-    CLI->>Env: require_env(DISCORD_TOKEN)
-    CLI->>Boot: create_bot()
-    Boot->>Bot: instantiate MyBot(...)
-    Bot->>Bot: initialize spam guard / AI / services
-    CLI->>Discord: bot.run(token)
-    Discord-->>Bot: on_ready / events
-```
+### 6.1 Cog 層
 
-### 4.2 起動時の重要ポイント
+- `MessageLogger`
+  通常メッセージ処理の中心。AI 応答、履歴収集、RAG、Web 検索判断、イベント記録を担う。
+- `SlashCommands`
+  `/help`、`/bot_info`、要約、議事録、VRChat 検索などの slash command を提供する。
+- `VoiceLogger`
+  議事録や VC 関連のイベント処理を担う。
+- `TTSReader`
+  読み上げ系機能を提供する。
+- `GameCommands`
+  ミニゲーム系のコマンド入口。
+- `MemberLogger` / `AuditLogger`
+  メンバー、監査系のイベント記録。
+- `ModPanel` / `ReactionRoles`
+  モデレーション UI やロール付与機能。
 
-- 多重起動は `data/kennybot.lock` で防止する
-- `MyBot` 初期化時に AI クライアント、スパムポリシー、議事録管理、進捗トラッカーを組み立てる
-- `setup_hook()` で Cog を登録する
-- `on_ready()` で slash command 同期を実施する
+### 6.2 サービス層
 
-## 5. 会話処理設計
-
-`cogs/message_logger.py` が通常メッセージ処理の中心である。ここでリアクション、会話、履歴保存、意味検索、外部情報補助が交差する。
-
-- 会話ロジックの本体は `src/kennybot/features/chat/` に移設を開始した
-- `ai/chat.py` は既存 import 維持のための互換ラッパーとして残している
-
-### 5.1 メッセージ処理フロー
-
-```mermaid
-flowchart TD
-    A[Message Received] --> B{Bot/対象外?}
-    B -- Yes --> Z[Ignore]
-    B -- No --> C[Normalize Text]
-    C --> D[SpamGuard Check]
-    D --> E{Violation?}
-    E -- Yes --> F[Warn / Delete / Timeout / Kick / Ban]
-    E -- No --> G[Persist Message Log]
-    G --> H[Schedule Embedding Index]
-    H --> I{Mention / Reply / Trigger?}
-    I -- No --> J[Optional Keyword Reaction]
-    I -- Yes --> K[Build Context]
-    K --> L[LocalRAG + History + Semantic Memory + Member/Channel Profile + Live Info]
-    L --> M[Call Ollama]
-    M --> N[Send Response]
-```
-
-### 5.2 応答コンテキストの構成
-
-AI 応答時は単一の情報源ではなく、複数の補助コンテキストを組み合わせる。
-
-- 直近の会話履歴
-- 発言者や返信先に応じた対象ユーザー履歴
-- `LocalRAG` によるローカル知識
-- `MessageVectorStore` による意味的に近い過去発言
-- 必要時のみ `LiveInfoService` による外部情報
-
-### 5.3 会話フロー詳細
-
-```mermaid
-flowchart LR
-    U[User Prompt] --> H1[Recent History]
-    U --> H2[Target User Context]
-    U --> H3[LocalRAG]
-    U --> H4[Semantic Memory Search]
-    U --> H5[Live Info Decision]
-    H1 --> P[Prompt Assembly]
-    H2 --> P
-    H3 --> P
-    H4 --> P
-    H5 --> P
-    P --> O[Ollama Chat]
-    O --> R[Discord Reply]
-```
-
-### 5.4 プロフィールと RAG の優先順位
-
-- `member_profile`
-  - 対象ユーザーのニックネーム、ロール、参加日時、アカウント作成日、状態、アクティビティをまとめた一括プロフィール
-  - `getplayerinfo` 相当の内部抽象として扱う
-- `channel_profile`
-  - サーバー、チャンネル、ワールドの正式プロフィール
-  - `getserverinfo` 相当の内部抽象として扱う
+- `ChatService`
+  旧来の会話実行サービス。短い履歴付き生成を担当する。
+- `OllamaClientService` 相当の Client API 経路
+  現在の `MessageLogger` 側のツール呼び出し付き応答で使う。
+- `AISearchService`
+  DuckDuckGo 検索と Web 要約をまとめる。
+- `LiveInfoService`
+  最新性が必要な文脈の補助情報を扱う。
 - `LocalRAG`
-  - `knowledge/` と `data/channel_rag/<guild_id>/` 以下の説明、ルール、設定を参照する
-- `Retrieval Planner`
-  - 明示メンション、返信先、対象名から取得対象を決める
-  - `どんな人？` 系は人物本人の発言履歴とプロフィールを優先する
-  - `このサーバーは何のやつ？` 系は場所プロフィールを優先する
+  `knowledge/` やギルド別データからローカル知識を返す。
+- `MessageVectorStore`
+  メッセージ埋め込みの保存と意味検索を担う。
+- `MessageFetcher`
+  Discord 履歴から recent turns や user history を収集する。
 
-### 5.5 現在の会話フロー詳細
-
-現在の会話処理は、単純な「ユーザー入力 -> LLM 応答」ではなく、以下の順で段階的に処理される。
-
-1. `on_message` で受信
-   - Bot 自身の発言や対象外メッセージを除外する
-   - 文字正規化、制御文字除去、メンション判定を行う
-2. 不満・不具合の検出
-   - `txt`, `text`, `添付`, `不具合`, `反映`, `動いてない`, `Unknown interaction` などの指摘を検出する
-   - Bot への不満と判断した場合は `codex修正モード開始` を記録する
-   - この記録は `events.log` と Discord 管理ログの両方を対象にする
-   - その際、直前のユーザープロンプトと直前の Bot 応答を履歴から抜き出し、修正対象の文脈として一緒に記録する
-   - 修正が必要なケースでは、`判定AI -> ユーザー返信AI -> Codex依頼AI` の 3 段で処理する
-3. 取得プランの決定
-   - まず AI に `retrieval_plan_prompt` を渡し、どの情報源を使うかを JSON で返させる
-   - 失敗時は `_fallback_retrieval_plan()` がルールベースで代替する
-   - `web_search` は「最新」「今」「今日」「ニュース」など、ローカル情報だけでは危ない場合に追加される
-4. コンテキスト収集
-   - `recent_user_history`
-   - `member_history`
-   - `recent_turns`
-   - `reply_chain`
-   - `channel_profile`
-   - `local_knowledge`
-   - `bot_command_catalog`
-   - `bot_game_catalog`
-   - `runtime_model`
-   - `vrchat_world`
-   - `web_search`
-   を必要に応じて積み上げる
-5. プロンプト組み立て
-   - `PROMPT_TEMPLATE` に収集した履歴を埋める
-   - `system_message` を先頭に付け、現在日時、チャンネル情報、注意事項を与える
-   - AI に渡すツール一覧を組み立てる
-6. AI に tool call を許可して応答生成
-   - `web_search` / `web_fetch` を含むホワイトリスト型のツールだけを使わせる
-   - モデルが `tool_calls` を返したら Python 側が実関数を実行する
-   - `web_search` / `web_fetch` 実行時は管理ログへも記録する
-   - tool 結果をモデルへ戻し、最大数ラウンドまで再実行する
-   - 修正モードが有効な場合は `codex_mode` として別経路に分岐し、ユーザー返信用と Discord 管理システムログ向けの Codex 依頼を分ける
-7. 応答後処理
-   - 返答本文を無害化・整形する
-   - 長文は分割送信する
-   - コード以外の `txt` 添付は使わない
-   - 必要な場合だけコード寄り返信を整形する
-
-```mermaid
-flowchart TD
-    A[on_message] --> B{Bot 自身 / 対象外?}
-    B -- Yes --> Z[Ignore]
-    B -- No --> C[Text Normalize]
-    C --> D{Fix request?}
-    D -- Yes --> D1[codex修正モード開始を記録]
-    D -- No --> E[Build retrieval plan]
-    D1 --> E
-    E --> F{AI plan ok?}
-    F -- Yes --> G[Collect contexts]
-    F -- No --> H[Fallback retrieval plan]
-    H --> G
-    G --> I[Assemble prompt]
-    I --> J[LLM chat with tools]
-    J --> K{tool_calls?}
-    K -- Yes --> L[Run whitelisted tool functions]
-    L --> J
-    K -- No --> M[Sanitize / chunk response]
-    M --> N[Discord reply]
-```
-
-### 5.6 取得プランナーの役割
-
-取得プランナーは、AI 応答前に「何を参照するか」を決める層である。
-
-- まず JSON で取得ソース一覧を返させる
-- 明示メンションがある場合は、`mentioned_1`, `mentioned_2`, `replied_user` を優先する
-- `この人`, `その人`, `最後の投稿の人` などは対象人物の履歴とプロフィールを優先する
-- `このサーバー`, `このチャンネル`, `このワールド` は `channel_profile` を優先する
-- Bot 自身への不満・不具合・反映漏れは `local_knowledge`, `runtime_model`, `bot_command_catalog` を優先し、`web_search` は原則使わない
-
-この層の失敗は fallback で吸収するが、fallback も完全な推測ではなく、既知のルールに基づいて最小限の情報を選ぶ。
-
-### 5.7 Web 検索・関数呼び出し設計
-
-web 検索は「AI が必要と判断したら Python 側で実行する」方式である。LLM に任意コード実行権限は与えていない。
-
-- `src/kennybot/cogs/message_logger.py` でツール一覧を組み立てる
-- ツールはホワイトリスト方式で、`web_search`, `web_fetch`, `local_knowledge` 系の補助関数だけを公開する
-- モデルが `tool_calls` を返したら、Python 側が関数名を照合して実行する
-- 実行結果を `tool` メッセージとして再投入し、必要なら再度 tool call を回す
-- `web_search` / `web_fetch` の使用は `events.log` と管理ログへ記録する
-- Gemini 系でも同じ構造で、`functionDeclarations` と `functionCall` に変換しているだけである
-
-#### codex_mode
-
-- `codex_mode=true` のときは、通常の AI 応答とは別に Codex 依頼ログを作る
-- `codex_mode` では、直前のユーザープロンプトと直前の Bot 応答を含む修正依頼プロンプトを生成し、別ログに送る
-- `codex_mode` の出力先は、ユーザー向け返信とは分離した Discord 管理システムログとする
-- `codex_mode` の判定は、苦情・不具合・反映漏れ・起動失敗などの修正対象イベントをトリガーにする
-
-`参照概要` と `参照詳細` の違いは次の通り。
-
-- `参照概要`
-  - 参照した情報源を短くまとめた要約
-  - 何を見たかを一目で把握するためのラベル群であり、詳細本文ではない
-- `参照詳細`
-  - 実際に参照した候補やツール結果の詳細を細かく出す
-  - メッセージ ID、URL、ツール名、web 検索クエリ、個別の参照断片を含む
-
-### 5.8 エラーと修正モード
-
-エラーと不満は、できるだけ早い段階でログ化する。
-
-- 未捕捉例外
-  - `sys.excepthook`
-  - `threading.excepthook`
-  - asyncio loop exception handler
-- Discord イベント例外
-  - `on_error`
-  - `on_app_command_error`
-  - `cog_app_command_error`
-- ユーザーの指摘
-  - Bot への不満、反映漏れ、`txt` 化、`Unknown interaction`、動作不良など
-
-これらは `events.log` に残し、必要なら Discord 管理ログにも送る。
-ユーザー指摘が Bot の挙動修正対象だと判定された場合は `codex修正モード開始` として扱い、`issue` と `planned_fix` を併記する。
-加えて、直前のユーザープロンプトと直前の Bot 応答を必ず参照し、どの応答に対する不満かを切り分けられるようにする。
-修正モードの目的は「指摘内容を記録すること」ではなく、「次に直すべき実装箇所を明確にすること」である。
-
-修正モードの内部は次の 3 段に分かれる。
-
-1. 判定AI
-   - ユーザーの発話が修正対象か、どの領域が問題かを判断する
-   - 直前のユーザープロンプトと直前の Bot 応答を入力に含める
-2. ユーザー返信AI
-   - ユーザーに返す短い説明だけを生成する
-   - 内部実装や Codex の詳細は出さない
-3. Codex依頼AI
-   - 修正担当に渡す依頼文を生成する
-   - 問題、直前の入出力、対象領域、予定修正を含める
-
-### 5.9 現行の注意点
-
-- `web_search` は万能ではなく、ローカル情報で十分なら使わない
-- `txt` はコード以外では使わない
-- 修正モードはユーザー指摘の自動仕分けであり、無関係な外部検索を増やすためのものではない
-- 設計上の判断は `doc/` に、利用者向けの案内は `README.md` に分ける
-
-## 6. メッセージ保存設計
-
-メッセージ保存は二層で行う。
-
-- 可読な履歴保存: JSON ベース
-- 類似検索用保存: SQLite ベースのベクトルストア
-
-### 6.1 保存の狙い
-
-- 監査や会話文脈の再利用を可能にする
-- 同一チャンネルや関連ユーザーの過去発言を参照できるようにする
-- embedding を用いた意味検索により、単純な全文一致では拾えない関連会話を取得する
-
-### 6.2 保存フロー
-
-```mermaid
-sequenceDiagram
-    participant Msg as Discord Message
-    participant Cog as MessageLogger
-    participant Log as MessageStore
-    participant Emb as Embed Client
-    participant Vec as MessageVectorStore
-
-    Msg->>Cog: on_message
-    Cog->>Log: save raw message log
-    Cog->>Emb: embed(content)
-    Emb-->>Cog: vector
-    Cog->>Vec: upsert_message(...)
-```
-
-### 6.3 スコープ付きデータ
-
-- `utils/scoped_data.py` が `data/channel_rag/<guild_id>/` 以下の設定・RAG データと `runtime/logs/channel_rag/<guild_id>/` 以下のログ保存先を分けてまとめる
-- `utils/message_store.py` は新規のメッセージ履歴を `runtime/logs/message_logs/` に保存し、旧保存先は読み取り互換として残す
-- `utils/message_logger.py` と `utils/event_logger.py` は、サーバー/チャンネル別のログを `runtime/logs/channel_rag/<guild_id>/logs/` と `runtime/logs/channel_rag/<guild_id>/channels/<channel_id>/logs/` に書き出す
-- フォルダが未作成でも保存前に作成するため、初回参照で落ちない
-
-## 7. モデレーション設計
-
-モデレーションは `SpamGuard` と `ModActions` の分担で構成される。
+### 6.3 Guard 層
 
 - `SpamGuard`
-  - 投稿頻度
-  - 重複メッセージ
-  - AI 呼び出し頻度
-  - 警告クールダウン
+  通常メッセージ頻度、AI 呼び出し頻度、重複発話を検査する。
 - `ModActions`
-  - メッセージ削除
-  - タイムアウト
-  - キック
-  - バン
+  警告、削除、Timeout など実際の対応を実行する。
 
-### 7.1 モデレーション判定フロー
+## 7. メッセージ処理設計
 
-```mermaid
-flowchart TD
-    A[Incoming Message] --> B[SpamGuard Evaluate]
-    B --> C{Threshold Exceeded?}
-    C -- No --> D[Continue Processing]
-    C -- Yes --> E[Update Violation Level]
-    E --> F[Select Action]
-    F --> G[Execute ModActions]
-    G --> H[Send Event Log / Panel Update]
-```
+通常会話の中心は `src/kennybot/cogs/message_logger.py` の `on_message` 系処理である。  
+この層は単に LLM を呼ぶのではなく、「応答すべきか」「何を参照すべきか」「どこまで外部情報に頼るか」を先に決める。
 
-## 8. 音声・周辺機能設計
+現行実装では、この会話処理の複数ステージが `MessageLogger` 内に混在している。  
+すなわち、受信判定、初期コンテキスト収集、Planner 呼び出し、取得実行、整形、Final LLM 入力組み立て、送信、ログ保存が一つの Cog に集約されている。  
+これは現時点の運用と互換性を優先した構成であり、今回の設計更新はこの実装を壊さずに、将来の分離目標を明文化するものである。
 
-音声系は会話系とは別責務で動くが、Bot 本体の初期化とイベント基盤を共有する。
+### 7.1 一次判定
 
-- `TTSReader`
-  - VOICEVOX 読み上げ
-- `VoiceLogger`
-  - ボイスチャンネル関連イベント
-- `ai/google_speech.py`
-  - Google Speech-to-Text
-- `utils/meeting_minutes.py`
-  - 議事録管理
+最初に次を除外または分岐する。
 
-音声認識は Google Speech-to-Text を優先し、失敗時に別系統へフォールバックする想定で設計されている。
+- Bot 自身の発言
+- Webhook 発言
+- DM
+- `kenny-chat` 中継対象
+- スパム違反
 
-## 9. エラー処理方針
+### 7.2 応答対象判定
 
-- アプリコマンドの例外は `MyBot.on_app_command_error()` に集約する
-- 未処理イベント例外は `MyBot.on_error()` で記録する
-- `send_event_log()` はボット由来の操作ログに限定し、`source_channel_id` が統一ログチャンネルと一致する場合は送信しない
-- 通常メッセージ由来の反応や監査ログは、ボットに関係するものだけを統一ログへ流す
-- 外部依存の失敗は、可能であればフォールバックする
-- Gemini の `generateContent` が 429 / クォータ超過になった場合は、`OLLAMA_FALLBACK_MODEL` と `ollama.model_chat` / `ollama.model_summary` を順に試して Ollama へ切り替える
-- サーバー固有の説明は `data/channel_rag/<guild_id>/chat_rag.md` に、チャンネル固有の説明は `data/channel_rag/<guild_id>/channels/<channel_id>/` に保存し、会話応答のローカル知識として参照する
-- 録音系の設定は `recorder.default_format` / `recorder.max_minutes` / `recorder.silence_timeout_seconds` / `recorder.max_tracks` / `recorder.auto_cook_formats` を使い、外部録音の停止と後処理に反映する
-- `meeting.audio_max_total_mb` / `meeting.audio_max_user_mb` は `0` を無制限として扱い、メモリ上限をかけたいときだけ有効化する
+AI 応答へ進む条件は主に次である。
 
-## 10. ディレクトリ方針
+- Bot へのメンション
+- Bot 発言へのリプライ
+- 直前メンション後の短時間継続会話
 
-### 10.1 現状
+それ以外の通常メッセージでは、埋め込み登録とキーワードリアクションが主処理になる。
 
-- 既存コードはルート直下の `ai/`, `cogs/`, `guards/`, `utils/`, `commands/` に分かれている
-- エントリポイントは `bin/run.py`
-- 設計書は `doc/` に配置する
-- 主要な実行経路はルート直下のモジュールを前提にしている
+### 7.3 AI 応答フロー
 
-### 10.2 今後の方針
+AI 応答時は次の順で処理する。
 
-- `src/` は将来の整理先として残し、移行する場合は段階的に行う
-- 既存コードは無理に一括移行せず、変更対象に近い単位で段階移行する
-- import パス、起動スクリプト、テスト手順を壊さないことを優先する
-- サーバー知識は `data/channel_rag/<guild_id>/chat_rag.md` を、チャンネル知識は `data/channel_rag/<guild_id>/channels/<channel_id>/` を直接編集して追加する
+1. 特殊クエリ判定
+   議事録開始停止、Bot 機能説明、モデル情報などを先に捌く。
+2. AI レート制限判定
+   `SpamGuard.allow_ai()` 相当で連続呼び出しを抑止する。
+3. メッセージ索引予約
+   応答の有無に関係なく埋め込み登録を進める。
+4. 取得プラン決定
+   `retrieval_plan_prompt` で使う情報源を決め、失敗時はルールベースにフォールバックする。
+5. コンテキスト収集
+   recent turns、user history、reply chain、profile、RAG、コマンド一覧、必要時の Web 検索を集める。
+6. Final LLM 実行
+   Planner が選んだ情報源の実行結果だけを入力にして応答を生成する。
+7. 後処理
+   整形、無害化、長文分割、ログ送信を行う。
 
-### 10.3 想定移行イメージ
+詳細フローは `doc/message-flow.md` を参照する。
 
-```mermaid
-flowchart LR
-    A[Current Root Modules] --> B[Gradual Migration Targets]
-    B --> C[Shared Utilities Organized]
-    C --> D[Gradual Import Path Cleanup]
-    D --> E[Entry Point and Tests Updated]
-```
+### 7.4 正式な目標フロー
 
-## 11. 実装時の運用ルール
+正式な目標フローは、現在の `MessageLogger` 集約型実装を次の 8 段階へ整理したものである。
 
-- 機能追加時は、必要なら `doc/feature-<name>.md` を追加する
-- 大きな構成変更時は本書を更新する
-- README には詳細設計を戻さず、参照リンクを置く
-- 外部依存の増減があればセットアップ手順も更新する
+1. メンション / DM / 返信の受信
+2. Minimal Context Builder
+3. Planner LLM
+4. Tool Resolver
+5. Context Compressor
+6. Final Prompt Builder
+7. Final LLM
+8. Discord 送信 + Log Writer
 
-## 12. 未整理事項
+### 7.5 8段階フローの定義
 
-- `src/` への具体的な移行単位はまだ未確定
-- テスト構成と CI 方針は別文書化していない
-- AI 機能のプロンプト設計詳細は専用文書化されていない
+#### 1. メンション / DM / 返信の受信
+
+Discord イベントから会話対象を受け取り、Bot 自身の投稿、Webhook、対象外入力、スパム違反などの一次判定を行う。
+
+#### 2. Minimal Context Builder
+
+Planner へ渡す前の最低限コンテキストを組み立てる段階である。  
+少なくとも次をここで揃える。
+
+- ユーザー ID
+- サーバー ID
+- チャンネル ID
+- 発言本文
+- 返信元
+- 添付情報
+- 直近ユーザー発言
+
+現行実装ではこの処理は独立コンポーネントではなく、`MessageLogger` 内の履歴取得や文脈解決処理に分散している。
+
+#### 3. Planner LLM
+
+Minimal Context を受け、「この質問に答えるには何を読むべきか」を判断する段階である。  
+Planner は `available_tools` カタログを見て、必要な情報源と取得方針を JSON Plan として返す。
+
+#### 4. Tool Resolver
+
+Planner の JSON Plan を受け、必要な情報源を Python 側で実行する段階である。  
+Discord 情報、履歴、RAG、Web/API、Bot 状態、ログ情報などの実取得はここに属する。
+
+#### 5. Context Compressor
+
+取得結果をそのまま Final LLM に渡さず、長すぎる履歴や RAG、検索結果を整理、圧縮、重複除去する段階である。  
+最終的には、回答に必要な情報だけを短く保った構造化コンテキストへ落とし込む。
+
+場所説明系では特に、ユーザー向け説明と運用メモを分離する。  
+たとえば `ワールド概要` は回答候補に残し、`運用方針` や `オーナー向けメモ` のような内部寄りセクションは Final LLM に渡す前に除外または優先度を下げる。
+
+#### 6. Final Prompt Builder
+
+元の質問、Planner の判断、Tool 実行結果、圧縮済みコンテキストを Final LLM 向けの入力へ変換する段階である。  
+Prompt template、system message、現在時刻、場所情報、制約条件の注入もここに属する。
+
+#### 7. Final LLM
+
+Final Prompt Builder が組み立てた入力を使い、ユーザー向け自然文を生成する段階である。  
+内部 JSON、tool 名、planner の内部表現はここでユーザー表示文へ露出させない。
+
+#### 8. Discord 送信 + Log Writer
+
+生成した自然文を Discord に返し、あわせてユーザー発言、使用情報源、AI 応答、エラーをログへ保存する段階である。  
+送信処理と監査ログ記録を最終段に集約する。
+
+### 7.6 現行実装との差分
+
+現行実装は概念的には上記 8 段階を担っているが、責務境界はまだ明確に分離されていない。
+
+- 受信、Minimal Context Builder、Planner 呼び出し、Tool 実行、Final Prompt Builder、送信、ログ保存の多くが `MessageLogger` に同居している
+- Context Compressor は独立段ではなく、取得結果の整形処理として文脈構築中に混在している
+- 場所説明用 RAG にユーザー向け説明と運用メモが同居する場合があり、現行実装ではこの分離が不十分な箇所がある
+- Final LLM には圧縮済みコンテキストは渡っているが、Planner の JSON Plan 自体は明示的入力としてはまだ渡していない
+- 初期コンテキストの最低単位は可変設定中心であり、「直近ユーザー履歴 3 件」がまだ固定契約になっていない
+
+したがって、現在の実装は「8段階フローを一つのクラスで連続実行している状態」とみなせる。
+
+## 8. Retrieval 設計
+
+Kenny Bot の応答品質は、プロンプトよりも「何を取得して渡したか」に強く依存する。  
+そのため `MessageLogger` では Retrieval Planner を前段に置いている。  
+ここでいう `available_tools` は固定の関数一覧ではなく、Planner LLM に渡す「取得可能な情報源カタログ」を指す。
+
+### 8.1 Planner と Final LLM の責務分離
+
+- Planner LLM
+  ユーザー発話と現在の Discord 文脈を見て、どの情報源を取得するべきかを選ぶ。
+- 実行層
+  Planner の選択に従って Python 側が情報源を実行し、必要なデータだけを収集する。
+- Final LLM
+  実行済みの取得結果だけを入力にして最終回答を書く。
+
+この分離により、最終回答の品質は「どの tool 名を選んだか」ではなく、「どの情報が取得され、どの形で Final LLM に渡ったか」で管理する。
+
+### 8.2 `available_tools` カタログ
+
+Planner LLM には、固定リストの低レベル API ではなく、取得可能な情報源カタログとして次の名前を渡す。
+
+- Discord 系
+  `get_server_info`
+  `get_channel_info`
+  `get_user_info`
+  `get_member_profile`
+  `get_recent_messages`
+  `get_user_recent_messages`
+  `get_channel_recent_messages`
+  `get_reply_message`
+  `get_reply_chain`
+  `get_message_by_id`
+  `get_thread_messages`
+  `get_mentions_in_message`
+  `get_attachment_metadata`
+  `analyze_attachment`
+- 履歴 / RAG 系
+  `search_semantic_history`
+  `get_local_knowledge`
+  `get_guild_rag`
+  `get_channel_rag`
+  `get_member_history`
+  `get_channel_profile`
+  `get_bot_memory`
+  `get_conversation_summary`
+- Bot 機能情報系
+  `get_bot_command_catalog`
+  `get_bot_game_catalog`
+  `get_runtime_model`
+  `get_bot_status`
+  `get_available_tools`
+- 外部 API 系
+  `web_search`
+  `web_fetch`
+  `get_weather`
+  `search_vrchat_world`
+  `get_url_metadata`
+- ログ / 管理系
+  `log_user_message`
+  `log_ai_output`
+  `send_event_log`
+  `get_recent_bot_logs`
+  `get_error_logs`
+- 安全 / 制御系
+  `check_spam_guard`
+  `check_ai_rate_limit`
+  `enqueue_ai_request`
+  `get_queue_status`
+
+Planner はこのカタログから必要な情報源を選び、実行層はそれを実データ取得へ解決する。  
+`get_available_tools` はユーザー向けの内部一覧ではなく、Planner が利用可能な取得範囲を再確認するためのメタ情報源として扱う。
+
+### 8.3 主な情報源の解決イメージ
+
+- `get_user_recent_messages` / `get_member_history`
+  発話者や対象人物の直近履歴を返す。
+- `get_recent_messages` / `get_channel_recent_messages`
+  チャンネルの直近会話を返す。
+- `get_reply_message` / `get_reply_chain`
+  返信元の文脈を返す。
+- `search_semantic_history`
+  類似埋め込み検索を返す。
+- `get_channel_profile` / `get_channel_info` / `get_server_info`
+  サーバーやチャンネルの説明を返す。
+- `get_member_profile` / `get_user_info`
+  ユーザーや参加者の説明を返す。
+- `get_local_knowledge` / `get_guild_rag` / `get_channel_rag`
+  `knowledge/` やギルド別 RAG を返す。
+- `get_bot_command_catalog` / `get_bot_game_catalog`
+  Bot 機能や slash command の説明を返す。
+- `get_runtime_model` / `get_bot_status` / `get_queue_status`
+  実行中モデルや稼働状態を返す。
+- `search_vrchat_world`
+  VRChat ワールド検索結果を返す。
+- `web_search` / `web_fetch` / `get_weather` / `get_url_metadata`
+  最新性や外部参照が必要な情報を返す。
+
+上記は Planner に見せる情報源名と、その代表的な解決イメージである。  
+内部実装では統合、別名、将来の差し替えを許容するが、Planner 契約としての意味は保つ。
+
+### 8.4 取得ポリシー
+
+- 人物質問では `member_profile` と `member_history` を優先する
+- サーバー、チャンネル説明では `channel_profile` を最優先する
+- Bot の使い方質問では `bot_command_catalog` と `local_knowledge` を優先する
+- 最新ニュース、天気、価格、在庫などは `web_search` を追加する
+- 取得計画の AI 出力が壊れた場合でも `_fallback_retrieval_plan()` で最低限の応答を維持する
+
+### 8.5 Final LLM への入力制約
+
+- Final LLM には tool 実行結果のみを渡す
+- tool 名、内部 JSON、planner の生出力は原則渡さない
+- ユーザー向け回答には tool 名や内部トレースを出さない
+- 必要なら出典 URL や参照先だけを自然文に埋め込む
+
+この制約は、最終回答を自然な日本語に保ちつつ、内部実装の変更が回答文面に漏れないようにするためのもの。
+
+### 8.6 規範文書との関係
+
+`docs/response_architecture.md` は特に `serverinfo` 系質問の優先順位を固定する規範文書である。  
+実装は次の制約を守る必要がある。
+
+- ギルド外のデータを place description に混ぜない
+- `serverinfo` で recent turns を主根拠にしない
+- ローカルな場所説明に Web 検索を優先しない
+- 最終回答に planner や tool の内部表現を漏らさない
+
+## 9. AI バックエンド設計
+
+### 9.1 主経路
+
+通常会話の主経路は Ollama である。
+
+- `OLLAMA_MODEL_DEFAULT`
+  既定モデル。
+- `OLLAMA_MODEL_CHAT`
+  会話向け主モデル。
+- `OLLAMA_MODEL_SUMMARY`
+  要約やフォールバックで使う候補。
+
+### 9.2 二つの実行経路
+
+現状は AI 呼び出しが二系統ある。
+
+- `OllamaRunner`
+  subprocess/asyncio ベースの旧実装。
+- `ollama_client.chat_simple(...)`
+  Client API ベースの新しめの経路。
+
+設計上は後者を主経路として整理していくが、現時点では互換のため両方が共存している。
+
+### 9.3 外部情報補助
+
+検索は `DuckDuckGoSearch` を使い、その要約や最終回答の統合に Ollama を使う。  
+外部検索は「最新性」「価格」「在庫」「ニュース」など時点依存の質問に限定する。
+
+## 10. データ配置
+
+### 10.1 永続データ
+
+- `data/channel_rag/<guild_id>/`
+  ギルド単位、必要に応じてチャンネル単位の知識。
+- `data/server/`
+  サーバー関連の補助データ。
+- `data/server_rag/`
+  サーバー説明用の RAG データ。
+- `data/message_logs/`
+  発話ログ。
+- `data/kennybot.lock`
+  多重起動防止ロック。
+
+### 10.2 実行時データ
+
+- `runtime/cache/`
+  キャッシュ。
+- `runtime/history/`
+  実行履歴や補助出力。
+- `runtime/logs/`
+  実行時ログ。
+- `runtime/state/`
+  実行中状態。
+- `runtime/tmp/`
+  一時ファイル。
+
+### 10.3 スコープ規則
+
+ギルド境界は `scoped_data.py` の責務で管理する。  
+メッセージイベントでは `msg.guild.id`、インタラクションでは `interaction.guild_id` を起点にし、別ギルドのデータへ暗黙フォールバックしてはいけない。
+
+## 11. ログと障害対応
+
+### 11.1 ログの種類
+
+- 通常ログ
+  `setup_logging()` で初期化するプロセスログ。
+- イベントログ
+  `send_event_log()` による Discord 管理ログ送信。
+- 会話ログ
+  `log_user_message()`、`log_ai_output()` などの会話監査ログ。
+- 修正モードログ
+  `log_codex_repair_mode()` による障害や不満フィードバックの記録。
+
+### 11.2 障害時の基本方針
+
+- 起動失敗、slash sync 失敗、未処理例外は管理ログへ送る
+- 同種のイベント例外は短時間で抑制し、ログスパムを防ぐ
+- ユーザーには実装内部ではなく、失敗した事実だけを簡潔に返す
+
+## 12. 既知の設計上の状態
+
+- `src/kennybot/` への移行は進行中で、互換ラッパーが残っている
+- AI 呼び出し経路が `Runner` と `Client API` の二系統で共存している
+- `doc/` と `docs/` に役割の違う文書が並存している
+- `runtime/` と `data/` の再配置は一部完了、一部移行途中である
+
+これらは意図しない重複ではなく、段階移行を止めずに運用を続けるための暫定構成である。
+
+## 13. 今後の整理方針
+
+- 会話処理を `features/chat/` 中心へさらに寄せる
+- AI 呼び出し経路を一つの主実装へ整理する
+- place description 系の retrieval 契約をテストで固定する
+- `data/` と `runtime/` の役割をより厳密に分離する
+- 設計文書の責務を `README`、`doc/`、`docs/` で明確に保つ
+
+### 13.1 会話処理リファクタ方針
+
+- 直近ユーザー履歴 3 件を初期コンテキストの最低単位にする
+- 追加履歴は Planner の判断で取得する
+- Planner の JSON Plan を Final LLM に明示的に渡す
+- 取得結果の圧縮処理を独立関数または独立クラスへ切り出す
+- ツール実行結果は `references` / `reference_details` / `web_queries` と紐づけてログに残す
+
+## 14. 参照文書
+
+- `README.md`
+- `doc/message-flow.md`
+- `docs/response_architecture.md`
+- `docs/local_profile_preview.md`
+- `docs/local_tool_api.md`

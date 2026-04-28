@@ -21,7 +21,11 @@ from src.kennybot.utils.config import (
 from src.kennybot.utils.message_fetcher import MessageFetcher, format_messages_for_context
 from src.kennybot.utils.live_info import ExternalContext, LiveInfoService
 from src.kennybot.utils.local_rag import LocalRAG, RagChunk, load_rag_chunks_from_directory
-from src.kennybot.utils.profile_preview import build_channel_profile_preview
+from src.kennybot.utils.profile_preview import (
+    build_channel_profile_preview,
+    format_profile_chunks,
+    select_display_profile_chunks,
+)
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.countdown import ChannelCountdown
@@ -2030,7 +2034,7 @@ class MessageLogger(BaseCog):
 
     async def _log_fix_request(self, msg: discord.Message, text: str) -> None:
         target_area, planned_fix = self._infer_fix_request_details(text)
-        previous_prompt, previous_response = self._extract_previous_turn_context(msg)
+        previous_prompt, previous_response = await self._extract_previous_turn_context(msg)
         repair_decision = await self._decide_fix_mode(
             issue=text,
             previous_prompt=previous_prompt,
@@ -2107,7 +2111,7 @@ class MessageLogger(BaseCog):
                 level="warning",
                 title="Bot 管理ログ",
                 description="ユーザーの指摘を修正モードとして記録しました。",
-                error_text=codex_request,
+                error_text=f"target_area={target_area}; planned_fix={planned_fix}",
                 references=[
                     "codex_mode",
                     "repair_mode",
@@ -2169,13 +2173,8 @@ class MessageLogger(BaseCog):
         if not chunks:
             return ""
         chunks = chunks[: max(1, min(int(limit or 4), 6))]
-        blocks: list[str] = []
-        for chunk in chunks:
-            body = chunk.body.strip()
-            if max_chars > 0 and len(body) > max_chars:
-                body = body[:max_chars] + "\n...(省略)..."
-            blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
-        return "\n\n".join(blocks)
+        display_chunks = select_display_profile_chunks(chunks)
+        return format_profile_chunks(display_chunks, max_chars=max_chars)
 
     def _profile_channel_ids(
         self,
@@ -2546,7 +2545,7 @@ class MessageLogger(BaseCog):
             await self.bot.ai_progress_tracker.acquire(ticket)
             try:
                 async with channel.typing():
-                    answer = fallback_answer or await self._run_ollama_text(
+                    answer = await self._run_ollama_text(
                         model=model_name,
                         prompt=prompt,
                     )
