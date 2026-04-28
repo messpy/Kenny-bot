@@ -372,6 +372,88 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._answer_channel_profile_query.assert_not_awaited()
         self.logger.bot.process_commands.assert_awaited_once_with(msg)
 
+    def test_on_message_fix_request_marks_followup_activity_as_codex_mode(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            guild_permissions=SimpleNamespace(kick_members=True, ban_members=True),
+        )
+        guild = SimpleNamespace(id=10, name="guild", me=bot_member)
+        ai_progress_tracker = SimpleNamespace(
+            create_ticket=AsyncMock(return_value="ticket"),
+            acquire=AsyncMock(),
+            release=AsyncMock(),
+            render=lambda *_args, **_kwargs: "progress",
+        )
+        self.logger.bot = SimpleNamespace(
+            user=SimpleNamespace(id=999, name="Kennybot"),
+            spam_guard=SimpleNamespace(
+                allow_message=lambda *_args, **_kwargs: True,
+                allow_ai=lambda *_args, **_kwargs: True,
+                ai_retry_after=lambda *_args, **_kwargs: 0,
+                should_warn=lambda *_args, **_kwargs: False,
+            ),
+            ai_progress_tracker=ai_progress_tracker,
+            process_commands=AsyncMock(),
+        )
+        self.logger._cfg_int = lambda _key, default=0: default
+        self.logger._cfg_nicknames = lambda: {}
+        self.logger._is_kenny_chat = lambda _msg: False
+        self.logger._has_recent_mention_window = lambda _msg: False
+        self.logger._is_fix_request_report = lambda _text: True
+        self.logger._log_fix_request = AsyncMock()
+        self.logger._is_runtime_model_query = lambda _text: False
+        self.logger._is_capability_query = lambda _text: False
+        self.logger._is_server_owner_query = lambda _text: False
+        self.logger._is_member_count_query = lambda _text: False
+        self.logger._is_top_talker_query = lambda _text: False
+        self.logger._is_channel_profile_query = lambda _text: False
+        self.logger._is_ai_channel_rate_limited = lambda _channel_id: False
+        self.logger._schedule_message_index = lambda *args, **kwargs: None
+        self.logger._arm_recent_mention_window = lambda _msg: None
+        self.logger._resolve_chat_context = AsyncMock(return_value=("context", [], [], []))
+        self.logger._current_chat_model_name = lambda: "test-model"
+        self.logger._ai_progress_countdowns = SimpleNamespace(
+            start_countup=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        self.logger._promote_ai_progress_message = AsyncMock()
+        self.logger._run_ollama_chat_with_tools = AsyncMock(
+            return_value=("修正後の案内です。", [], [], [])
+        )
+        self.logger._sanitize_user_visible_answer = lambda text: text
+        self.logger._extract_urls = lambda _text: []
+        self.logger._should_send_letter_file = lambda _text: False
+        self.logger._log_bot_activity_event = AsyncMock()
+
+        author = SimpleNamespace(
+            id=1,
+            display_name="author",
+            name="author",
+            bot=False,
+            mention="<@1>",
+        )
+        channel = SimpleNamespace(id=20, name="channel", guild=guild, send=AsyncMock())
+        msg = SimpleNamespace(
+            id=30,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="<@999> さっきの説明違うから修正して",
+            mentions=[SimpleNamespace(id=999)],
+            webhook_id=None,
+            reference=None,
+        )
+
+        import asyncio
+
+        asyncio.run(self.logger.on_message(msg))
+
+        self.logger._log_fix_request.assert_awaited_once_with(msg, "さっきの説明違うから修正して")
+        self.assertGreaterEqual(self.logger._log_bot_activity_event.await_count, 1)
+        final_log_kwargs = self.logger._log_bot_activity_event.await_args.kwargs
+        self.assertTrue(final_log_kwargs["codex_mode"])
+        self.assertEqual(final_log_kwargs["processing"], "修正モード応答")
+
     def test_channel_profile_query_runs_llm_even_with_fallback_answer(self) -> None:
         self.logger.root = ROOT
         self.logger._is_ai_channel_rate_limited = lambda _channel_id: False
@@ -440,6 +522,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
             }
         )
         self.logger._build_repair_user_reply = AsyncMock(return_value="確認します")
+        self.logger._append_fix_request_to_rag = lambda **_kwargs: []
         self.logger._dispatch_codex_repair_logging = AsyncMock()
         self.logger._log_bot_activity_event = AsyncMock()
         self.logger.bot = SimpleNamespace()
@@ -457,6 +540,64 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._extract_previous_turn_context.assert_awaited_once_with(msg)
         self.logger._decide_fix_mode.assert_awaited_once()
         self.logger._build_repair_user_reply.assert_awaited_once()
+
+    def test_append_fix_request_to_rag_writes_channel_scope(self) -> None:
+        local_rag = SimpleNamespace(
+            append_channel_qa=AsyncMock(),
+            append_guild_qa=AsyncMock(),
+        )
+        local_rag.append_channel_qa = unittest.mock.Mock(return_value=Path("/tmp/channel/faq.json"))
+        local_rag.append_guild_qa = unittest.mock.Mock(return_value=Path("/tmp/guild/faq.json"))
+        self.logger._local_rag = local_rag
+        self.logger._is_channel_profile_query = lambda _text: False
+
+        msg = SimpleNamespace(
+            id=10,
+            guild=SimpleNamespace(id=20),
+            channel=SimpleNamespace(id=30),
+            author=SimpleNamespace(id=40, display_name="user", name="user"),
+        )
+
+        paths = self.logger._append_fix_request_to_rag(
+            msg=msg,
+            issue="この返答ちがう",
+            target_area="応答品質",
+            planned_fix="説明を修正する",
+            previous_prompt="前の質問",
+            previous_response="前の返答",
+        )
+
+        self.assertEqual(paths, ["/tmp/channel/faq.json"])
+        local_rag.append_channel_qa.assert_called_once()
+        local_rag.append_guild_qa.assert_not_called()
+
+    def test_append_fix_request_to_rag_mirrors_place_fix_to_guild_scope(self) -> None:
+        local_rag = SimpleNamespace(
+            append_channel_qa=unittest.mock.Mock(return_value=Path("/tmp/channel/faq.json")),
+            append_guild_qa=unittest.mock.Mock(return_value=Path("/tmp/guild/faq.json")),
+        )
+        self.logger._local_rag = local_rag
+        self.logger._is_channel_profile_query = lambda _text: True
+
+        msg = SimpleNamespace(
+            id=10,
+            guild=SimpleNamespace(id=20),
+            channel=SimpleNamespace(id=30),
+            author=SimpleNamespace(id=40, display_name="user", name="user"),
+        )
+
+        paths = self.logger._append_fix_request_to_rag(
+            msg=msg,
+            issue="このサーバー説明ちがう",
+            target_area="サーバー説明",
+            planned_fix="用途説明を修正する",
+            previous_prompt="このサーバーは何するところ？",
+            previous_response="交流の場です",
+        )
+
+        self.assertEqual(paths, ["/tmp/channel/faq.json", "/tmp/guild/faq.json"])
+        local_rag.append_channel_qa.assert_called_once()
+        local_rag.append_guild_qa.assert_called_once()
 
 
 if __name__ == "__main__":

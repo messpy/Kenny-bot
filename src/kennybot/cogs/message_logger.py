@@ -54,6 +54,7 @@ from src.kennybot.utils.text import (
     strip_ansi_and_ctrl,
 )
 from src.kennybot.utils.prompts import get_prompt
+from src.kennybot.utils.tool_api import build_tool_response
 from src.kennybot.utils.vrchat_world import format_vrchat_world_text, search_vrchat_worlds
 from src.kennybot.utils.tool_planner import (
     normalize_planner_plan,
@@ -271,8 +272,25 @@ class MessageLogger(BaseCog):
             "現在",
             "株価",
             "為替",
+            "価格",
+            "値段",
+            "相場",
+            "在庫",
+            "売ってる",
+            "販売",
+            "買える",
+            "店舗",
+            "店頭",
         )
         return any(keyword in normalized for keyword in keywords)
+
+    @staticmethod
+    def _safe_prompt_format(template: str, **kwargs: object) -> str:
+        try:
+            return template.format(**kwargs)
+        except Exception:
+            logger.exception("Prompt formatting failed")
+            return template
 
     def _parse_json_payload(self, raw: str) -> object | None:
         text = strip_ansi_and_ctrl(raw or "").strip()
@@ -557,35 +575,38 @@ class MessageLogger(BaseCog):
         channel_name = (
             msg.channel.name if hasattr(msg.channel, "name") else str(msg.channel.id)
         )
+        fetcher = MessageFetcher.get_instance()
         user_lines = self._cfg_int("chat.user_history_lines", 24)
         channel_lines = self._cfg_int("chat.channel_history_lines", 16)
         target_candidates = self._context_target_candidates(msg)
-        prompt = get_prompt("chat", "retrieval_plan_prompt").format(
-            user_id=msg.author.id,
+        recent_messages = await fetcher.fetch_recent(msg.channel, max(2, min(channel_lines, 8)))
+        recent_history = format_messages_for_context(recent_messages)
+        channel_profile_block = self._build_channel_profile_block(
+            channel=msg.channel,
+            channel_id=channel_id,
+            guild_id=guild_id,
+            limit=4,
+            max_chars=1800,
+        )
+        tool_menu = "\n".join(
+            [
+                "- serverinfo: サーバー説明、目的、参加方法、Bot の使い方など",
+                "- rag: 過去ログ、ナレッジ、Bot 仕様、サーバー固有情報など",
+                "- web_search: 最新情報、時事、天気、価格、在庫、API 仕様など",
+            ]
+        )
+        prompt = self._safe_prompt_format(
+            get_prompt("chat", "retrieval_plan_prompt"),
             user_display=user_display,
             guild_id=guild_id,
             guild_name=guild_name,
             channel_id=channel_id,
             channel_name=channel_name,
-            message=text,
-            user_history_limit=user_lines,
-            channel_history_limit=channel_lines,
+            latest_message=text,
+            recent_history=recent_history or "なし",
+            tool_menu=tool_menu,
             channel_profile_available=str(bool(channel_profile_available)).lower(),
-            available_targets=json.dumps(
-                {
-                    key: {"user_id": value[0], "display": value[1]}
-                    for key, value in target_candidates.items()
-                },
-                ensure_ascii=False,
-            ),
-            explicit_mention_targets=json.dumps(
-                [
-                    key
-                    for key in target_candidates.keys()
-                    if key.startswith("mentioned_")
-                ],
-                ensure_ascii=False,
-            ),
+            channel_profile_block=channel_profile_block or "なし",
         )
         model_name = self._current_chat_model_name()
         try:
@@ -1931,6 +1952,83 @@ class MessageLogger(BaseCog):
         reply = f"指摘ありがとう。{target} を確認して、Discord に直接返す形で直すね。"
         return self._sanitize_user_visible_answer(reply)
 
+    def _should_mirror_fix_request_to_guild_rag(self, text: str, target_area: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        area = normalize_keyword_match_text(target_area or "")
+        guild_terms = ("このサーバー", "サーバー", "ワールド", "このワールド", "チャンネル", "このチャンネル")
+        return self._is_channel_profile_query(text) or any(term in normalized for term in guild_terms) or any(
+            term in area for term in guild_terms
+        )
+
+    def _append_fix_request_to_rag(
+        self,
+        *,
+        msg: discord.Message,
+        issue: str,
+        target_area: str,
+        planned_fix: str,
+        previous_prompt: str,
+        previous_response: str,
+    ) -> list[str]:
+        guild = getattr(msg, "guild", None)
+        channel = getattr(msg, "channel", None)
+        if guild is None or channel is None:
+            return []
+
+        author = getattr(msg, "author", None)
+        author_name = getattr(author, "display_name", None) or getattr(author, "name", None) or str(getattr(author, "id", "unknown"))
+        question = f"ユーザー修正メモ: {issue.strip()[:80]}"
+        answer_lines = [
+            "ユーザーからの修正要望として保存した補足メモです。",
+            f"指摘内容: {issue.strip() or '不明'}",
+            f"対象: {target_area.strip() or '一般的な応答品質'}",
+            f"修正方針: {planned_fix.strip() or 'ユーザー指摘に基づいて修正する'}",
+        ]
+        if previous_prompt.strip():
+            answer_lines.append(f"直前の質問: {previous_prompt.strip()}")
+        if previous_response.strip():
+            answer_lines.append(f"直前の応答: {previous_response.strip()}")
+        answer = "\n".join(answer_lines)
+        metadata = {
+            "source": "user_fix_request",
+            "author_id": getattr(author, "id", None),
+            "author_name": author_name,
+            "message_id": getattr(msg, "id", None),
+            "channel_id": getattr(channel, "id", None),
+            "guild_id": getattr(guild, "id", None),
+            "target_area": target_area.strip() or "一般的な応答品質",
+        }
+        tags = ["user_fix_request", "user_report", "repair_request"]
+
+        stored_paths: list[str] = []
+        try:
+            path = self._local_rag.append_channel_qa(
+                guild_id=int(guild.id),
+                channel_id=int(channel.id),
+                question=question,
+                answer=answer,
+                tags=tags,
+                metadata=metadata,
+            )
+            stored_paths.append(str(path))
+        except Exception:
+            logger.exception("Failed to append fix request to channel RAG")
+
+        if self._should_mirror_fix_request_to_guild_rag(issue, target_area):
+            try:
+                path = self._local_rag.append_guild_qa(
+                    guild_id=int(guild.id),
+                    question=question,
+                    answer=answer,
+                    tags=tags + ["guild_scope"],
+                    metadata=metadata,
+                )
+                stored_paths.append(str(path))
+            except Exception:
+                logger.exception("Failed to append fix request to guild RAG")
+
+        return stored_paths
+
     async def _build_codex_repair_request(
         self,
         *,
@@ -2048,11 +2146,23 @@ class MessageLogger(BaseCog):
             logger.info(
                 "Repair mode classifier returned inactive, but complaint path keeps repair mode enabled"
             )
+        rag_paths = self._append_fix_request_to_rag(
+            msg=msg,
+            issue=text,
+            target_area=target_area,
+            planned_fix=planned_fix,
+            previous_prompt=previous_prompt,
+            previous_response=previous_response,
+        )
         user_reply = await self._build_repair_user_reply(
             issue=text,
             target_area=target_area,
             user_reply_hint=user_reply_hint,
         )
+        if rag_paths:
+            user_reply = self._sanitize_user_visible_answer(
+                f"{user_reply}\n内容はこの場所の補足メモとして保存しました。"
+            )
         try:
             log_codex_repair_mode(
                 msg=msg,
@@ -2249,6 +2359,16 @@ class MessageLogger(BaseCog):
         channel = msg.channel
         lines = ["[現在の場所のメタ情報]"]
         lines.append(f"サーバー名: {guild.name if guild else 'DM'}")
+        if guild is not None:
+            owner = getattr(guild, "owner", None)
+            owner_name = getattr(owner, "display_name", None) or getattr(owner, "name", None)
+            if not owner_name and getattr(guild, "owner_id", None):
+                owner_name = f"ID:{guild.owner_id}"
+            if owner_name:
+                lines.append(f"サーバー主: {owner_name}")
+            member_count = getattr(guild, "member_count", None)
+            if isinstance(member_count, int) and member_count > 0:
+                lines.append(f"概算メンバー数: {member_count}")
         lines.append(
             f"チャンネル名: {channel.name if hasattr(channel, 'name') else str(channel.id)}"
         )
@@ -2260,6 +2380,115 @@ class MessageLogger(BaseCog):
         if topic:
             lines.append(f"チャンネル説明: {strip_ansi_and_ctrl(str(topic))}")
         return "\n".join(lines)
+
+    def _is_member_count_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        count_terms = ("何人", "人数", "何名", "何人いる", "何人居る")
+        subject_terms = ("member", "メンバー", "人", "サーバー", "このサーバー", "鯖")
+        return any(term in normalized for term in count_terms) and any(
+            term in normalized for term in subject_terms
+        )
+
+    def _is_server_owner_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        subject_terms = ("サーバー", "このサーバー", "鯖", "ここ")
+        owner_terms = ("主", "オーナー", "管理者", "作った人", "作成者")
+        return any(term in normalized for term in subject_terms) and any(
+            term in normalized for term in owner_terms
+        )
+
+    def _is_top_talker_query(self, text: str) -> bool:
+        normalized = normalize_keyword_match_text(text or "")
+        rank_terms = ("誰が一番", "誰が1番", "いちばん", "一番", "最も", "最多", "トップ")
+        talk_terms = ("話してる", "話している", "発言", "投稿", "しゃべ", "喋")
+        return any(term in normalized for term in rank_terms) and any(
+            term in normalized for term in talk_terms
+        )
+
+    def _build_server_stats_snapshot(
+        self,
+        *,
+        guild: discord.Guild,
+        channel_id: int | None = None,
+        scope: str = "guild",
+    ) -> dict[str, object]:
+        owner = getattr(guild, "owner", None)
+        owner_name = getattr(owner, "display_name", None) or getattr(owner, "name", None)
+        return build_tool_response(
+            root=self.root,
+            tool="server_stats",
+            payload={
+                "guild_id": guild.id,
+                "channel_id": channel_id,
+                "scope": scope,
+                "member_count": getattr(guild, "member_count", None),
+                "owner_id": getattr(guild, "owner_id", None),
+                "owner_name": owner_name,
+            },
+        )
+
+    async def _answer_server_stats_query(
+        self,
+        channel: discord.abc.Messageable,
+        query: str,
+        mention: str | None = None,
+        source_msg: discord.Message | None = None,
+    ) -> None:
+        guild = getattr(source_msg, "guild", None) if source_msg is not None else None
+        prefix = f"{mention}\n" if mention else ""
+        if guild is None:
+            await channel.send(f"{prefix}DMではサーバー情報を確認できません。")
+            return
+
+        answer = ""
+        processing = "サーバー統計"
+        scope = "channel" if "このチャンネル" in normalize_keyword_match_text(query or "") else "guild"
+        stats = self._build_server_stats_snapshot(
+            guild=guild,
+            channel_id=getattr(getattr(source_msg, "channel", None), "id", None),
+            scope=scope,
+        )
+        if self._is_server_owner_query(query):
+            owner_name = str(stats.get("owner_name") or "").strip()
+            owner_id = int(stats.get("owner_id") or 0)
+            if owner_name:
+                answer = f"このサーバーの主は {owner_name} さんです。"
+            elif owner_id > 0:
+                answer = f"このサーバーの主のIDは {owner_id} です。"
+            else:
+                answer = "このサーバーの主は確認できませんでした。"
+        elif self._is_member_count_query(query):
+            member_count = stats.get("member_count")
+            if isinstance(member_count, int) and member_count > 0:
+                answer = f"このサーバーのメンバー数は現在 {member_count} 人です。"
+            else:
+                answer = "このサーバーの正確なメンバー数は今の情報では確認できません。"
+        elif self._is_top_talker_query(query):
+            top_talkers = stats.get("top_talkers")
+            if isinstance(top_talkers, list) and top_talkers:
+                top = top_talkers[0]
+                if isinstance(top, dict) and int(top.get("count") or 0) > 0:
+                    top_name = str(top.get("author") or "不明")
+                    top_count = int(top.get("count") or 0)
+                    scope_label = "このチャンネル" if scope == "channel" else "保存済みログ"
+                    answer = f"{scope_label}の範囲では、いま一番話しているのは {top_name} さんで {top_count} 件です。"
+            if not answer:
+                answer = "保存済みログの範囲では、誰が一番話しているかは特定できませんでした。"
+        if not answer:
+            return
+
+        await self._send_chunked_text(channel, answer, prefix=prefix)
+        if source_msg is not None:
+            await self._log_bot_activity_event(
+                source_msg,
+                kind="メンション",
+                processing=processing,
+                output_text=answer,
+                input_text=query,
+                title="Bot 管理ログ",
+                description="サーバー統計に応答しました。",
+                model_name=self._current_chat_model_name(),
+            )
 
     async def _build_planned_context(
         self,
@@ -2323,7 +2552,8 @@ class MessageLogger(BaseCog):
                 "- web_search: 最新情報、時事、天気、価格、在庫、CVE、API 仕様など",
             ]
         )
-        prompt = get_prompt("chat", "retrieval_plan_prompt").format(
+        prompt = self._safe_prompt_format(
+            get_prompt("chat", "retrieval_plan_prompt"),
             user_display=user_display,
             guild_id=guild_id,
             guild_name=guild_name,
@@ -2525,7 +2755,8 @@ class MessageLogger(BaseCog):
             "references": self._collect_reference_labels(channel_profile_block),
             "location_meta": location_meta_block,
         }
-        prompt = get_prompt("chat", "channel_profile_prompt").format(
+        prompt = self._safe_prompt_format(
+            get_prompt("chat", "channel_profile_prompt"),
             query=query,
             channel_profile_block="\n\n".join(
                 part for part in [location_meta_block, channel_profile_block] if str(part or "").strip()
@@ -3585,7 +3816,8 @@ class MessageLogger(BaseCog):
             if self._is_update_query(normalized_query)
             else ""
         )
-        prompt = get_prompt("chat", "capability_prompt").format(
+        prompt = self._safe_prompt_format(
+            get_prompt("chat", "capability_prompt"),
             channel_profile_block=channel_profile_block,
             query=normalized_query,
             rag_context=rag_context,
@@ -3910,7 +4142,8 @@ class MessageLogger(BaseCog):
             self._cfg_int("security.max_user_message_chars", 1200),
         )
 
-        if self._is_fix_request_report(text):
+        is_fix_request = self._is_fix_request_report(text)
+        if is_fix_request:
             try:
                 await self._log_fix_request(msg, text)
             except Exception:
@@ -4022,6 +4255,21 @@ class MessageLogger(BaseCog):
                 mention=msg.author.mention,
                 source_msg=msg,
                 channel_id=msg.channel.id,
+            )
+            self._arm_recent_mention_window(msg)
+            await self.bot.process_commands(msg)
+            return
+
+        if (
+            self._is_server_owner_query(text)
+            or self._is_member_count_query(text)
+            or self._is_top_talker_query(text)
+        ):
+            await self._answer_server_stats_query(
+                msg.channel,
+                text,
+                mention=msg.author.mention,
+                source_msg=msg,
             )
             self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
@@ -4196,12 +4444,17 @@ class MessageLogger(BaseCog):
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",
-                processing="通常会話",
+                processing="修正モード応答" if is_fix_request else "通常会話",
+                codex_mode=is_fix_request,
                 input_text=text,
                 output_text=answer_with_refs,
                 model_name=model_name,
                 title="Bot 管理ログ",
-                description="メンションまたはリプライへの AI 応答を送信しました。",
+                description=(
+                    "修正依頼を受けた会話応答を送信しました。"
+                    if is_fix_request
+                    else "メンションまたはリプライへの AI 応答を送信しました。"
+                ),
                 references=references,
                 reference_details=reference_details,
                 web_queries=web_queries + tool_queries,
@@ -4213,10 +4466,15 @@ class MessageLogger(BaseCog):
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",
-                processing="通常会話",
+                processing="修正モード応答" if is_fix_request else "通常会話",
+                codex_mode=is_fix_request,
                 level="error",
                 title="Bot 管理ログ",
-                description="メンションまたはリプライへの AI 応答に失敗しました。",
+                description=(
+                    "修正依頼を受けた会話応答に失敗しました。"
+                    if is_fix_request
+                    else "メンションまたはリプライへの AI 応答に失敗しました。"
+                ),
                 input_text=text,
                 error_text=str(e),
                 model_name=model_name,
