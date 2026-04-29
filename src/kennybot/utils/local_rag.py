@@ -19,16 +19,6 @@ class RagChunk:
     body: str
 
 
-README_CAPABILITY_TITLE_TOKENS = (
-    "主な機能",
-    "設定方法",
-    "使用方法",
-    "会話履歴",
-    "semantic memory",
-    "トラブルシューティング",
-)
-
-
 def _tokenize(text: str) -> list[str]:
     text = (text or "").lower()
     parts = re.split(r"[\s\r\n\t:：、。・,./()（）\[\]{}!?！？]+", text)
@@ -61,15 +51,6 @@ def _should_skip_chunk(chunk: RagChunk) -> bool:
     if title in {"サンプル文", "sample文", "sample text", "sample"}:
         return True
     return False
-
-
-def _filter_capability_chunks(chunks: list[RagChunk]) -> list[RagChunk]:
-    filtered: list[RagChunk] = []
-    for chunk in chunks:
-        title = (chunk.title or "").strip().lower()
-        if any(token.lower() in title for token in README_CAPABILITY_TITLE_TOKENS):
-            filtered.append(chunk)
-    return filtered
 
 
 def _chunks_from_mapping(source: str, obj: object) -> list[RagChunk]:
@@ -173,7 +154,7 @@ def _static_chunks() -> list[RagChunk]:
                 "Bot はメンションや Bot への返信で会話応答できます。"
                 "DM でもそのまま会話できます。"
                 "会話時は本人履歴、チャンネル履歴、意味的に近い過去発言を状況に応じて使い分けます。"
-                "README と knowledge/chat_rag.md/json/toml のローカル知識も参照できます。"
+                "knowledge/chat_rag.md/json/toml のローカル知識も参照できます。"
                 "曖昧な質問や裏取りが必要な質問では、web search/web fetch で確認してから答えることがあります。"
             ),
         ),
@@ -290,16 +271,6 @@ class LocalRAG:
         channel_only: bool = False,
     ) -> list[RagChunk]:
         chunks = [] if channel_only else _static_chunks()
-        if not channel_only:
-            readme = self.root / "README.md"
-            if readme.exists():
-                try:
-                    readme_chunks = _split_markdown_sections(readme.read_text(encoding="utf-8", errors="ignore"))
-                    if capability_only:
-                        readme_chunks = _filter_capability_chunks(readme_chunks)
-                    chunks.extend(readme_chunks)
-                except Exception:
-                    pass
         for path in self._channel_extra_paths(guild_id, channel_id):
             if not path.exists():
                 continue

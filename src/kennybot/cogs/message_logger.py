@@ -3255,7 +3255,7 @@ class MessageLogger(BaseCog):
 
     def _read_readme_excerpt(self, max_chars: int = 6000) -> str:
         try:
-            root = Path(__file__).resolve().parent.parent
+            root = getattr(self, "root", None) or ROOT_DIR
             p = root / "README.md"
             txt = p.read_text(encoding="utf-8", errors="ignore")
             txt = txt.strip()
