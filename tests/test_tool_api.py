@@ -5,9 +5,11 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
 
 from src.kennybot.utils.tool_api import build_tool_response
 from bin.tool_api_server import dispatch_tool_api_request
+from src.kennybot.utils.server_registry import ServerRegistryStore
 
 
 class ToolAPIBuildTest(TestCase):
@@ -15,20 +17,22 @@ class ToolAPIBuildTest(TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        guild_root = root / "data" / "server" / "972052382315855912"
-        guild_root.mkdir(parents=True, exist_ok=True)
-        (guild_root / "chat_rag.md").write_text(
-            "\n".join(
+        registry = ServerRegistryStore(root / "data" / "server" / "server.sqlite3")
+        registry.upsert_rag_document(
+            scope="guild",
+            guild_id=972052382315855912,
+            source_path="rag://guild/972052382315855912/profile",
+            doc_type="markdown",
+            title="定義",
+            summary="VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。",
+            body="\n".join(
                 [
-                    "# 定義",
                     "VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。",
                     "",
-                    "# 体験内容",
                     "- 世界中の実在観光地を再現した3Dワールドを巡る",
                     "- スタッフによる現地解説・ガイド付き進行",
                 ]
             ),
-            encoding="utf-8",
         )
         return root
 
@@ -64,6 +68,59 @@ class ToolAPIBuildTest(TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["tool"], "rag")
         self.assertIn("VRC世界旅行", response["context"])
+
+    def test_server_stats_response(self) -> None:
+        root = self._make_root()
+        registry = ServerRegistryStore(root / "data" / "server" / "server.sqlite3")
+        registry.upsert_message_log(
+            guild_id=972052382315855912,
+            channel_id=1493246078357606430,
+            message_id=1,
+            author_id=100,
+            author="Alice",
+            content="hello",
+            timestamp="2026-04-28T00:00:00+09:00",
+            metadata={"is_bot": False},
+        )
+        registry.upsert_message_log(
+            guild_id=972052382315855912,
+            channel_id=1493246078357606430,
+            message_id=2,
+            author_id=100,
+            author="Alice",
+            content="hello2",
+            timestamp="2026-04-28T00:01:00+09:00",
+            metadata={"is_bot": False},
+        )
+        registry.upsert_message_log(
+            guild_id=972052382315855912,
+            channel_id=1493246078357606430,
+            message_id=3,
+            author_id=101,
+            author="Bot",
+            content="ignore",
+            timestamp="2026-04-28T00:02:00+09:00",
+            metadata={"is_bot": True},
+        )
+
+        with patch("src.kennybot.utils.tool_api.get_server_registry", return_value=registry):
+            response = build_tool_response(
+                root=root,
+                tool="server_stats",
+                payload={
+                    "guild_id": 972052382315855912,
+                    "channel_id": 1493246078357606430,
+                    "scope": "channel",
+                    "member_count": 42,
+                    "owner_name": "NEKO旅",
+                },
+            )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["tool"], "server_stats")
+        self.assertEqual(response["member_count"], 42)
+        self.assertEqual(response["owner_name"], "NEKO旅")
+        self.assertEqual(response["top_talkers"][0]["author"], "Alice")
+        self.assertEqual(response["top_talkers"][0]["count"], 2)
 
     def test_web_search_response_uses_injected_searcher(self) -> None:
         root = self._make_root()
@@ -101,16 +158,15 @@ class ToolAPIHTTPTest(TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        guild_root = root / "data" / "server" / "972052382315855912"
-        guild_root.mkdir(parents=True, exist_ok=True)
-        (guild_root / "chat_rag.md").write_text(
-            "\n".join(
-                [
-                    "# 定義",
-                    "VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。",
-                ]
-            ),
-            encoding="utf-8",
+        registry = ServerRegistryStore(root / "data" / "server" / "server.sqlite3")
+        registry.upsert_rag_document(
+            scope="guild",
+            guild_id=972052382315855912,
+            source_path="rag://guild/972052382315855912/profile",
+            doc_type="markdown",
+            title="定義",
+            summary="VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。",
+            body="VRC世界旅行とは、VRChat上で世界各地の観光地を巡る旅行体験イベントである。",
         )
         return root
 
@@ -139,9 +195,11 @@ class ToolAPIHTTPTest(TestCase):
         status, tools = dispatch_tool_api_request(root=root, method="GET", path="/tools")
         self.assertEqual(status, 200)
         self.assertTrue(tools["ok"])
-        self.assertGreaterEqual(len(tools["tools"]), 3)
+        self.assertGreaterEqual(len(tools["tools"]), 4)
         rag_tool = next(tool for tool in tools["tools"] if tool["name"] == "rag")
         self.assertIn("channel_only", rag_tool["input"])
+        stats_tool = next(tool for tool in tools["tools"] if tool["name"] == "server_stats")
+        self.assertIn("owner_name", stats_tool["input"])
 
         status, result = dispatch_tool_api_request(
             root=root,
@@ -160,3 +218,23 @@ class ToolAPIHTTPTest(TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["tool"], "serverinfo")
         self.assertIn("VRC世界旅行", result["profile"])
+
+        registry = ServerRegistryStore(root / "data" / "server" / "server.sqlite3")
+        with patch("src.kennybot.utils.tool_api.get_server_registry", return_value=registry):
+            status, stats = dispatch_tool_api_request(
+                root=root,
+                method="POST",
+                path="/tool/server_stats",
+                raw_body=json.dumps(
+                    {
+                        "guild_id": 972052382315855912,
+                        "channel_id": 1493246078357606430,
+                        "scope": "guild",
+                        "member_count": 55,
+                        "owner_name": "NEKO旅",
+                    }
+                ),
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(stats["ok"])
+        self.assertEqual(stats["tool"], "server_stats")

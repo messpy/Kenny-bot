@@ -44,7 +44,7 @@ def dispatch_tool_api_request(
         return HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"}
     if normalized_method != "POST":
         return HTTPStatus.METHOD_NOT_ALLOWED, {"ok": False, "error": "method_not_allowed"}
-    if normalized_path not in {"/tool/serverinfo", "/tool/rag", "/tool/web_search"}:
+    if normalized_path not in {"/tool/server_stats", "/tool/serverinfo", "/tool/rag", "/tool/web_search"}:
         return HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"}
     try:
         payload = parse_json_payload(raw_body)
