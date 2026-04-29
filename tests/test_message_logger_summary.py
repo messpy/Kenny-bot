@@ -541,6 +541,47 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._decide_fix_mode.assert_awaited_once()
         self.logger._build_repair_user_reply.assert_awaited_once()
 
+    def test_log_fix_request_includes_codex_branch_in_user_reply(self) -> None:
+        self.logger._infer_fix_request_details = lambda _text: ("サーバー説明", "修正する")
+        self.logger._extract_previous_turn_context = AsyncMock(return_value=("前回の質問", "前回の返答"))
+        self.logger._decide_fix_mode = AsyncMock(
+            return_value={
+                "target_area": "サーバー説明",
+                "planned_fix": "説明を修正する",
+                "user_reply_hint": "確認します",
+                "activate": True,
+            }
+        )
+        self.logger._build_repair_user_reply = AsyncMock(return_value="確認します")
+        self.logger._append_fix_request_to_rag = lambda **_kwargs: []
+        self.logger._dispatch_codex_repair_logging = AsyncMock()
+        self.logger._log_bot_activity_event = AsyncMock()
+        self.logger._track_background_task = lambda _task: None
+        self.logger.bot = SimpleNamespace()
+        import asyncio
+
+        monitor_task = object()
+        self.logger._codex_job_manager = SimpleNamespace(
+            is_available=lambda: True,
+            start_job=AsyncMock(
+                return_value=(
+                    SimpleNamespace(job_id="job-1", branch_name="codex/serverinfo-job-1"),
+                    monitor_task,
+                )
+            ),
+        )
+
+        msg = SimpleNamespace(
+            guild=None,
+            channel=SimpleNamespace(id=1, send=AsyncMock()),
+            author=SimpleNamespace(id=2, mention="<@2>"),
+        )
+
+        asyncio.run(self.logger._log_fix_request(msg, "説明ちがう"))
+
+        sent = msg.channel.send.await_args.args[0]
+        self.assertIn("codex/serverinfo-job-1", sent)
+
     def test_append_fix_request_to_rag_writes_channel_scope(self) -> None:
         local_rag = SimpleNamespace(
             append_channel_qa=AsyncMock(),

@@ -181,6 +181,8 @@ def log_codex_request(
     planned_fix: str = "",
     previous_prompt: str = "",
     previous_response: str = "",
+    job_id: str = "",
+    branch_name: str = "",
     level: str = "warning",
 ) -> None:
     details = {
@@ -195,6 +197,10 @@ def log_codex_request(
         details["previous_prompt"] = previous_prompt[:500]
     if previous_response:
         details["previous_response"] = previous_response[:500]
+    if job_id:
+        details["job_id"] = job_id[:120]
+    if branch_name:
+        details["branch_name"] = branch_name[:200]
     log_system_event(
         "codex依頼",
         msg=msg,

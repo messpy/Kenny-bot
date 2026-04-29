@@ -20,9 +20,10 @@ from src.kennybot.utils.config import (
 )
 from src.kennybot.utils.message_fetcher import MessageFetcher, format_messages_for_context
 from src.kennybot.utils.live_info import ExternalContext, LiveInfoService
-from src.kennybot.utils.local_rag import LocalRAG, RagChunk, load_rag_chunks_from_directory
+from src.kennybot.utils.local_rag import LocalRAG, RagChunk
 from src.kennybot.utils.profile_preview import (
     build_channel_profile_preview,
+    build_profile_chunks,
     format_profile_chunks,
     select_display_profile_chunks,
 )
@@ -31,13 +32,7 @@ from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.message_vector_store import MessageVectorStore
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import CHANNEL_RAG_DIR, MESSAGE_VECTOR_DB_PATH, SERVER_RAG_DIR, ROOT_DIR
-from src.kennybot.utils.scoped_data import (
-    channel_scope_dir,
-    guild_scope_dir,
-    legacy_channel_scope_dir,
-    legacy_guild_scope_dir,
-)
+from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH, ROOT_DIR
 from src.kennybot.utils.message_logger import (
     log_user_message,
     log_ai_output,
@@ -56,6 +51,7 @@ from src.kennybot.utils.text import (
 )
 from src.kennybot.utils.prompts import get_prompt
 from src.kennybot.utils.tool_api import build_tool_response
+from src.kennybot.utils.codex_jobs import CodexJobHandle, CodexJobManager
 from src.kennybot.utils.vrchat_world import format_vrchat_world_text, search_vrchat_worlds
 from src.kennybot.utils.tool_planner import (
     normalize_planner_plan,
@@ -122,9 +118,11 @@ class MessageLogger(BaseCog):
         self._live_info = LiveInfoService()
         self._last_context_trace: dict[str, object] = {}
         self._model_ready_notifiers: set[tuple[int, int, str]] = set()
-        self._vector_store = MessageVectorStore(MESSAGE_VECTOR_DB_PATH)
+        self._vector_store = MessageVectorStore(MESSAGE_VECTOR_SQLITE_PATH)
         self._ai_retry_countdowns = ChannelCountdown()
         self._ai_progress_countdowns = ChannelCountdown()
+        self._codex_job_manager = CodexJobManager(self.root)
+        self._codex_job_tasks: set[asyncio.Task[None]] = set()
         self._message_claims = MessageClaimStore(
             self.root / "data" / "runtime" / "message_claims"
         )
@@ -155,6 +153,22 @@ class MessageLogger(BaseCog):
         key = (msg.guild.id, msg.channel.id, msg.author.id)
         expires_at = self._recent_mention_windows.get(key)
         return bool(expires_at and expires_at > time.monotonic())
+
+    def _track_background_task(self, task: asyncio.Task[None]) -> None:
+        tasks = getattr(self, "_codex_job_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._codex_job_tasks = tasks
+        tasks.add(task)
+
+        def _finalize(done: asyncio.Task[None]) -> None:
+            tasks.discard(done)
+            try:
+                done.result()
+            except Exception:
+                logger.exception("Background Codex task failed")
+
+        task.add_done_callback(_finalize)
 
     def _build_history_context(self, blocks: list[tuple[str, str]]) -> str:
         parts: list[str] = []
@@ -1962,6 +1976,32 @@ class MessageLogger(BaseCog):
         reply = f"指摘ありがとう。{target} を確認して、Discord に直接返す形で直すね。"
         return self._sanitize_user_visible_answer(reply)
 
+    async def _start_codex_repair_job(
+        self,
+        *,
+        issue: str,
+        previous_prompt: str,
+        previous_response: str,
+        target_area: str,
+        planned_fix: str,
+    ) -> tuple[CodexJobHandle | None, str]:
+        manager = getattr(self, "_codex_job_manager", None)
+        if manager is None or not manager.is_available():
+            return None, "codex CLI が利用できません"
+        try:
+            handle, monitor_task = await manager.start_job(
+                issue=issue,
+                previous_prompt=previous_prompt,
+                previous_response=previous_response,
+                target_area=target_area,
+                planned_fix=planned_fix,
+            )
+            self._track_background_task(monitor_task)
+            return handle, ""
+        except Exception as exc:
+            logger.exception("Failed to start Codex repair job")
+            return None, strip_ansi_and_ctrl(str(exc) or "codex job start failed")
+
     def _should_mirror_fix_request_to_guild_rag(self, text: str, target_area: str) -> bool:
         normalized = normalize_keyword_match_text(text or "")
         area = normalize_keyword_match_text(target_area or "")
@@ -2090,6 +2130,8 @@ class MessageLogger(BaseCog):
         previous_response: str,
         target_area: str,
         planned_fix: str,
+        codex_job_id: str = "",
+        codex_branch: str = "",
     ) -> None:
         try:
             codex_request = await self._build_codex_repair_request(
@@ -2107,6 +2149,8 @@ class MessageLogger(BaseCog):
                 planned_fix=planned_fix,
                 previous_prompt=previous_prompt,
                 previous_response=previous_response,
+                job_id=codex_job_id,
+                branch_name=codex_branch,
                 level="warning",
             )
             log_fix_request(
@@ -2130,6 +2174,8 @@ class MessageLogger(BaseCog):
                     fields=[
                         ("対象", target_area, True),
                         ("問題", issue[:1000], False),
+                        ("Job ID", codex_job_id or "未起票", True),
+                        ("Branch", codex_branch or "未作成", False),
                         ("Codexプロンプト", codex_request[:1000], False),
                         ("前回のユーザープロンプト", previous_prompt[:1000] or "取得できませんでした", False),
                         ("前回のBot応答", previous_response[:1000] or "取得できませんでした", False),
@@ -2164,11 +2210,26 @@ class MessageLogger(BaseCog):
             previous_prompt=previous_prompt,
             previous_response=previous_response,
         )
+        codex_job, codex_job_error = await self._start_codex_repair_job(
+            issue=text,
+            previous_prompt=previous_prompt,
+            previous_response=previous_response,
+            target_area=target_area,
+            planned_fix=planned_fix,
+        )
         user_reply = await self._build_repair_user_reply(
             issue=text,
             target_area=target_area,
             user_reply_hint=user_reply_hint,
         )
+        if codex_job is not None:
+            user_reply = self._sanitize_user_visible_answer(
+                f"{user_reply}\n修正ブランチ `{codex_job.branch_name}` を作って Codex の作業を開始しました。"
+            )
+        elif codex_job_error:
+            user_reply = self._sanitize_user_visible_answer(
+                f"{user_reply}\nただし Codex の自動修繕ジョブ起動には失敗しました。管理ログに記録しています。"
+            )
         if rag_paths:
             user_reply = self._sanitize_user_visible_answer(
                 f"{user_reply}\n内容はこの場所の補足メモとして保存しました。"
@@ -2215,6 +2276,8 @@ class MessageLogger(BaseCog):
                     previous_response=previous_response,
                     target_area=target_area,
                     planned_fix=planned_fix,
+                    codex_job_id=codex_job.job_id if codex_job is not None else "",
+                    codex_branch=codex_job.branch_name if codex_job is not None else "",
                 )
             )
         except Exception:
@@ -2231,12 +2294,19 @@ class MessageLogger(BaseCog):
                 level="warning",
                 title="Bot 管理ログ",
                 description="ユーザーの指摘を修正モードとして記録しました。",
-                error_text=f"target_area={target_area}; planned_fix={planned_fix}",
+                error_text=(
+                    f"target_area={target_area}; planned_fix={planned_fix}; "
+                    f"codex_job_id={codex_job.job_id if codex_job is not None else 'none'}; "
+                    f"branch={codex_job.branch_name if codex_job is not None else 'none'}; "
+                    f"job_error={codex_job_error or 'none'}"
+                ),
                 references=[
                     "codex_mode",
                     "repair_mode",
                     "previous_prompt",
                     "previous_response",
+                    *( [f"codex_job:{codex_job.job_id}"] if codex_job is not None else [] ),
+                    *( [f"codex_branch:{codex_job.branch_name}"] if codex_job is not None else [] ),
                 ],
             )
         except Exception:
@@ -2266,33 +2336,15 @@ class MessageLogger(BaseCog):
         if not channel_id:
             return ""
         root = getattr(self, "root", None) or getattr(self._local_rag, "root", None) or Path(__file__).resolve().parent.parent
-        candidate_dirs: list[Path] = []
-        if guild_id and channel_id:
-            candidate_dirs.append(root / SERVER_RAG_DIR / str(guild_id) / "channels" / str(channel_id))
-            candidate_dirs.append(root / SERVER_RAG_DIR / str(guild_id))
-            candidate_dirs.append(channel_scope_dir(guild_id, channel_id))
-            candidate_dirs.append(guild_scope_dir(guild_id))
-            candidate_dirs.append(root / CHANNEL_RAG_DIR / str(guild_id) / "channels" / str(channel_id))
-            candidate_dirs.append(root / CHANNEL_RAG_DIR / str(guild_id))
-            candidate_dirs.append(legacy_channel_scope_dir(guild_id, channel_id))
-            candidate_dirs.append(legacy_guild_scope_dir(guild_id))
-        elif guild_id:
-            candidate_dirs.append(root / SERVER_RAG_DIR / str(guild_id))
-            candidate_dirs.append(guild_scope_dir(guild_id))
-            candidate_dirs.append(root / CHANNEL_RAG_DIR / str(guild_id))
-            candidate_dirs.append(legacy_guild_scope_dir(guild_id))
-        else:
-            candidate_dirs.append(root / SERVER_RAG_DIR / str(channel_id))
-            candidate_dirs.append(root / CHANNEL_RAG_DIR / str(channel_id))
-
-        chunks: list[RagChunk] = []
-        for directory in candidate_dirs:
-            chunks = load_rag_chunks_from_directory(directory)
-            if chunks:
-                break
+        chunks = build_profile_chunks(
+            root=root,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            scope="channel" if guild_id and channel_id else "guild",
+            limit=max(1, min(int(limit or 4), 6)),
+        )
         if not chunks:
             return ""
-        chunks = chunks[: max(1, min(int(limit or 4), 6))]
         display_chunks = select_display_profile_chunks(chunks)
         return format_profile_chunks(display_chunks, max_chars=max_chars)
 
