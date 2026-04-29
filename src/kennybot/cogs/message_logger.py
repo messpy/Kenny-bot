@@ -129,15 +129,19 @@ class MessageLogger(BaseCog):
         self._last_message_claim_prune = 0.0
 
     def _prune_message_claims(self, *, max_age_seconds: int = 86400) -> None:
+        if not hasattr(self, "_message_claim_dir"):
+            return
         now = time.time()
-        if now - self._last_message_claim_prune < 300:
+        last_prune = float(getattr(self, "_last_message_claim_prune", 0.0) or 0.0)
+        if now - last_prune < 300:
             return
         self._last_message_claim_prune = now
+        claim_dir = self._message_claim_dir
         try:
-            self._message_claim_dir.mkdir(parents=True, exist_ok=True)
+            claim_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             return
-        for path in self._message_claim_dir.glob("*.claim"):
+        for path in claim_dir.glob("*.claim"):
             try:
                 if now - path.stat().st_mtime > max_age_seconds:
                     path.unlink(missing_ok=True)
@@ -145,13 +149,18 @@ class MessageLogger(BaseCog):
                 continue
 
     def _claim_message_once(self, message_id: int) -> bool:
+        if int(message_id or 0) <= 0:
+            return True
+        if not hasattr(self, "_message_claim_dir"):
+            return True
         self._prune_message_claims()
+        claim_dir = self._message_claim_dir
         try:
-            self._message_claim_dir.mkdir(parents=True, exist_ok=True)
+            claim_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             return True
 
-        claim_path = self._message_claim_dir / f"{message_id}.claim"
+        claim_path = claim_dir / f"{message_id}.claim"
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
             fd = os.open(claim_path, flags, 0o644)
@@ -4057,8 +4066,9 @@ class MessageLogger(BaseCog):
         if self.bot.user and msg.author.id == self.bot.user.id:
             return
 
-        if not self._claim_message_once(msg.id):
-            logger.info("Skipped duplicate message handling for message_id=%s", msg.id)
+        message_id = getattr(msg, "id", 0)
+        if not self._claim_message_once(message_id):
+            logger.info("Skipped duplicate message handling for message_id=%s", message_id)
             return
 
         # DM は AI 会話のみ許可
