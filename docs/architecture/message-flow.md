@@ -438,21 +438,21 @@ stateDiagram-v2
 
 | ファイル | 役割 |
 |---------|------|
-| `cogs/message_logger.py` | メイン処理ロジック (on_message, _handle_dm_message等) |
-| `cogs/slash_commands.py` | スラッシュコマンド処理 |
-| `cogs/game_commands.py` | ゲームコマンド |
-| `cogs/voice_logger.py` | 音声ログ |
-| `cogs/member_logger.py` | メンバーログ |
-| `cogs/audit_logger.py` | 監査ログ |
-| `cogs/reaction_roles.py` | リアクションロール |
-| `cogs/tts_reader.py` | TTS読み上げ |
-| `cogs/mod_panel.py` | モデレーションパネル |
-| `utils/message_fetcher.py` | Discord API (channel.history) + 短期キャッシュ |
-| `utils/message_vector_store.py` | embedding保存・検索 (SQLite) |
-| `utils/event_logger.py` | 管理ログ送信 (send_event_log) |
-| `utils/message_logger.py` | ファイルログ (log_user_message, log_ai_output等) |
-| `utils/local_rag.py` | ローカルナレッジベース |
-| `utils/spam_guard.py` | スパム検出・レート制限 |
+| `src/kennybot/cogs/message_logger.py` | メイン処理ロジック (on_message, _handle_dm_message等) |
+| `src/kennybot/cogs/slash_commands.py` | スラッシュコマンド処理 |
+| `src/kennybot/cogs/game_commands.py` | ゲームコマンド |
+| `src/kennybot/cogs/voice_logger.py` | 音声ログ |
+| `src/kennybot/cogs/member_logger.py` | メンバーログ |
+| `src/kennybot/cogs/audit_logger.py` | 監査ログ |
+| `src/kennybot/cogs/reaction_roles.py` | リアクションロール |
+| `src/kennybot/cogs/tts_reader.py` | TTS読み上げ |
+| `src/kennybot/cogs/mod_panel.py` | モデレーションパネル |
+| `src/kennybot/utils/message_fetcher.py` | Discord API (channel.history) + 短期キャッシュ |
+| `src/kennybot/utils/message_vector_store.py` | embedding保存・検索 (SQLite) |
+| `src/kennybot/utils/event_logger.py` | 管理ログ送信 (send_event_log) |
+| `src/kennybot/utils/message_logger.py` | ファイルログ (log_user_message, log_ai_output等) |
+| `src/kennybot/utils/local_rag.py` | ローカルナレッジベース |
+| `src/kennybot/guards/spam_guard.py` | スパム検出・レート制限 |
 
 ## 設定値
 

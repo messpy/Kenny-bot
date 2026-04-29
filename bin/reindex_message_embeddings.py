@@ -9,11 +9,11 @@ sys_root = Path(__file__).resolve().parent.parent
 if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
-from ai.client import create_ollama_client
-from utils.message_vector_store import MessageVectorStore
-from utils.paths import MESSAGE_VECTOR_SQLITE_PATH
-from utils.server_registry import create_server_registry
-from utils.runtime_settings import get_settings
+from src.kennybot.ai.client import create_ollama_client
+from src.kennybot.utils.message_vector_store import MessageVectorStore
+from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH
+from src.kennybot.utils.server_registry import create_server_registry
+from src.kennybot.utils.runtime_settings import get_settings
 
 
 def main() -> int:

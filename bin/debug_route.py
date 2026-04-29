@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.kennybot.bootstrap import create_bot
 from src.kennybot.utils.env import load_env_file
-from src.kennybot.utils.paths import ROOT_DIR
+from src.kennybot.utils.paths import DEBUG_ROUTE_HISTORY_DIR, ROOT_DIR
 from src.kennybot.utils.profile_preview import build_channel_profile_preview
 import src.kennybot.cogs.message_logger as message_logger_module
 import src.kennybot.cogs.slash_commands as slash_commands_module
@@ -1576,7 +1576,7 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
             if not trace_path.is_absolute():
                 trace_path = ROOT_DIR / trace_path
         else:
-            trace_path = ROOT_DIR / "trace" / "debug_route_trace.txt"
+            trace_path = ROOT_DIR / DEBUG_ROUTE_HISTORY_DIR / "debug_route_trace.txt"
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         trace_path.write_text("", encoding="utf-8")
 

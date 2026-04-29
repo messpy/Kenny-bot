@@ -46,7 +46,7 @@ VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が�
 - `bin/debug_route.py` でルート判定や応答生成の preview ができます
 - `--mock-llm` は AI / 検索の backend をモック化します
 - `--dry-run-send` は送信だけ抑止して、それ以外の処理はできるだけそのまま流します
-- `--trace-llm` を併用すると `trace/debug_route_trace.txt` にトレースを書き出します
+- `--trace-llm` を併用すると `runtime/history/debug_route/debug_route_trace.txt` にトレースを書き出します
 
 ## DB
 
