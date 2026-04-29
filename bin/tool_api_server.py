@@ -15,10 +15,13 @@ sys_root = Path(__file__).resolve().parent.parent
 if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
-from src.kennybot.utils.live_info import LiveInfoService
-from src.kennybot.utils.local_rag import LocalRAG
-from src.kennybot.utils.tool_api import build_tool_response, list_tool_menu
-from src.kennybot.utils.profile_preview_api import parse_json_payload
+from src.kennybot.features.search import (
+    LiveInfoService,
+    LocalRAG,
+    build_tool_response,
+    list_tool_menu,
+    parse_json_payload,
+)
 
 
 logger = logging.getLogger(__name__)

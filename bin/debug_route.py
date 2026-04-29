@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.kennybot.bootstrap import create_bot
 from src.kennybot.utils.env import load_env_file
 from src.kennybot.utils.paths import DEBUG_ROUTE_HISTORY_DIR, ROOT_DIR
-from src.kennybot.utils.profile_preview import build_channel_profile_preview
+from src.kennybot.features.search import build_channel_profile_preview
 import src.kennybot.cogs.message_logger as message_logger_module
 import src.kennybot.cogs.slash_commands as slash_commands_module
 import src.kennybot.cogs.member_logger as member_logger_module

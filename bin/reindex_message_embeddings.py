@@ -10,15 +10,14 @@ if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
 from src.kennybot.ai.client import create_ollama_client
+from src.kennybot.utils.config import get_app_config
 from src.kennybot.utils.message_vector_store import MessageVectorStore
 from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH
 from src.kennybot.utils.server_registry import create_server_registry
-from src.kennybot.utils.runtime_settings import get_settings
 
 
 def main() -> int:
-    settings = get_settings()
-    model = str(settings.get("ollama.model_embedding", "embeddinggemma"))
+    model = get_app_config().ai_models().embedding
     batch_size = 32
 
     client = create_ollama_client(host=os.getenv("OLLAMA_HOST"))

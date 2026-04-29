@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from src.kennybot.utils.paths import ALL_EVENTS_LOG
+from src.kennybot.utils.time import isoformat_jst
 
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 
 
 def _append_line(line: str) -> None:
@@ -21,7 +20,7 @@ def _append_line(line: str) -> None:
 
 
 def _timestamp() -> str:
-    return datetime.now(JST).isoformat(timespec="seconds")
+    return isoformat_jst(timespec="seconds")
 
 
 def _format_common_prefix(kind: str, msg: Any | None = None) -> str:

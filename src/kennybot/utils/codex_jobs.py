@@ -6,16 +6,16 @@ import logging
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from src.kennybot.utils.paths import RUNTIME_HISTORY_DIR, RUNTIME_STATE_DIR, RUNTIME_TMP_DIR
+from src.kennybot.utils.time import now_jst
 
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 
 
 @dataclass(slots=True)
@@ -54,7 +54,7 @@ class CodexJobManager:
 
     @staticmethod
     def _now() -> datetime:
-        return datetime.now(JST)
+        return now_jst()
 
     @classmethod
     def _job_id(cls) -> str:

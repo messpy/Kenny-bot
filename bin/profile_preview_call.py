@@ -14,7 +14,7 @@ if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
 from bin.profile_preview_server import ProfilePreviewHTTPServer  # noqa: E402
-from src.kennybot.utils.profile_preview_api import parse_json_payload  # noqa: E402
+from src.kennybot.features.search import parse_json_payload  # noqa: E402
 
 
 logger = logging.getLogger(__name__)

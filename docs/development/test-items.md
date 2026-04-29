@@ -2,7 +2,7 @@
 
 ## Scope
 
-This checklist covers the duplicate mention reply fix, the shared message claim guard, and the adjacent message routing paths that can regress when `MessageLogger.on_message` changes.
+This checklist covers the duplicate mention reply fix, the shared message claim guard, adjacent message routing paths that can regress when `MessageLogger.on_message` changes, and the current mock-based local preview/API surfaces that are used for regression checks.
 
 ## Test Environment
 
@@ -45,6 +45,9 @@ This checklist covers the duplicate mention reply fix, the shared message claim 
 | M-002 | Distinct message IDs | Call `claim_once(123456)` and `claim_once(123457)` | Both IDs can be claimed independently |
 | M-003 | MessageLogger mock compatibility | Run targeted `on_message` unit tests using `SimpleNamespace` messages | Missing `id` does not break mock tests |
 | M-004 | Debug route smoke | Run `./.venv/bin/python3 bin/debug_route.py mention "<@BOT_ID> テスト" --no-ai` with DB/network access available | Route preview completes without posting to Discord |
+| M-005 | Tool API HTTP mock | Run `python3 -m unittest tests.test_tool_api tests.test_tool_planner` | Local tool API routes return JSON successfully; planner input validation still passes |
+| M-006 | Profile preview API mock | Run `python3 -m unittest tests.test_profile_preview tests.test_profile_preview_api` | Mocked AI/HTTP fallback returns normalized profile responses without internal labels |
+| M-007 | Voice logger mock routing | Run `python3 -m unittest tests.test_voice_logger` | Duplicate leave suppression and Discord admin-log suppression both stay intact |
 
 ## Operational Checks
 
@@ -54,6 +57,7 @@ This checklist covers the duplicate mention reply fix, the shared message claim 
 | O-002 | Gateway connection | `journalctl --user -u kennybot.service -n 80` | Recent log includes Discord Gateway connection and `Bot Ready` |
 | O-003 | Process count | `ps -ef | rg "uv run bin/run.py|python3 bin/run.py"` | Only the service-managed bot process pair is active |
 | O-004 | Duplicate suppression evidence | `journalctl --user -u kennybot.service -n 120 | rg "Skipped duplicate message handling"` | Entries appear only when duplicate handling was actually suppressed |
+| O-005 | Root cleanliness | `find . -maxdepth 1 -mindepth 1 | sort` | Root is limited to entrypoints, config/docs/data/runtime, and does not contain legacy `ai/`, `cogs/`, `commands/`, `guards/`, `utils/`, or `trace/` directories |
 
 ## Known Environment Notes
 
@@ -62,3 +66,4 @@ This checklist covers the duplicate mention reply fix, the shared message claim 
 | `pymysql` | Full `tests.test_message_logger_summary` may fail with `ModuleNotFoundError: No module named 'pymysql'` if DB extras are not installed. |
 | Network sandbox | `bin/debug_route.py` can fail to connect to local MySQL/Ollama when the command runs inside a restricted sandbox. |
 | Dirty worktree | This repository often has unrelated data migration and documentation changes. Stage only the files relevant to the current fix when committing. |
+| Runtime traces | `debug_route` trace outputs are now runtime artifacts under `runtime/history/debug_route/`, not tracked files under the repository root. |

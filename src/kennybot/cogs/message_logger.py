@@ -8,20 +8,20 @@ import re
 import subprocess
 import time
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import discord
 from discord.ext import commands
 
-from src.kennybot.utils.config import (
-    PROMPT_TEMPLATE,
-)
+from src.kennybot.utils.config import PROMPT_TEMPLATE, get_app_config
 from src.kennybot.utils.message_fetcher import MessageFetcher, format_messages_for_context
-from src.kennybot.utils.live_info import ExternalContext, LiveInfoService
-from src.kennybot.utils.local_rag import LocalRAG, RagChunk
-from src.kennybot.utils.profile_preview import (
+from src.kennybot.features.search import (
+    ExternalContext,
+    LiveInfoService,
+    LocalRAG,
+    RagChunk,
     build_channel_profile_preview,
     build_profile_chunks,
     format_profile_chunks,
@@ -50,7 +50,7 @@ from src.kennybot.utils.text import (
     strip_ansi_and_ctrl,
 )
 from src.kennybot.utils.prompts import get_prompt
-from src.kennybot.utils.tool_api import build_tool_response
+from src.kennybot.features.search import build_tool_response
 from src.kennybot.utils.codex_jobs import CodexJobHandle, CodexJobManager
 from src.kennybot.utils.vrchat_world import format_vrchat_world_text, search_vrchat_worlds
 from src.kennybot.utils.tool_planner import (
@@ -58,12 +58,12 @@ from src.kennybot.utils.tool_planner import (
     parse_json_payload as parse_planner_json_payload,
     validate_search_query,
 )
-from src.kennybot.guards.spam_guard import SpamGuard
-from src.kennybot.guards.mod_actions import ModActions
+from src.kennybot.utils.time import JST, now_jst
+from src.kennybot.features.moderation import ModActions
+from src.kennybot.features.spam import SpamGuard
 
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 URL_RE = re.compile(r"https?://[^\s)>\"]+")
 RAG_HEADER_RE = re.compile(r"^\[([^\]]+)\]")
 
@@ -642,7 +642,7 @@ class MessageLogger(BaseCog):
                     stream=False,
                     format="json",
                 ),
-                timeout=min(20, max(8, self._cfg_int("ollama.timeout_sec", 180))),
+                timeout=min(20, max(8, self._cfg_ai_timeout())),
             )
             plan = self._normalize_retrieval_plan(self._parse_json_payload(raw or ""))
             if plan:
@@ -731,7 +731,7 @@ class MessageLogger(BaseCog):
                     mode="normal",
                     news_only=news_only,
                 ),
-                timeout=max(20, self._cfg_int("ollama.timeout_sec", 180)),
+                timeout=max(20, self._cfg_ai_timeout()),
             )
         except Exception:
             logger.exception("AI search context build failed")
@@ -834,7 +834,7 @@ class MessageLogger(BaseCog):
         if not text or not embed_client.has_embed():
             return None
         try:
-            model_name = self._cfg_str("ollama.model_embedding", "embeddinggemma")
+            model_name = self._cfg_ai_model("embedding")
             vectors = await asyncio.to_thread(embed_client.embed, model_name, text)
             return vectors[0] if vectors else None
         except Exception:
@@ -857,7 +857,7 @@ class MessageLogger(BaseCog):
         embedding = await self._embed_text(content)
         if not embedding:
             return
-        timestamp = datetime.now(JST).isoformat()
+        timestamp = now_jst().isoformat()
         try:
             await asyncio.to_thread(
                 self._vector_store.upsert_message,
@@ -1496,7 +1496,7 @@ class MessageLogger(BaseCog):
     ) -> str | None:
         effective_timeout = timeout_sec
         if effective_timeout is None or effective_timeout <= 0:
-            effective_timeout = self._cfg_int("ollama.timeout_sec", 180)
+            effective_timeout = self._cfg_ai_timeout()
         return await asyncio.wait_for(
             asyncio.to_thread(
                 self.bot.ollama_client.chat_simple,
@@ -1562,6 +1562,19 @@ class MessageLogger(BaseCog):
     def _cfg_map(self, path: str) -> dict:
         v = _settings.get(path, {})
         return v if isinstance(v, dict) else {}
+
+    def _cfg_ai_model(self, target: str) -> str:
+        models = get_app_config().ai_models()
+        if target == "chat":
+            return models.chat
+        if target == "summary":
+            return models.summary
+        if target == "embedding":
+            return models.embedding
+        return models.default
+
+    def _cfg_ai_timeout(self) -> int:
+        return get_app_config().ai_models().timeout_sec
 
     def _cfg_nicknames(self) -> dict[int, str]:
         raw = self._cfg_map("user_nicknames")
@@ -1894,7 +1907,7 @@ class MessageLogger(BaseCog):
         prompt_text = ""
         if prompt_msg is not None:
             try:
-                dt = prompt_msg.created_at.astimezone(timezone(timedelta(hours=9)))
+                dt = prompt_msg.created_at.astimezone(JST)
                 time_str = dt.strftime("%H:%M")
             except Exception:
                 time_str = ""
@@ -1905,7 +1918,7 @@ class MessageLogger(BaseCog):
             ).strip()
 
         try:
-            dt = response_msg.created_at.astimezone(timezone(timedelta(hours=9)))
+            dt = response_msg.created_at.astimezone(JST)
             time_str = dt.strftime("%H:%M")
         except Exception:
             time_str = ""
@@ -1947,7 +1960,7 @@ class MessageLogger(BaseCog):
                     stream=False,
                     format="json",
                 ),
-                timeout=min(20, max(8, self._cfg_int("ollama.timeout_sec", 180))),
+                timeout=min(20, max(8, self._cfg_ai_timeout())),
             )
             payload = self._parse_json_payload(raw or "")
             if isinstance(payload, dict):
@@ -2095,7 +2108,7 @@ class MessageLogger(BaseCog):
             target_area=target_area or "一般的な応答品質",
             planned_fix=planned_fix or "ユーザー指摘に基づいて修正する",
         )
-        model_name = self._cfg_str("ollama.model_summary", self._cfg_str("ollama.model_default", "gpt-oss:120b"))
+        model_name = self._cfg_ai_model("summary")
         try:
             raw = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -2104,7 +2117,7 @@ class MessageLogger(BaseCog):
                     prompt=prompt,
                     stream=False,
                 ),
-                timeout=min(20, max(8, self._cfg_int("ollama.timeout_sec", 180))),
+                timeout=min(20, max(8, self._cfg_ai_timeout())),
             )
             text = strip_ansi_and_ctrl((raw or "").strip())
             if text:
@@ -2639,7 +2652,7 @@ class MessageLogger(BaseCog):
                     stream=False,
                     format="json",
                 ),
-                timeout=min(20, max(8, self._cfg_int("ollama.timeout_sec", 180))),
+                timeout=min(20, max(8, self._cfg_ai_timeout())),
             )
             plan = normalize_planner_plan(parse_planner_json_payload(raw_plan or ""))
         except Exception:
@@ -3048,8 +3061,8 @@ class MessageLogger(BaseCog):
             {
                 "role": "system",
                 "content": get_prompt("chat", "system_message").format(
-                    absolute_date=datetime.now(JST).strftime("%Y-%m-%d"),
-                    absolute_datetime=datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST"),
+                    absolute_date=now_jst().strftime("%Y-%m-%d"),
+                    absolute_datetime=now_jst().strftime("%Y-%m-%d %H:%M:%S JST"),
                     channel_profile_block="",
                 ),
             },
@@ -3467,10 +3480,7 @@ class MessageLogger(BaseCog):
         return answer
 
     def _current_chat_model_name(self) -> str:
-        return self._cfg_str(
-            "ollama.model_chat",
-            self._cfg_str("ollama.model_default", "gpt-oss:120b"),
-        )
+        return self._cfg_ai_model("chat")
 
     def _normalize_user_visible_slash_commands(self, text: str) -> str:
         allowed = set(SLASH_COMMANDS)
@@ -4402,7 +4412,7 @@ class MessageLogger(BaseCog):
 
         references: list[str] = []
         reference_details: list[str] = []
-        today_local = datetime.now(JST)
+        today_local = now_jst()
         absolute_date = today_local.strftime("%Y-%m-%d")
         absolute_datetime = today_local.strftime("%Y-%m-%d %H:%M:%S JST")
         history_context, planned_refs, web_queries, planned_details = await self._resolve_chat_context(

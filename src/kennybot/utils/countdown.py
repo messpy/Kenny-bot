@@ -4,6 +4,7 @@ import asyncio
 from typing import Awaitable, Callable
 
 import discord
+from src.kennybot.utils.timers import CountdownTimer, Stopwatch, format_duration_jp
 
 
 class ChannelCountdown:
@@ -15,11 +16,7 @@ class ChannelCountdown:
         return self._messages.get(key)
 
     def _format_elapsed(self, seconds: int) -> str:
-        total = max(1, int(seconds))
-        minutes, secs = divmod(total, 60)
-        if minutes <= 0:
-            return f"{secs}秒"
-        return f"{minutes}分{secs}秒"
+        return format_duration_jp(max(1, int(seconds)))
 
     async def stop(self, key: str, *, delete_message: bool = False) -> None:
         task = self._tasks.pop(key, None)
@@ -101,12 +98,14 @@ class ChannelCountdown:
         prefix = f"<@{mention_user_id}> " if mention_user_id else ""
         msg = await channel.send(f"{prefix}{initial_text}", allowed_mentions=discord.AllowedMentions.none())
         self._messages[key] = msg
-        remain = max(0, int(total_seconds))
+        timer = CountdownTimer(total_seconds=max(0, int(total_seconds)))
+        timer.start()
         try:
-            while remain > 0:
+            while not timer.is_done():
+                remain = timer.remaining_seconds()
                 step = 1 if remain <= 10 else min(10, remain)
                 await asyncio.sleep(step)
-                remain -= step
+                remain = timer.remaining_seconds()
                 if remain > 0:
                     await msg.edit(content=f"{prefix}⏳ 残り {remain} 秒", allowed_mentions=discord.AllowedMentions.none())
                 elif done_text:
@@ -135,12 +134,14 @@ class ChannelCountdown:
         current_msg: discord.Message | None = None
         send_task: asyncio.Task[discord.Message] | None = None
         cancelled = False
+        watch = Stopwatch(accumulated_seconds=max(1, int(elapsed)))
         try:
             if initial_delay_seconds > 0:
                 await asyncio.sleep(float(initial_delay_seconds))
+            watch.start()
             while True:
                 await asyncio.sleep(1)
-                elapsed += 1
+                elapsed = max(1, watch.elapsed_seconds() + 1)
                 prefix = f"<@{mention_user_id}> " if mention_user_id else ""
                 text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
                 msg = self._messages.get(key)

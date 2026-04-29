@@ -16,6 +16,15 @@ from src.kennybot.utils.server_registry import get_server_registry
 
 DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
+        "ai": {
+            "models": {
+                "default": "gpt-oss:120b",
+                "chat": "gpt-oss:120b",
+                "summary": "gpt-oss:120b",
+                "embedding": "embeddinggemma",
+            },
+            "timeout_sec": 180,
+        },
         "ollama": {
             "model_default": "gpt-oss:120b",
             "model_chat": "gpt-oss:120b",
@@ -55,6 +64,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
                 "dup_window_seconds": 12.0,
                 "warn_cooldown_seconds": 20.0,
             },
+        },
+        "spam": {
+            "max_msgs": 5,
+            "per_seconds": 8.0,
+            "max_ai_calls": 2,
+            "ai_per_seconds": 20.0,
+            "dup_window_seconds": 12.0,
+            "warn_cooldown_seconds": 20.0,
         },
         "meeting": {
             "max_minutes": 90,
@@ -149,6 +166,7 @@ class SettingsStore:
             else:
                 self._data = {}
             self._ensure_shape()
+            self._migrate_legacy_keys()
             self._migrate_loaded_guilds_to_registry()
             self._last_mtime_ns = self._current_mtime_ns()
             if self._data != previous:
@@ -207,6 +225,49 @@ class SettingsStore:
         if "guilds" not in self._data or not isinstance(self._data.get("guilds"), dict):
             self._data["guilds"] = {}
         self._data = self._deep_merge(deepcopy(DEFAULT_SETTINGS), self._data)
+
+    def _migrate_legacy_keys(self) -> None:
+        global_settings = self._data.setdefault("global", {})
+        if not isinstance(global_settings, dict):
+            global_settings = {}
+            self._data["global"] = global_settings
+
+        ai_settings = global_settings.setdefault("ai", {})
+        if not isinstance(ai_settings, dict):
+            ai_settings = {}
+            global_settings["ai"] = ai_settings
+        ai_models = ai_settings.setdefault("models", {})
+        if not isinstance(ai_models, dict):
+            ai_models = {}
+            ai_settings["models"] = ai_models
+
+        ollama_settings = global_settings.get("ollama", {})
+        if isinstance(ollama_settings, dict):
+            model_mapping = {
+                "model_default": "default",
+                "model_chat": "chat",
+                "model_summary": "summary",
+                "model_embedding": "embedding",
+            }
+            for old_key, new_key in model_mapping.items():
+                if new_key not in ai_models and old_key in ollama_settings:
+                    ai_models[new_key] = ollama_settings[old_key]
+            if "timeout_sec" not in ai_settings and "timeout_sec" in ollama_settings:
+                ai_settings["timeout_sec"] = ollama_settings["timeout_sec"]
+            global_settings.pop("ollama", None)
+
+        spam_settings = global_settings.setdefault("spam", {})
+        if not isinstance(spam_settings, dict):
+            spam_settings = {}
+            global_settings["spam"] = spam_settings
+
+        security_settings = global_settings.get("security", {})
+        if isinstance(security_settings, dict):
+            legacy_spam = security_settings.get("spam", {})
+            if isinstance(legacy_spam, dict):
+                for key, value in legacy_spam.items():
+                    spam_settings.setdefault(key, value)
+                security_settings.pop("spam", None)
 
     def _deep_merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         out = dict(base)

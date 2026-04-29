@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from src.kennybot.utils.config import get_app_config
 from src.kennybot.utils.runtime_settings import get_settings
 
 try:
@@ -322,13 +323,13 @@ class OllamaClientService:
         except requests.HTTPError as err:
             status_code = getattr(err.response, "status_code", None)
             if status_code == 429:
-                settings = get_settings()
+                models = get_app_config().ai_models()
                 fallback_models: list[str] = []
                 for candidate in (
                     _OLLAMA_FALLBACK_MODEL,
-                    str(settings.get("ollama.model_chat", "") or "").strip(),
-                    str(settings.get("ollama.model_summary", "") or "").strip(),
-                    str(settings.get("ollama.model_default", "") or "").strip(),
+                    models.chat.strip(),
+                    models.summary.strip(),
+                    models.default.strip(),
                 ):
                     if not candidate or self._is_gemini_model(candidate):
                         continue
@@ -468,13 +469,13 @@ class OllamaClientService:
         return value
 
     def _configured_fallback_models(self, primary_model: str) -> list[str]:
-        settings = get_settings()
+        models = get_app_config().ai_models()
         candidates: list[str] = []
         for candidate in (
             _OLLAMA_FALLBACK_MODEL,
-            str(settings.get("ollama.model_chat", "") or "").strip(),
-            str(settings.get("ollama.model_summary", "") or "").strip(),
-            str(settings.get("ollama.model_default", "") or "").strip(),
+            models.chat.strip(),
+            models.summary.strip(),
+            models.default.strip(),
         ):
             if not candidate or candidate == primary_model:
                 continue

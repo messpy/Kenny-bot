@@ -1,14 +1,11 @@
 # cogs/member_logger.py
 # Member join/leave ログ
 
-from datetime import datetime, timezone, timedelta
-
 import discord
 from discord.ext import commands
 
 from src.kennybot.utils.event_logger import send_event_log
-
-JST = timezone(timedelta(hours=9))
+from src.kennybot.utils.time import now_jst, as_jst
 
 
 class MemberLogger(commands.Cog):
@@ -23,7 +20,7 @@ class MemberLogger(commands.Cog):
         guild = member.guild
 
         # アカウント作成日を取得
-        account_age = datetime.now(JST) - member.created_at.replace(tzinfo=JST)
+        account_age = now_jst() - as_jst(member.created_at)
         age_str = f"{account_age.days}日"
         await send_event_log(
             self.bot,

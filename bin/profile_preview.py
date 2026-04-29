@@ -11,7 +11,7 @@ sys_root = Path(__file__).resolve().parent.parent
 if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
-from src.kennybot.utils.profile_preview_api import build_profile_preview_response, parse_json_payload
+from src.kennybot.features.search import build_profile_preview_response, parse_json_payload
 
 
 def _build_parser() -> argparse.ArgumentParser:

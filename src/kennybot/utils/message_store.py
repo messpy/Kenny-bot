@@ -2,16 +2,16 @@
 # メッセージ履歴の保存・読み込み管理
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from src.kennybot.utils.scoped_data import channel_scope_dir
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.server_registry import get_server_registry
 from src.kennybot.utils.text import looks_like_web_search_artifact
+from src.kennybot.utils.time import JST, now_jst
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 _settings = get_settings()
 
 
@@ -95,7 +95,7 @@ class MessageStore:
 
         # 期限で間引き（0以下なら期限無効）
         if retention_days > 0:
-            cutoff = datetime.now(JST) - timedelta(days=retention_days)
+            cutoff = now_jst() - timedelta(days=retention_days)
             kept: List[dict] = []
             for m in messages:
                 ts = m.get("timestamp", "")
@@ -136,7 +136,7 @@ class MessageStore:
                 "author_id": author_id,
                 "author": author_name,
                 "content": content,
-                "timestamp": datetime.now(JST).isoformat(),
+                "timestamp": now_jst().isoformat(),
             }
             messages.append(new_msg)
 
