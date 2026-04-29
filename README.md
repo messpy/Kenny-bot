@@ -41,6 +41,49 @@ DM でも同样的に応答できます。
 
 VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が自動でチャンネルに投稿されます。
 
+### ローカル検証
+
+- `bin/debug_route.py` でルート判定や応答生成の preview ができます
+- `--mock-llm` は AI / 検索の backend をモック化します
+- `--dry-run-send` は送信だけ抑止して、それ以外の処理はできるだけそのまま流します
+- `--trace-llm` を併用すると `runtime/history/debug_route/debug_route_trace.txt` にトレースを書き出します
+
+## DB
+
+- 本番運用は `MariaDB` 前提です
+- `docker-compose.yml` は `mariadb` サービスを同梱しており、ホストの `127.0.0.1:3306` でも受けます
+- `systemd/kennybot.service` は `.env` を読むので、同じ接続情報を使えます
+- 必要な環境変数:
+  - `KENNYBOT_DB_BACKEND=mariadb`
+  - `KENNYBOT_DB_HOST`
+  - `KENNYBOT_DB_PORT`
+  - `KENNYBOT_DB_USER`
+  - `KENNYBOT_DB_PASSWORD`
+  - `KENNYBOT_DB_NAME`
+  - `KENNYBOT_DB_CHARSET`
+- ホストで `kennybot.service` を動かす場合は `KENNYBOT_DB_HOST=127.0.0.1` を使ってください
+- `sudo systemctl status mariadb` が見つからないのは正常です。標準構成では systemd の MariaDB ではなく `docker compose` の `mariadb` コンテナを使います
+
+### MariaDB への切り替え
+
+1. `.env` に DB 設定を入れる
+2. `docker compose up -d mariadb` で DB を起動する
+3. 既存の SQLite データがある場合は `uv run bin/migrate_sqlite_to_mariadb.py` で移行する
+4. `systemctl --user restart kennybot.service` で bot を再起動する
+
+## Data Layout
+
+- 現役の永続設定・補助ファイルは `data/` に置く。Bot が会話で読む固定知識は `data/knowledge/`
+- 実行時ログ・一時物・音声デバッグ・状態ファイルは `runtime/` に置く
+- MariaDB 移行後の legacy 候補は `data/channel_rag`, `data/server_rag`, `data/message_logs`, `data/server/server.sqlite3`, `data/meeting_audio_debug`
+- 退避プラン確認: `python3 bin/archive_legacy_data_layout.py`
+- 実際に退避: `python3 bin/archive_legacy_data_layout.py --apply`
+
+## 設計
+
+- ドキュメント一覧: [docs/index.md](/home/kennypi/work/Kenny-bot/docs/index.md)
+- 応答経路とモデル責務: [docs/architecture/response-architecture.md](/home/kennypi/work/Kenny-bot/docs/architecture/response-architecture.md)
+
 ## 注意
 
 - AI 応答は間隔制限があります。連続送信しすぎないようご注意ください。

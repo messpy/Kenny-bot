@@ -1,24 +1,22 @@
 # utils/message_store.py
 # メッセージ履歴の保存・読み込み管理
 
-import json
 import logging
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Optional, List
 
-from src.kennybot.utils.paths import LEGACY_MESSAGE_LOG_DIR, MESSAGE_LOG_DIR
 from src.kennybot.utils.scoped_data import channel_scope_dir
 from src.kennybot.utils.runtime_settings import get_settings
+from src.kennybot.utils.server_registry import get_server_registry
 from src.kennybot.utils.text import looks_like_web_search_artifact
+from src.kennybot.utils.time import JST, now_jst
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 _settings = get_settings()
 
 
 class MessageStore:
-    """メッセージ履歴をJSON形式で保存・管理"""
+    """メッセージ履歴をDB正本で保存・管理する。"""
 
     def __init__(
         self,
@@ -39,14 +37,10 @@ class MessageStore:
         self.channel_id = channel_id
         self.guild_name = guild_name
         self.channel_name = channel_name
-        self.log_file = MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json"
-        self.legacy_log_files = [
-            LEGACY_MESSAGE_LOG_DIR / f"guild_{guild_id}_channel_{channel_id}.json",
-            channel_scope_dir(guild_id, channel_id) / "messages.json",
-        ]
+        self._registry = get_server_registry()
 
     def _load_messages(self) -> List[dict]:
-        """JSON ファイルからメッセージを読み込む"""
+        """DB からメッセージを読み込む"""
         def _filter(messages: list[dict]) -> list[dict]:
             filtered: list[dict] = []
             changed = False
@@ -56,37 +50,41 @@ class MessageStore:
                     changed = True
                     continue
                 filtered.append(message)
-            if changed:
-                self._save_messages(filtered)
             return filtered
 
-        if self.log_file.exists():
-            try:
-                with open(self.log_file, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                    if isinstance(loaded, list):
-                        return _filter(loaded)
-            except Exception as e:
-                logger.error(f"Failed to load messages: {e}")
-        for legacy_log_file in self.legacy_log_files:
-            if not legacy_log_file.exists():
-                continue
-            try:
-                with open(legacy_log_file, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                    if isinstance(loaded, list):
-                        return _filter(loaded)
-            except Exception as e:
-                logger.error(f"Failed to load legacy messages: {e}")
+        try:
+            rows = self._registry.list_message_logs(
+                guild_id=self.guild_id,
+                channel_id=self.channel_id,
+                lines=int(_settings.get("chat.history_max_messages", 1000)),
+            )
+            if rows:
+                return _filter(rows)
+        except Exception as e:
+            logger.debug(f"Failed to load messages from database: {e}")
 
         return []
 
     def _save_messages(self, messages: List[dict]) -> None:
-        """メッセージを JSON ファイルに保存"""
+        """メッセージをDBへ同期する。"""
         try:
-            self.log_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_file, "w", encoding="utf-8") as f:
-                json.dump(messages, f, ensure_ascii=False, indent=2)
+            for message in messages:
+                try:
+                    message_id = int(message.get("id", 0) or 0)
+                    if message_id <= 0:
+                        continue
+                    self._registry.upsert_message_log(
+                        guild_id=self.guild_id,
+                        channel_id=self.channel_id,
+                        message_id=message_id,
+                        author_id=int(message.get("author_id", 0) or 0),
+                        author=str(message.get("author", "") or ""),
+                        content=str(message.get("content", "") or ""),
+                        timestamp=str(message.get("timestamp", "") or ""),
+                        metadata={"source": "message_store"},
+                    )
+                except Exception:
+                    continue
         except Exception as e:
             logger.error(f"Failed to save messages: {e}")
 
@@ -97,7 +95,7 @@ class MessageStore:
 
         # 期限で間引き（0以下なら期限無効）
         if retention_days > 0:
-            cutoff = datetime.now(JST) - timedelta(days=retention_days)
+            cutoff = now_jst() - timedelta(days=retention_days)
             kept: List[dict] = []
             for m in messages:
                 ts = m.get("timestamp", "")
@@ -138,7 +136,7 @@ class MessageStore:
                 "author_id": author_id,
                 "author": author_name,
                 "content": content,
-                "timestamp": datetime.now(JST).isoformat(),
+                "timestamp": now_jst().isoformat(),
             }
             messages.append(new_msg)
 

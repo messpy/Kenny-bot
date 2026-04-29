@@ -1,127 +1,69 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import os
+import sys
 from pathlib import Path
 
-from ai.client import create_ollama_client
-from utils.message_vector_store import MessageVectorStore
-from utils.paths import (
-    LEGACY_MESSAGE_LOG_DIR,
-    LEGACY_RUNTIME_MESSAGE_LOG_DIR,
-    MESSAGE_LOG_DIR,
-    MESSAGE_VECTOR_DB_PATH,
-)
-from utils.runtime_settings import get_settings
+sys_root = Path(__file__).resolve().parent.parent
+if str(sys_root) not in sys.path:
+    sys.path.insert(0, str(sys_root))
 
-
-def _iter_message_logs(root: Path) -> list[tuple[int, int, Path]]:
-    out: list[tuple[int, int, Path]] = []
-    for path in sorted(root.glob("guild_*_channel_*.json")):
-        stem = path.stem
-        parts = stem.split("_")
-        if len(parts) < 4:
-            continue
-        try:
-            guild_id = int(parts[1])
-            channel_id = int(parts[3])
-        except Exception:
-            continue
-        out.append((guild_id, channel_id, path))
-    return out
-
-
-def _iter_all_message_logs(roots: list[Path]) -> list[tuple[int, int, Path]]:
-    seen: set[Path] = set()
-    out: list[tuple[int, int, Path]] = []
-    for root in roots:
-        for guild_id, channel_id, path in _iter_message_logs(root):
-            if path in seen:
-                continue
-            seen.add(path)
-            out.append((guild_id, channel_id, path))
-    return out
-
-
-def _iter_legacy_channel_history_logs(root: Path) -> list[tuple[int, int, Path]]:
-    out: list[tuple[int, int, Path]] = []
-    for path in sorted(root.glob("*/channels/*/messages.json")):
-        try:
-            guild_id = int(path.parent.parent.parent.name)
-            channel_id = int(path.parent.parent.name)
-        except Exception:
-            continue
-        out.append((guild_id, channel_id, path))
-    return out
+from src.kennybot.ai.client import create_ollama_client
+from src.kennybot.utils.config import get_app_config
+from src.kennybot.utils.message_vector_store import MessageVectorStore
+from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH
+from src.kennybot.utils.server_registry import create_server_registry
 
 
 def main() -> int:
-    settings = get_settings()
-    logs_roots = [MESSAGE_LOG_DIR, LEGACY_MESSAGE_LOG_DIR, LEGACY_RUNTIME_MESSAGE_LOG_DIR]
-    vector_db = MESSAGE_VECTOR_DB_PATH
-    model = str(settings.get("ollama.model_embedding", "embeddinggemma"))
+    model = get_app_config().ai_models().embedding
     batch_size = 32
 
     client = create_ollama_client(host=os.getenv("OLLAMA_HOST"))
-    store = MessageVectorStore(vector_db)
+    vector_store = MessageVectorStore(MESSAGE_VECTOR_SQLITE_PATH)
+    registry = create_server_registry()
 
-    total_rows = 0
+    rows = registry.list_message_logs_any()
+    pending: list[dict] = []
+    for row in rows:
+        message_id = int(row.get("message_id", 0) or 0)
+        if message_id <= 0 or vector_store.has_message(message_id):
+            continue
+        content = str(row.get("content", "") or "").strip()
+        if not content:
+            continue
+        pending.append(
+            {
+                "guild_id": int(row["guild_id"]),
+                "channel_id": int(row["channel_id"]),
+                "message_id": message_id,
+                "author_id": int(row.get("author_id", 0) or 0),
+                "author": str(row.get("author", "Unknown") or "Unknown"),
+                "content": content,
+                "timestamp": str(row.get("timestamp", "") or ""),
+            }
+        )
+
     indexed_rows = 0
-
-    all_logs = _iter_all_message_logs(logs_roots)
-    all_logs.extend(_iter_legacy_channel_history_logs(root / "data" / "channel_rag"))
-    for guild_id, channel_id, path in all_logs:
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start : start + batch_size]
+        texts = [row["content"] for row in batch]
         try:
-            messages = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(messages, list):
-            continue
+            embeddings = client.embed(model=model, input_texts=texts)
+        except Exception as e:
+            print(f"[warn] embed failed: {e}")
+            break
+        payload: list[dict] = []
+        for row, embedding in zip(batch, embeddings):
+            item = dict(row)
+            item["embedding"] = embedding
+            payload.append(item)
+        vector_store.upsert_messages(payload)
+        indexed_rows += len(payload)
+        print(f"[indexed] {start + len(payload)}/{len(pending)}")
 
-        pending: list[dict] = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            try:
-                message_id = int(msg.get("id", 0) or 0)
-            except Exception:
-                message_id = 0
-            if message_id <= 0 or store.has_message(message_id):
-                continue
-            content = str(msg.get("content") or "").strip()
-            if not content:
-                continue
-            pending.append(
-                {
-                    "guild_id": guild_id,
-                    "channel_id": channel_id,
-                    "message_id": message_id,
-                    "author_id": int(msg.get("author_id", 0) or 0),
-                    "author": str(msg.get("author") or "Unknown"),
-                    "content": content,
-                    "timestamp": str(msg.get("timestamp") or ""),
-                }
-            )
-
-        total_rows += len(pending)
-        for start in range(0, len(pending), batch_size):
-            batch = pending[start : start + batch_size]
-            texts = [row["content"] for row in batch]
-            try:
-                embeddings = client.embed(model=model, input_texts=texts)
-            except Exception as e:
-                print(f"[warn] embed failed for {path.name}: {e}")
-                break
-            rows: list[dict] = []
-            for row, embedding in zip(batch, embeddings):
-                item = dict(row)
-                item["embedding"] = embedding
-                rows.append(item)
-            store.upsert_messages(rows)
-            indexed_rows += len(rows)
-            print(f"[indexed] {path.name} {start + len(rows)}/{len(pending)}")
-
-    print(f"[done] indexed={indexed_rows} pending_seen={total_rows} db={vector_db}")
+    print(f"[done] indexed={indexed_rows} pending_seen={len(pending)} backend={vector_store._db.backend}")
     return 0
 
 

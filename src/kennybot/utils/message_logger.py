@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from src.kennybot.utils.paths import ALL_EVENTS_LOG
+from src.kennybot.utils.time import isoformat_jst
 
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 
 
 def _append_line(line: str) -> None:
@@ -21,7 +20,7 @@ def _append_line(line: str) -> None:
 
 
 def _timestamp() -> str:
-    return datetime.now(JST).isoformat(timespec="seconds")
+    return isoformat_jst(timespec="seconds")
 
 
 def _format_common_prefix(kind: str, msg: Any | None = None) -> str:
@@ -181,6 +180,8 @@ def log_codex_request(
     planned_fix: str = "",
     previous_prompt: str = "",
     previous_response: str = "",
+    job_id: str = "",
+    branch_name: str = "",
     level: str = "warning",
 ) -> None:
     details = {
@@ -195,6 +196,10 @@ def log_codex_request(
         details["previous_prompt"] = previous_prompt[:500]
     if previous_response:
         details["previous_response"] = previous_response[:500]
+    if job_id:
+        details["job_id"] = job_id[:120]
+    if branch_name:
+        details["branch_name"] = branch_name[:200]
     log_system_event(
         "codex依頼",
         msg=msg,

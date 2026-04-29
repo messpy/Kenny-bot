@@ -2,48 +2,72 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from src.kennybot.utils.db import connect_database, resolve_database_config, sql_placeholders
 from src.kennybot.utils.text import looks_like_web_search_artifact
 
 
 class MessageVectorStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path | None = None, *, backend: str | None = None):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = resolve_database_config(path, backend=backend)
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self) -> Any:
+        return connect_database(self._db)
+
+    def _sql(self, sql: str) -> str:
+        return sql_placeholders(sql, self._db)
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS message_embeddings (
-                    guild_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    message_id INTEGER NOT NULL PRIMARY KEY,
-                    author_id INTEGER NOT NULL,
-                    author TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    embedding_json TEXT
+        with closing(self._connect()) as conn:
+            if self._db.backend == "sqlite":
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_embeddings (
+                        guild_id INTEGER NOT NULL,
+                        channel_id INTEGER NOT NULL,
+                        message_id INTEGER NOT NULL PRIMARY KEY,
+                        author_id INTEGER NOT NULL,
+                        author TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        embedding_json TEXT
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_msg_embed_channel_time "
-                "ON message_embeddings (guild_id, channel_id, timestamp DESC)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_msg_embed_author_time "
-                "ON message_embeddings (guild_id, channel_id, author_id, timestamp DESC)"
-            )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_msg_embed_channel_time "
+                    "ON message_embeddings (guild_id, channel_id, timestamp DESC)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_msg_embed_author_time "
+                    "ON message_embeddings (guild_id, channel_id, author_id, timestamp DESC)"
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS message_embeddings (
+                            guild_id BIGINT NOT NULL,
+                            channel_id BIGINT NOT NULL,
+                            message_id BIGINT NOT NULL PRIMARY KEY,
+                            author_id BIGINT NOT NULL,
+                            author LONGTEXT NOT NULL,
+                            content LONGTEXT NOT NULL,
+                            timestamp VARCHAR(64) NOT NULL,
+                            embedding_json LONGTEXT NULL,
+                            INDEX idx_msg_embed_channel_time (guild_id, channel_id, timestamp),
+                            INDEX idx_msg_embed_author_time (guild_id, channel_id, author_id, timestamp)
+                        )
+                        """
+                    )
+            conn.commit()
 
     def upsert_message(
         self,
@@ -60,23 +84,44 @@ class MessageVectorStore:
         embedding_json = json.dumps(embedding) if embedding else None
         if looks_like_web_search_artifact(content):
             return
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO message_embeddings (
-                    guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(message_id) DO UPDATE SET
-                    guild_id=excluded.guild_id,
-                    channel_id=excluded.channel_id,
-                    author_id=excluded.author_id,
-                    author=excluded.author,
-                    content=excluded.content,
-                    timestamp=excluded.timestamp,
-                    embedding_json=COALESCE(excluded.embedding_json, message_embeddings.embedding_json)
-                """,
-                (guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json),
-            )
+        with closing(self._connect()) as conn:
+            params = (guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json)
+            if self._db.backend == "sqlite":
+                conn.execute(
+                    """
+                    INSERT INTO message_embeddings (
+                        guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(message_id) DO UPDATE SET
+                        guild_id=excluded.guild_id,
+                        channel_id=excluded.channel_id,
+                        author_id=excluded.author_id,
+                        author=excluded.author,
+                        content=excluded.content,
+                        timestamp=excluded.timestamp,
+                        embedding_json=COALESCE(excluded.embedding_json, message_embeddings.embedding_json)
+                    """,
+                    params,
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO message_embeddings (
+                            guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            guild_id=VALUES(guild_id),
+                            channel_id=VALUES(channel_id),
+                            author_id=VALUES(author_id),
+                            author=VALUES(author),
+                            content=VALUES(content),
+                            timestamp=VALUES(timestamp),
+                            embedding_json=COALESCE(VALUES(embedding_json), message_embeddings.embedding_json)
+                        """,
+                        params,
+                    )
+            conn.commit()
 
     def upsert_messages(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
@@ -99,30 +144,49 @@ class MessageVectorStore:
                     json.dumps(embedding) if embedding else None,
                 )
             )
-        with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO message_embeddings (
-                    guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(message_id) DO UPDATE SET
-                    guild_id=excluded.guild_id,
-                    channel_id=excluded.channel_id,
-                    author_id=excluded.author_id,
-                    author=excluded.author,
-                    content=excluded.content,
-                    timestamp=excluded.timestamp,
-                    embedding_json=COALESCE(excluded.embedding_json, message_embeddings.embedding_json)
-                """,
-                payload,
-            )
+        with closing(self._connect()) as conn:
+            if self._db.backend == "sqlite":
+                conn.executemany(
+                    """
+                    INSERT INTO message_embeddings (
+                        guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(message_id) DO UPDATE SET
+                        guild_id=excluded.guild_id,
+                        channel_id=excluded.channel_id,
+                        author_id=excluded.author_id,
+                        author=excluded.author,
+                        content=excluded.content,
+                        timestamp=excluded.timestamp,
+                        embedding_json=COALESCE(excluded.embedding_json, message_embeddings.embedding_json)
+                    """,
+                    payload,
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO message_embeddings (
+                            guild_id, channel_id, message_id, author_id, author, content, timestamp, embedding_json
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            guild_id=VALUES(guild_id),
+                            channel_id=VALUES(channel_id),
+                            author_id=VALUES(author_id),
+                            author=VALUES(author),
+                            content=VALUES(content),
+                            timestamp=VALUES(timestamp),
+                            embedding_json=COALESCE(VALUES(embedding_json), message_embeddings.embedding_json)
+                        """,
+                        payload,
+                    )
+            conn.commit()
 
     def has_message(self, message_id: int) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM message_embeddings WHERE message_id = ? LIMIT 1",
-                (int(message_id),),
-            ).fetchone()
+        with closing(self._connect()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(self._sql("SELECT 1 FROM message_embeddings WHERE message_id = ? LIMIT 1"), (int(message_id),))
+            row = cursor.fetchone()
         return row is not None
 
     def semantic_search(
@@ -150,8 +214,11 @@ class MessageVectorStore:
         params.append(max(limit, sample_limit))
 
         scored: list[tuple[float, dict[str, Any]]] = []
-        with self._connect() as conn:
-            for row in conn.execute(sql, params):
+        with closing(self._connect()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(self._sql(sql), params)
+            rows = cursor.fetchall()
+            for row in rows:
                 embedding_json = row["embedding_json"]
                 if not embedding_json:
                     continue

@@ -1,13 +1,15 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections import OrderedDict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Optional
 
 import discord
+from src.kennybot.utils.time import JST, now_jst
 
 logger = logging.getLogger(__name__)
-JST = timezone(timedelta(hours=9))
 
 
 class MessageFetcher:
@@ -31,7 +33,7 @@ class MessageFetcher:
         key = self._cache_key(channel_id)
         if key in self._cache:
             cached, timestamp = self._cache[key]
-            if (datetime.now(JST) - timestamp).total_seconds() < self._cache_ttl_sec:
+            if (now_jst() - timestamp).total_seconds() < self._cache_ttl_sec:
                 return cached
             del self._cache[key]
         return None
@@ -40,7 +42,7 @@ class MessageFetcher:
         key = self._cache_key(channel_id)
         if len(self._cache) >= self._cache_max_channels:
             self._cache.popitem(last=False)
-        self._cache[key] = (messages, datetime.now(JST))
+        self._cache[key] = (messages, now_jst())
 
     def invalidate(self, channel_id: int) -> None:
         key = self._cache_key(channel_id)
@@ -137,9 +139,10 @@ def format_messages_for_context(messages: list[discord.Message]) -> str:
         if msg.author.id:
             author_display = f"{msg.author} ({msg.author.id})"
         time_str = ""
-        if msg.created_at:
+        created_at = getattr(msg, "created_at", None)
+        if created_at:
             try:
-                dt = msg.created_at.astimezone(JST)
+                dt = created_at.astimezone(JST)
                 time_str = dt.strftime("%H:%M")
             except Exception:
                 pass

@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 import wave
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import List
 
@@ -29,12 +29,13 @@ from src.kennybot.utils.command_catalog import (
 from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.message_logger import log_system_event, log_codex_repair_mode
 from src.kennybot.utils.countdown import ChannelCountdown
+from src.kennybot.utils.config import get_app_config
 from src.kennybot.utils.runtime_settings import get_settings
+from src.kennybot.utils.time import JST, now_jst
 from src.kennybot.utils.vrchat_world import format_vrchat_world_lines, search_vrchat_worlds
 from src.kennybot.ai.client import create_ollama_client
 from src.kennybot.utils.prompts import get_prompt
 
-JST = timezone(timedelta(hours=9))
 _settings = get_settings()
 logger = logging.getLogger(__name__)
 ReadableChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
@@ -167,10 +168,11 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="要約の履歴取得件数", value="summarize_recent.history_fetch_limit"),
         app_commands.Choice(name="要約の投入行数上限", value="summarize_recent.transcript_lines_limit"),
         app_commands.Choice(name="要約の最大件数", value="summarize_recent.max_messages"),
-        app_commands.Choice(name="既定モデル", value="ollama.model_default"),
-        app_commands.Choice(name="埋め込みモデル", value="ollama.model_embedding"),
-        app_commands.Choice(name="要約モデル", value="ollama.model_summary"),
-        app_commands.Choice(name="モデル応答タイムアウト秒", value="ollama.timeout_sec"),
+        app_commands.Choice(name="既定モデル", value="ai.models.default"),
+        app_commands.Choice(name="会話モデル", value="ai.models.chat"),
+        app_commands.Choice(name="埋め込みモデル", value="ai.models.embedding"),
+        app_commands.Choice(name="要約モデル", value="ai.models.summary"),
+        app_commands.Choice(name="モデル応答タイムアウト秒", value="ai.timeout_sec"),
         app_commands.Choice(name="議事録リアルタイム翻訳", value="meeting.realtime_translation_enabled"),
         app_commands.Choice(name="議事録文字起こしプロバイダ", value="meeting.transcription_provider"),
         app_commands.Choice(name="Google STT 言語コード", value="meeting.google_language_code"),
@@ -178,8 +180,8 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="チャンネル間隔秒", value="security.ai_channel_cooldown_seconds"),
         app_commands.Choice(name="入力最大文字数", value="security.max_user_message_chars"),
         app_commands.Choice(name="kenny-chat招待URL/全体メンション禁止", value="kenny_chat.block_invite_and_mass_mention"),
-        app_commands.Choice(name="スパム許容メッセージ数", value="security.spam.max_msgs"),
-        app_commands.Choice(name="スパム判定秒数", value="security.spam.per_seconds"),
+        app_commands.Choice(name="スパム許容メッセージ数", value="spam.max_msgs"),
+        app_commands.Choice(name="スパム判定秒数", value="spam.per_seconds"),
     ]
 
     _INT_KEYS = {
@@ -196,7 +198,7 @@ class SlashCommands(commands.Cog):
         "summarize_recent.history_fetch_limit",
         "summarize_recent.transcript_lines_limit",
         "summarize_recent.max_messages",
-        "ollama.timeout_sec",
+        "ai.timeout_sec",
         "meeting.max_minutes",
         "meeting.audio_max_total_mb",
         "meeting.audio_max_user_mb",
@@ -205,12 +207,12 @@ class SlashCommands(commands.Cog):
         "security.ai_max_concurrency",
         "security.ai_channel_cooldown_seconds",
         "security.max_user_message_chars",
-        "security.spam.max_msgs",
-        "security.spam.per_seconds",
-        "security.spam.max_ai_calls",
-        "security.spam.ai_per_seconds",
-        "security.spam.dup_window_seconds",
-        "security.spam.warn_cooldown_seconds",
+        "spam.max_msgs",
+        "spam.per_seconds",
+        "spam.max_ai_calls",
+        "spam.ai_per_seconds",
+        "spam.dup_window_seconds",
+        "spam.warn_cooldown_seconds",
     }
     _BOOL_KEYS = {
         "kenny_chat.block_invite_and_mass_mention",
@@ -759,6 +761,7 @@ class SlashCommands(commands.Cog):
 
     @app_commands.command(name=BOT_INFO_META.name, description=BOT_INFO_META.description)
     async def slash_bot_info(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=False)
         now = discord.utils.utcnow()
         uptime = now - self._started_at
         total_seconds = int(max(0, uptime.total_seconds()))
@@ -775,19 +778,12 @@ class SlashCommands(commands.Cog):
         ping_ms = round(self.bot.latency * 1000, 1)
         commit = self._git_short_commit()
         version = self._git_version()
-        ai_model = self._display_model_name(
-            str(
-                _settings.get(
-                    "ollama.model_default",
-                    "gemini-2.5-flash",
-                )
-            )
-        )
+        ai_model = self._display_model_name(get_app_config().ai_models().default)
 
         embed = discord.Embed(
             title="Kenny Bot 情報",
             color=discord.Color.green(),
-            timestamp=datetime.now(JST),
+            timestamp=now_jst(),
         )
         embed.add_field(name="疎通", value="🏓 Pong / 正常", inline=True)
         embed.add_field(name="Ping", value=f"{ping_ms} ms", inline=True)
@@ -797,7 +793,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="会話モデル", value=f"`{ai_model}`", inline=True)
         embed.add_field(name="Version", value=f"`{version}`", inline=True)
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name=SUMMARIZE_RECENT_META.name, description=SUMMARIZE_RECENT_META.description)
     @app_commands.checks.cooldown(1, 20.0)
@@ -879,7 +875,7 @@ class SlashCommands(commands.Cog):
             transcript=transcript,
         )
         progress_key = f"ai-progress:{interaction.channel_id}:summarize:{interaction.user.id}"
-        model_summary = str(_settings.get("ollama.model_summary", "gpt-oss:120b"))
+        model_summary = get_app_config().ai_models().summary
         ticket = await self.bot.ai_progress_tracker.create_ticket()
 
         try:
@@ -917,7 +913,7 @@ class SlashCommands(commands.Cog):
             title=f"直近{len(rows)}件のチャット要約",
             description=summary,
             color=discord.Color.orange(),
-            timestamp=datetime.now(JST),
+            timestamp=now_jst(),
         )
         footer_bits = [f"#{target.name}", "対象: このチャンネル", f"件数: {len(rows)}"]
         if request_text:
@@ -1019,10 +1015,10 @@ class SlashCommands(commands.Cog):
 
     def _ollama_model_key(self, target: str) -> str:
         mapping = {
-            "default": "ollama.model_default",
-            "chat": "ollama.model_chat",
-            "summary": "ollama.model_summary",
-            "embedding": "ollama.model_embedding",
+            "default": "ai.models.default",
+            "chat": "ai.models.chat",
+            "summary": "ai.models.summary",
+            "embedding": "ai.models.embedding",
         }
         return mapping[target]
 
@@ -1086,9 +1082,6 @@ class SlashCommands(commands.Cog):
             names = self._list_local_models_via_cli()
         except Exception:
             names = self._list_remote_models_via_tags_api("http://127.0.0.1:11434")
-        for gemini_name in self._list_gemini_models():
-            if gemini_name not in names:
-                names.append(gemini_name)
         return names
 
     def _list_remote_models_via_tags_api(self, host: str) -> list[str]:
@@ -1149,11 +1142,6 @@ class SlashCommands(commands.Cog):
             except Exception as e:
                 remote_body = f"取得失敗: `{str(e)[:200]}`"
             sections.append(f"リモート ({remote_host}):\n{remote_body}")
-
-        gemini_names = self._list_gemini_models()
-        if gemini_names:
-            gemini_body = "\n".join(f"- `{name}`" for name in gemini_names)
-            sections.append(f"Gemini:\n{gemini_body}")
 
         await interaction.followup.send("\n\n".join(sections), ephemeral=True)
 

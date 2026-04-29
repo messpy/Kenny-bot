@@ -1,6 +1,7 @@
 # bot.py
 # MyBot メインクラス
 
+import asyncio
 import logging
 import os
 import time
@@ -10,32 +11,41 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from src.kennybot.utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_MODEL_CHAT, OLLAMA_MODEL_SUMMARY, OLLAMA_TIMEOUT_SEC, MAX_RESPONSE_LENGTH
+from src.kennybot.utils.app_settings import MAX_RESPONSE_LENGTH
 from src.kennybot.ai.runner import OllamaRunner, OllamaConfig
 from src.kennybot.features.chat import ChatMemory, ChatService, ChatConfig
 from src.kennybot.ai.client import OllamaClientService, OllamaClientConfig, create_ollama_client
-from src.kennybot.ai.search import AISearchService, DuckDuckGoSearch, SearchConfig, SummaryConfig, WebSummarizer
-from src.kennybot.guards.spam_guard import SpamGuard, SpamPolicy
-from src.kennybot.cogs.voice_logger import VoiceLogger
+from src.kennybot.features.games import GameCommands
+from src.kennybot.features.moderation import ModPanel
+from src.kennybot.features.search import AISearchService, DuckDuckGoSearch, SearchConfig, SummaryConfig, WebSummarizer
+from src.kennybot.features.spam import SpamGuard, SpamPolicy
+from src.kennybot.features.voice import MeetingMinutesManager, TTSReader, VoiceLogger
 from src.kennybot.cogs.member_logger import MemberLogger
 from src.kennybot.cogs.audit_logger import AuditLogger
 from src.kennybot.cogs.message_logger import MessageLogger
-from src.kennybot.cogs.mod_panel import ModPanel
 from src.kennybot.cogs.reaction_roles import ReactionRoles
 from src.kennybot.cogs.slash_commands import SlashCommands
-from src.kennybot.cogs.tts_reader import TTSReader
-from src.kennybot.cogs.game_commands import GameCommands
-from src.kennybot.utils.meeting_minutes import MeetingMinutesManager
 from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.message_logger import log_codex_repair_mode
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.voice_recv_patch import apply_voice_recv_resilience_patch
 from src.kennybot.utils.ai_progress import AIProgressTracker
+from src.kennybot.utils.config import get_app_config
 from src.kennybot.utils.logger import install_asyncio_exception_handler
 
 
 logger = logging.getLogger(__name__)
 apply_voice_recv_resilience_patch()
+
+
+def _resolve_ollama_host_for_runtime(host: str | None) -> str | None:
+    value = (host or "").strip()
+    if not value:
+        return None
+    lowered = value.lower()
+    if "ollama.com" in lowered:
+        return None
+    return value
 
 
 class MyBot(commands.Bot):
@@ -48,15 +58,18 @@ class MyBot(commands.Bot):
 
         # Spam Guard（設定から読み込み）
         settings = get_settings()
+        app_config = get_app_config()
+        ai_models = app_config.ai_models()
+        spam_config = app_config.spam()
         ai_concurrency = min(2, max(1, int(settings.get("security.ai_max_concurrency", 2))))
         self.spam_guard = SpamGuard(
             SpamPolicy(
-                max_msgs=max(1, int(settings.get("security.spam.max_msgs", 5))),
-                per_seconds=max(1.0, float(settings.get("security.spam.per_seconds", 8.0))),
-                max_ai_calls=max(1, int(settings.get("security.spam.max_ai_calls", 2))),
-                ai_per_seconds=max(1.0, float(settings.get("security.spam.ai_per_seconds", 20.0))),
-                dup_window_seconds=max(1.0, float(settings.get("security.spam.dup_window_seconds", 12.0))),
-                warn_cooldown_seconds=max(1.0, float(settings.get("security.spam.warn_cooldown_seconds", 20.0))),
+                max_msgs=spam_config.max_msgs,
+                per_seconds=spam_config.per_seconds,
+                max_ai_calls=spam_config.max_ai_calls,
+                ai_per_seconds=spam_config.ai_per_seconds,
+                dup_window_seconds=spam_config.dup_window_seconds,
+                warn_cooldown_seconds=spam_config.warn_cooldown_seconds,
             )
         )
         self.meeting_minutes = MeetingMinutesManager()
@@ -66,7 +79,7 @@ class MyBot(commands.Bot):
         # AI: Ollama（2つの方法を用意）
         # 方法1: subprocess/asyncio ベース（旧）
         runner = OllamaRunner(
-            OllamaConfig(model=OLLAMA_MODEL_DEFAULT, timeout_sec=OLLAMA_TIMEOUT_SEC),
+            OllamaConfig(model=ai_models.default, timeout_sec=ai_models.timeout_sec),
             debug=False,
         )
 
@@ -75,7 +88,7 @@ class MyBot(commands.Bot):
         self.chat_service = ChatService(
             runner=runner,
             config=ChatConfig(
-                model=OLLAMA_MODEL_CHAT,
+                model=ai_models.chat,
                 max_history_turns=10,
                 max_output_chars=MAX_RESPONSE_LENGTH,
                 concurrency=2,
@@ -100,19 +113,19 @@ class MyBot(commands.Bot):
                     config=SummaryConfig(
                         mode="normal",
                         concurrency=2,
-                        model=OLLAMA_MODEL_CHAT,
+                        model=ai_models.chat,
                         fallback_models=(
-                            OLLAMA_MODEL_SUMMARY,
-                            OLLAMA_MODEL_DEFAULT,
+                            ai_models.summary,
+                            ai_models.default,
                         ),
                         max_chars=400,
                     ),
                 ),
                 runner=runner,
-                final_model=OLLAMA_MODEL_CHAT,
+                final_model=ai_models.chat,
                 final_fallback_models=[
-                    OLLAMA_MODEL_SUMMARY,
-                    OLLAMA_MODEL_DEFAULT,
+                    ai_models.summary,
+                    ai_models.default,
                 ],
                 debug=False,
             )
@@ -122,7 +135,7 @@ class MyBot(commands.Bot):
 
         # 方法2: ollama_util.py スタイルの Client API
         # ローカルの ollama を使う場合
-        ollama_host = os.getenv("OLLAMA_HOST")
+        ollama_host = _resolve_ollama_host_for_runtime(os.getenv("OLLAMA_HOST"))
         if ollama_host:
             logger.info("Using remote Ollama: %s", ollama_host)
             self.ollama_client = create_ollama_client(host=ollama_host)
@@ -130,7 +143,7 @@ class MyBot(commands.Bot):
             logger.info("Using local Ollama (http://localhost:11434)")
             self.ollama_client = create_ollama_client()
 
-        ollama_embed_host = os.getenv("OLLAMA_EMBED_HOST")
+        ollama_embed_host = _resolve_ollama_host_for_runtime(os.getenv("OLLAMA_EMBED_HOST"))
         if ollama_embed_host:
             logger.info("Using dedicated embed Ollama host: %s", ollama_embed_host)
             self.ollama_embed_client = create_ollama_client(host=ollama_embed_host)
@@ -138,7 +151,7 @@ class MyBot(commands.Bot):
             self.ollama_embed_client = self.ollama_client
 
         # Bot 用に設定を保持
-        self.ollama_model = OLLAMA_MODEL_DEFAULT
+        self.ollama_model = ai_models.default
         self._tree_synced = False
 
         # リモート ollama を使う場合（環境変数 OLLAMA_HOST で指定）
@@ -147,13 +160,9 @@ class MyBot(commands.Bot):
         #     api_key_env="OLLAMA_API_KEY"
         # )
 
-        # Search + Summary
-        # TODO: search.py から DuckDuckGoSearch, Summarizer, AISearchService を移動
-        # self.ai_search = AISearchService(...)
-
     async def setup_hook(self):
         """Bot セットアップ（Cog登録）"""
-        install_asyncio_exception_handler(self.loop)
+        install_asyncio_exception_handler(asyncio.get_running_loop())
         self.tree.on_error = self.on_app_command_error
         await self.add_cog(VoiceLogger(self))
         await self.add_cog(MemberLogger(self))

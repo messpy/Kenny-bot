@@ -8,7 +8,16 @@ services:
       - .env
     environment:
       VOICEVOX_URL: http://voicevox:50021
+      KENNYBOT_DB_BACKEND: mariadb
+      KENNYBOT_DB_HOST: mariadb
+      KENNYBOT_DB_PORT: 3306
+      KENNYBOT_DB_USER: ${KENNYBOT_DB_USER:-kennybot}
+      KENNYBOT_DB_PASSWORD: ${KENNYBOT_DB_PASSWORD:-kennybot}
+      KENNYBOT_DB_NAME: ${KENNYBOT_DB_NAME:-kennybot}
+      KENNYBOT_DB_CHARSET: ${KENNYBOT_DB_CHARSET:-utf8mb4}
     depends_on:
+      mariadb:
+        condition: service_healthy
       voicevox:
         condition: service_started
     volumes:
@@ -27,5 +36,28 @@ services:
     image: voicevox/voicevox_engine:cpu-latest
     restart: unless-stopped
 
+  mariadb:
+    container_name: kennybot-mariadb
+    image: mariadb:11
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MARIADB_DATABASE: ${KENNYBOT_DB_NAME:-kennybot}
+      MARIADB_USER: ${KENNYBOT_DB_USER:-kennybot}
+      MARIADB_PASSWORD: ${KENNYBOT_DB_PASSWORD:-kennybot}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpass}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u$$MARIADB_USER -p$$MARIADB_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - mariadb-data:/var/lib/mysql
+
 volumes:
   ollama-data:
+  mariadb-data:

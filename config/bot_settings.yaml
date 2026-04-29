@@ -1,9 +1,10 @@
 global:
-  ollama:
-    model_default: gemini-2.5-flash
-    model_chat: gpt-oss:120b
-    model_summary: gpt-oss:120b
-    model_embedding: embeddinggemma
+  ai:
+    models:
+      default: gpt-oss:120b
+      chat: gpt-oss:120b
+      summary: gpt-oss:120b
+      embedding: embeddinggemma
     timeout_sec: 180
   chat:
     history_lines: 100
@@ -26,13 +27,13 @@ global:
     ai_max_concurrency: 2
     ai_channel_cooldown_seconds: 4
     max_user_message_chars: 1200
-    spam:
-      max_msgs: 5
-      per_seconds: 8.0
-      max_ai_calls: 2
-      ai_per_seconds: 20.0
-      dup_window_seconds: 12.0
-      warn_cooldown_seconds: 20.0
+  spam:
+    max_msgs: 5
+    per_seconds: 8.0
+    max_ai_calls: 2
+    ai_per_seconds: 20.0
+    dup_window_seconds: 12.0
+    warn_cooldown_seconds: 20.0
   meeting:
     max_minutes: 90
     audio_max_total_mb: 0
@@ -80,4 +81,3 @@ global:
     auto_cook_formats:
     - flac
     - mix
-guilds: {}

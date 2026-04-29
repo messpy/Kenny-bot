@@ -11,11 +11,20 @@ import shutil
 
 import yaml
 from src.kennybot.utils.paths import LEGACY_RUNTIME_SETTINGS_PATH, RUNTIME_SETTINGS_PATH
-from src.kennybot.utils.scoped_data import SCOPED_DATA_DIR, guild_settings_path
+from src.kennybot.utils.server_registry import get_server_registry
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
+        "ai": {
+            "models": {
+                "default": "gpt-oss:120b",
+                "chat": "gpt-oss:120b",
+                "summary": "gpt-oss:120b",
+                "embedding": "embeddinggemma",
+            },
+            "timeout_sec": 180,
+        },
         "ollama": {
             "model_default": "gemini-2.5-flash",
             "model_chat": "gpt-oss:120b",
@@ -55,6 +64,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
                 "dup_window_seconds": 12.0,
                 "warn_cooldown_seconds": 20.0,
             },
+        },
+        "spam": {
+            "max_msgs": 5,
+            "per_seconds": 8.0,
+            "max_ai_calls": 2,
+            "ai_per_seconds": 20.0,
+            "dup_window_seconds": 12.0,
+            "warn_cooldown_seconds": 20.0,
         },
         "meeting": {
             "max_minutes": 90,
@@ -149,49 +166,56 @@ class SettingsStore:
             else:
                 self._data = {}
             self._ensure_shape()
-            self._load_guild_sidecars()
+            self._migrate_legacy_keys()
+            self._migrate_loaded_guilds_to_registry()
             self._last_mtime_ns = self._current_mtime_ns()
             if self._data != previous:
                 self.save()
 
     def save(self) -> None:
         with self._lock:
+            payload = {
+                "global": self._data.get("global", {}),
+            }
             self.path.write_text(
-                yaml.safe_dump(self._data, allow_unicode=True, sort_keys=False),
+                yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
 
-    def _load_guild_sidecars(self) -> None:
-        if not SCOPED_DATA_DIR.exists():
-            return
+    def _migrate_loaded_guilds_to_registry(self) -> None:
         guilds = self._data.setdefault("guilds", {})
         if not isinstance(guilds, dict):
             guilds = {}
             self._data["guilds"] = guilds
-        for path in sorted(SCOPED_DATA_DIR.glob("*/settings.yaml")):
+        for guild_id, guild_data in list(guilds.items()):
             try:
-                guild_id = path.parent.name
-                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-                if not isinstance(raw, dict):
-                    continue
-                current = guilds.get(guild_id, {})
-                if not isinstance(current, dict):
-                    current = {}
-                guilds[guild_id] = self._deep_merge(current, raw)
+                guild_id_int = int(guild_id)
             except Exception:
                 continue
+            if not isinstance(guild_data, dict):
+                continue
+            try:
+                get_server_registry().upsert_guild(
+                    guild_id_int,
+                    settings=guild_data,
+                    metadata={"source": str(self.path), "storage": "database"},
+                )
+            except Exception:
+                pass
 
-    def _save_guild_sidecar(self, guild_id: int) -> None:
+    def _save_guild_registry(self, guild_id: int) -> None:
         try:
-            path = guild_settings_path(guild_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data = self._data.get("guilds", {}).get(str(guild_id), {})
-            if not isinstance(data, dict):
-                data = {}
-            path.write_text(
-                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-                encoding="utf-8",
-            )
+            guild_data = self._data.get("guilds", {}).get(str(guild_id), {})
+            if not isinstance(guild_data, dict):
+                guild_data = {}
+            try:
+                get_server_registry().upsert_guild(
+                    guild_id,
+                    settings=guild_data,
+                    metadata={"source": str(self.path), "storage": "database"},
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -201,6 +225,49 @@ class SettingsStore:
         if "guilds" not in self._data or not isinstance(self._data.get("guilds"), dict):
             self._data["guilds"] = {}
         self._data = self._deep_merge(deepcopy(DEFAULT_SETTINGS), self._data)
+
+    def _migrate_legacy_keys(self) -> None:
+        global_settings = self._data.setdefault("global", {})
+        if not isinstance(global_settings, dict):
+            global_settings = {}
+            self._data["global"] = global_settings
+
+        ai_settings = global_settings.setdefault("ai", {})
+        if not isinstance(ai_settings, dict):
+            ai_settings = {}
+            global_settings["ai"] = ai_settings
+        ai_models = ai_settings.setdefault("models", {})
+        if not isinstance(ai_models, dict):
+            ai_models = {}
+            ai_settings["models"] = ai_models
+
+        ollama_settings = global_settings.get("ollama", {})
+        if isinstance(ollama_settings, dict):
+            model_mapping = {
+                "model_default": "default",
+                "model_chat": "chat",
+                "model_summary": "summary",
+                "model_embedding": "embedding",
+            }
+            for old_key, new_key in model_mapping.items():
+                if new_key not in ai_models and old_key in ollama_settings:
+                    ai_models[new_key] = ollama_settings[old_key]
+            if "timeout_sec" not in ai_settings and "timeout_sec" in ollama_settings:
+                ai_settings["timeout_sec"] = ollama_settings["timeout_sec"]
+            global_settings.pop("ollama", None)
+
+        spam_settings = global_settings.setdefault("spam", {})
+        if not isinstance(spam_settings, dict):
+            spam_settings = {}
+            global_settings["spam"] = spam_settings
+
+        security_settings = global_settings.get("security", {})
+        if isinstance(security_settings, dict):
+            legacy_spam = security_settings.get("spam", {})
+            if isinstance(legacy_spam, dict):
+                for key, value in legacy_spam.items():
+                    spam_settings.setdefault(key, value)
+                security_settings.pop("spam", None)
 
     def _deep_merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         out = dict(base)
@@ -234,7 +301,18 @@ class SettingsStore:
         self._maybe_reload()
         with self._lock:
             if guild_id is not None:
-                g = self._data["guilds"].get(str(guild_id), {})
+                g: dict[str, Any] = {}
+                try:
+                    registry_guild = get_server_registry().get_guild(int(guild_id))
+                except Exception:
+                    registry_guild = None
+                if isinstance(registry_guild, dict):
+                    registry_settings = registry_guild.get("settings", {})
+                    if isinstance(registry_settings, dict):
+                        g = self._deep_merge(g, registry_settings)
+                local_guild = self._data["guilds"].get(str(guild_id), {})
+                if isinstance(local_guild, dict):
+                    g = self._deep_merge(g, local_guild)
                 val = self._get_by_path(g, path, None)
                 if val is not None:
                     return val
@@ -252,7 +330,7 @@ class SettingsStore:
                 self._set_by_path(g, path, value)
             self.save()
             if guild_id is not None:
-                self._save_guild_sidecar(guild_id)
+                self._save_guild_registry(guild_id)
 
     def get_global_snapshot(self) -> dict[str, Any]:
         with self._lock:
