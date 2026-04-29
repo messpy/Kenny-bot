@@ -24,7 +24,7 @@ Kenny Bot は Discord 上で動作する多機能 Bot で、主に次の責務�
 - ギルド境界を壊さないことを最重要制約とする
 - 最新性が必要な問い合わせだけ外部検索へ逃がす
 - 実装の中心は `src/kennybot/` に寄せ、互換レイヤーは薄く保つ
-- ログ、キャッシュ、RAG、状態は `data/` と `runtime/` に分離して置く
+- 永続DBと静的Bot知識は `data/`、ログ、キャッシュ、状態、一時ファイルは `runtime/` に分離して置く
 
 ## 4. ディレクトリ責務
 
@@ -43,7 +43,7 @@ Kenny Bot は Discord 上で動作する多機能 Bot で、主に次の責務�
 - `src/kennybot/guards/`
   スパム判定とモデレーション実行。
 - `data/`
-  永続データ。メッセージログ、ギルド別 RAG、サーバー情報など。
+  永続データ。Bot 固定知識、サーバー情報、ゲーム用静的データなど。
 - `runtime/`
   実行中生成物。キャッシュ、履歴、状態、一時ファイル。
 - `docs/`
@@ -56,7 +56,7 @@ Kenny Bot は Discord 上で動作する多機能 Bot で、主に次の責務�
 ### 5.1 起動シーケンス
 
 1. `setup_logging()` でログ設定を初期化
-2. `acquire_lock(data/kennybot.lock)` で多重起動を防止
+2. `acquire_lock(runtime/state/kennybot.lock)` で多重起動を防止
 3. `.env` を読み込み、`DISCORD_TOKEN` を必須検証
 4. `src/kennybot.bootstrap.create_bot()` で `MyBot` を生成
 5. `bot.run(token)` で Discord Gateway に接続
@@ -106,7 +106,7 @@ Kenny Bot は Discord 上で動作する多機能 Bot で、主に次の責務�
 - `LiveInfoService`
   最新性が必要な文脈の補助情報を扱う。
 - `LocalRAG`
-  `knowledge/` やギルド別データからローカル知識を返す。
+  `data/knowledge/` やギルド別データからローカル知識を返す。
 - `MessageVectorStore`
   メッセージ埋め込みの保存と意味検索を担う。
 - `MessageFetcher`
@@ -363,7 +363,7 @@ Planner はこのカタログから必要な情報源を選び、実行層はそ
 - `get_member_profile` / `get_user_info`
   ユーザーや参加者の説明を返す。
 - `get_local_knowledge` / `get_guild_rag` / `get_channel_rag`
-  `knowledge/` やギルド別 RAG を返す。
+  `data/knowledge/` やギルド別 RAG を返す。
 - `get_bot_command_catalog` / `get_bot_game_catalog`
   Bot 機能や slash command の説明を返す。
 - `get_runtime_model` / `get_bot_status` / `get_queue_status`
@@ -438,10 +438,10 @@ Planner はこのカタログから必要な情報源を選び、実行層はそ
 
 - `data/server/`
   サーバー関連の補助データ。MariaDB 移行後は `server.sqlite3` は legacy 扱いで、主系 DB は MariaDB。
+- `data/knowledge/`
+  Bot が会話で読む固定知識。人間向け README や設計文書とは分ける。
 - `data/wordwolf_pairs.json`
   ゲーム用の静的データ。
-- `data/kennybot.lock`
-  多重起動防止ロック。
 
 ### 10.2 実行時データ
 
@@ -452,7 +452,7 @@ Planner はこのカタログから必要な情報源を選び、実行層はそ
 - `runtime/logs/`
   実行時ログ。メッセージログの JSON 退避もここに集約する。
 - `runtime/state/`
-  実行中状態。
+  実行中状態。多重起動防止ロックや message claim をここに置く。
 - `runtime/tmp/`
   一時ファイル。
 - `runtime/old/`
@@ -503,7 +503,7 @@ Planner はこのカタログから必要な情報源を選び、実行層はそ
 
 - `src/kennybot/` への移行は進行中で、互換ラッパーが残っている
 - AI 呼び出し経路が `Runner` と `Client API` の二系統で共存している
-- `runtime/` と `data/` の再配置は一部完了、一部移行途中である
+- `runtime/` と `data/` の責務分離は、実行時状態を `runtime/state/`、Bot 固定知識を `data/knowledge/` に寄せる方針で進めている
 
 これらは段階移行を止めずに運用を続けるための暫定構成である。
 

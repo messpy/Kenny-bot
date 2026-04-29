@@ -13,7 +13,7 @@ This checklist covers the duplicate mention reply fix, the shared message claim 
 | Service | `kennybot.service` |
 | Main cog | `src/kennybot/cogs/message_logger.py` |
 | Shared guard | `src/kennybot/utils/message_claims.py` |
-| Claim directory | `data/runtime/message_claims/` |
+| Claim directory | `runtime/state/message_claims/` |
 
 ## Functional Test Items
 

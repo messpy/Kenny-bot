@@ -73,8 +73,8 @@ VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が�
 
 ## Data Layout
 
-- 現役の永続設定・補助ファイルは `data/` に置く
-- 実行時ログ・一時物・音声デバッグは `runtime/` に置く
+- 現役の永続設定・補助ファイルは `data/` に置く。Bot が会話で読む固定知識は `data/knowledge/`
+- 実行時ログ・一時物・音声デバッグ・状態ファイルは `runtime/` に置く
 - MariaDB 移行後の legacy 候補は `data/channel_rag`, `data/server_rag`, `data/message_logs`, `data/server/server.sqlite3`, `data/meeting_audio_debug`
 - 退避プラン確認: `python3 bin/archive_legacy_data_layout.py`
 - 実際に退避: `python3 bin/archive_legacy_data_layout.py --apply`

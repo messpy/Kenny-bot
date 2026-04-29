@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import KNOWLEDGE_DIR, SERVER_DIR, SERVER_REGISTRY_SQLITE_PATH
+from src.kennybot.utils.paths import KNOWLEDGE_DIR, LEGACY_KNOWLEDGE_DIR, SERVER_DIR, SERVER_REGISTRY_SQLITE_PATH
 from src.kennybot.utils.server_registry import ServerRegistryStore, create_server_registry, get_server_registry
 
 
@@ -218,7 +218,7 @@ def _static_chunks() -> list[RagChunk]:
                 "Bot はメンションや Bot への返信で会話応答できます。"
                 "DM でもそのまま会話できます。"
                 "会話時は本人履歴、チャンネル履歴、意味的に近い過去発言を状況に応じて使い分けます。"
-                "knowledge/chat_rag.md/json/toml のローカル知識も参照できます。"
+                "data/knowledge/chat_rag.md/json/toml のローカル知識も参照できます。"
                 "曖昧な質問や裏取りが必要な質問では、web search/web fetch で確認してから答えることがあります。"
             ),
         ),
@@ -279,13 +279,17 @@ class LocalRAG:
 
     def _resolve_extra_paths(self) -> list[Path]:
         knowledge_root = self.root / KNOWLEDGE_DIR
+        legacy_knowledge_root = self.root / LEGACY_KNOWLEDGE_DIR
         legacy_root = self.root / "data"
         paths: list[Path] = []
         for name in ("chat_rag.md", "chat_rag.json", "chat_rag.toml"):
             knowledge_path = knowledge_root / name
+            legacy_knowledge_path = legacy_knowledge_root / name
             legacy_path = legacy_root / name
             if knowledge_path.exists():
                 paths.append(knowledge_path)
+            elif legacy_knowledge_path.exists():
+                paths.append(legacy_knowledge_path)
             elif legacy_path.exists():
                 paths.append(legacy_path)
             else:

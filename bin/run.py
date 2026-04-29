@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.kennybot.utils.env import load_env_file, require_env
 from src.kennybot.utils.logger import setup_logging
+from src.kennybot.utils.paths import RUNTIME_STATE_DIR
 from src.kennybot.utils.single_instance import SingleInstanceError, acquire_lock
 from src.kennybot.bootstrap import create_bot
 from src.kennybot.utils.message_logger import log_codex_repair_mode
@@ -34,7 +35,7 @@ def main():
     """Discord Bot メイン実行"""
     setup_logging()
     logger = logging.getLogger("kennybot.bootstrap")
-    lock_path = Path("data") / "kennybot.lock"
+    lock_path = RUNTIME_STATE_DIR / "kennybot.lock"
     lock_retry_delay = 2
     waited_seconds = 0
     lock_log_interval = 30

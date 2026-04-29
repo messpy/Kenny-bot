@@ -32,7 +32,7 @@ from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.message_vector_store import MessageVectorStore
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH, ROOT_DIR
+from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH, ROOT_DIR, RUNTIME_STATE_DIR
 from src.kennybot.utils.message_logger import (
     log_user_message,
     log_ai_output,
@@ -124,7 +124,7 @@ class MessageLogger(BaseCog):
         self._codex_job_manager = CodexJobManager(self.root)
         self._codex_job_tasks: set[asyncio.Task[None]] = set()
         self._message_claims = MessageClaimStore(
-            self.root / "data" / "runtime" / "message_claims"
+            self.root / RUNTIME_STATE_DIR / "message_claims"
         )
 
     def _claim_message_once(self, message_id: int) -> bool:

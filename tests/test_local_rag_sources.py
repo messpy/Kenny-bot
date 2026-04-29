@@ -15,8 +15,8 @@ class LocalRAGSourcesTest(TestCase):
                 "# Human README\nREADME_ONLY_SENTINEL",
                 encoding="utf-8",
             )
-            knowledge_dir = root / "knowledge"
-            knowledge_dir.mkdir()
+            knowledge_dir = root / "data" / "knowledge"
+            knowledge_dir.mkdir(parents=True)
             (knowledge_dir / "chat_rag.md").write_text(
                 "# Bot Knowledge\nKNOWLEDGE_ONLY_SENTINEL",
                 encoding="utf-8",
