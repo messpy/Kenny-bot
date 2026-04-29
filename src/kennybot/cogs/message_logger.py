@@ -4,7 +4,6 @@
 import json
 import io
 import logging
-import os
 import re
 import subprocess
 import time
@@ -47,6 +46,7 @@ from src.kennybot.utils.message_logger import (
     log_codex_repair_mode,
     log_codex_request,
 )
+from src.kennybot.utils.message_claims import MessageClaimStore
 from src.kennybot.cogs.base import BaseCog
 from src.kennybot.utils.channel import resolve_log_channel
 from src.kennybot.utils.text import (
@@ -125,53 +125,15 @@ class MessageLogger(BaseCog):
         self._vector_store = MessageVectorStore(MESSAGE_VECTOR_DB_PATH)
         self._ai_retry_countdowns = ChannelCountdown()
         self._ai_progress_countdowns = ChannelCountdown()
-        self._message_claim_dir = self.root / "data" / "runtime" / "message_claims"
-        self._last_message_claim_prune = 0.0
-
-    def _prune_message_claims(self, *, max_age_seconds: int = 86400) -> None:
-        if not hasattr(self, "_message_claim_dir"):
-            return
-        now = time.time()
-        last_prune = float(getattr(self, "_last_message_claim_prune", 0.0) or 0.0)
-        if now - last_prune < 300:
-            return
-        self._last_message_claim_prune = now
-        claim_dir = self._message_claim_dir
-        try:
-            claim_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return
-        for path in claim_dir.glob("*.claim"):
-            try:
-                if now - path.stat().st_mtime > max_age_seconds:
-                    path.unlink(missing_ok=True)
-            except OSError:
-                continue
+        self._message_claims = MessageClaimStore(
+            self.root / "data" / "runtime" / "message_claims"
+        )
 
     def _claim_message_once(self, message_id: int) -> bool:
-        if int(message_id or 0) <= 0:
+        claim_store = getattr(self, "_message_claims", None)
+        if claim_store is None:
             return True
-        if not hasattr(self, "_message_claim_dir"):
-            return True
-        self._prune_message_claims()
-        claim_dir = self._message_claim_dir
-        try:
-            claim_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return True
-
-        claim_path = claim_dir / f"{message_id}.claim"
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        try:
-            fd = os.open(claim_path, flags, 0o644)
-        except FileExistsError:
-            return False
-        except OSError:
-            return True
-
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(f"{time.time()}\n")
-        return True
+        return claim_store.claim_once(message_id)
 
     def _prune_recent_mention_windows(self) -> None:
         now = time.monotonic()
