@@ -1,0 +1,90 @@
+=== mention mock preview ===
+【ユーザー】<@1190939100514103357> 今日のニュースは？
+【応答】<@387651883847909376>
+route=web_search
+text='今日のニュースは？'
+mentions=[387651883847909376]
+=== retrieval context ===
+- Mock News 1: 事件や速報の例 (2026-04-20)
+  https://example.com/mock-news-1
+これはローカル preview 用のモック記事です。
+- Mock News 2: 続報の例 (2026-04-20)
+  https://example.com/mock-news-2
+検索結果の流れを確認するためのダミーです。
+=== planned refs ===
+[
+  "method:ai_search.answer_ai_async",
+  "method:ddgs.search",
+  "https://example.com/mock-news-1",
+  "https://example.com/mock-news-2"
+]
+=== planned details ===
+[
+  "web_scope=news",
+  "web_search query=今日のニュースは？"
+]
+=== captured messages ===
+[1]
+【ユーザー】<@1190939100514103357> 今日のニュースは？
+【応答】<@387651883847909376> <@1190939100514103357>
+最新の話題なら、要点をまとめて短く案内できます。
+    [suppressed]
+=== message events ===
+[1] send
+【ユーザー】<@1190939100514103357> 今日のニュースは？
+【応答】<@387651883847909376> <@1190939100514103357>
+最新の話題なら、要点をまとめて短く案内できます。
+    suppressed
+=== retrieval trace ===
+mode=web_search
+guild_id=664237144600215581
+channel_id=1005826751391342663
+text='今日のニュースは？'
+=== answer ===
+- Mock News 1: 事件や速報の例 (2026-04-20)
+  https://example.com/mock-news-1
+これはローカル preview 用のモック記事です。
+- Mock News 2: 続報の例 (2026-04-20)
+  https://example.com/mock-news-2
+検索結果の流れを確認するためのダミーです。
+=== web queries ===
+- 今日のニュースは？
+- 今日のニュースは？
+=== details ===
+- web_scope=news
+- web_search query=今日のニュースは？
+=== references ===
+- method:ai_search.answer_ai_async
+- method:ddgs.search
+- https://example.com/mock-news-1
+- https://example.com/mock-news-2
+=== tool refs ===
+[]
+=== tool queries ===
+[
+  "今日のニュースは？",
+  "今日のニュースは？"
+]
+=== tool details ===
+[
+  "web_scope=news",
+  "web_search query=今日のニュースは？"
+]
+=== llm trace ===
+[
+  {
+    "method": "chat",
+    "model": "gpt-oss:120b",
+    "messages": [
+      {
+        "role": "system",
+        "content": "あなたは Discord Bot です。\nユーザーの質問に対して、RAGや文脈から自然な日本語で回答してください。\n内部処理、ツール、JSON、理由は一切出力しないでください。\nユーザーに見せる最終回答のみを出力してください。\n1〜3文で簡潔にしてください。\n"
+      },
+      {
+        "role": "user",
+        "content": "以下は Discord ユーザー「debug-user」からのメッセージです。\nユーザーに見せる最終回答だけを、日本語で自然に返してください。\n内部処理、ツール、JSON、理由、debug trace は出力しないでください。\n1〜3文で簡潔に、必要なら軽い補足だけにしてください。\n回答は概ね 1800 文字以内を目安に、Discord の 1 投稿に収まるよう工夫してください。\nメッセージが複数あっても最新のメッセージを優先してください。\n- Mock News 1: 事件や速報の例 (2026-04-20)\n  https://example.com/mock-news-1\nこれはローカル preview 用のモック記事です。\n- Mock News 2: 続報の例 (2026-04-20)\n  https://example.com/mock-news-2\n検索結果の流れを確認するためのダミーです。最新メッセージ:\n今日のニュースは？\n"
+      }
+    ],
+    "tools": []
+  }
+]

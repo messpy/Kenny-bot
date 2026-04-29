@@ -52,13 +52,19 @@ def migrate() -> tuple[int, int]:
     root = Path(__file__).resolve().parent.parent
     new_log_root = root / "runtime" / "logs"
     new_message_root = new_log_root / "message_logs"
-    new_scoped_root = new_log_root / "channel_rag"
+    new_scoped_root = new_log_root / "server"
 
     migrated = 0
     skipped = 0
 
-    legacy_scoped_root = root / "data" / "channel_rag"
-    if legacy_scoped_root.exists():
+    legacy_scoped_roots = [
+        root / "data" / "server",
+        root / "data" / "server_rag",
+        root / "data" / "channel_rag",
+    ]
+    for legacy_scoped_root in legacy_scoped_roots:
+        if not legacy_scoped_root.exists():
+            continue
         for src in legacy_scoped_root.rglob("logs/*"):
             if src.is_dir():
                 continue
@@ -76,12 +82,12 @@ def migrate() -> tuple[int, int]:
     legacy_message_roots = [
         root / "data" / "message_logs",
         root / "runtime" / "history" / "message_logs",
-        legacy_scoped_root,
     ]
+    legacy_message_roots.extend(legacy_scoped_roots)
     for legacy_root in legacy_message_roots:
         if not legacy_root.exists():
             continue
-        if legacy_root.name == "channel_rag":
+        if legacy_root.name in {"server", "server_rag", "channel_rag"}:
             for src in legacy_root.rglob("channels/*/messages.json"):
                 try:
                     guild_id = int(src.parent.parent.parent.name)

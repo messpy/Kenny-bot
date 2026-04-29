@@ -19,6 +19,7 @@ class VoiceLogger(commands.Cog):
         self.bot = bot
         # ユーザーごとの入室時刻を記録: (user_id, guild_id) -> datetime
         self._voice_join_times: dict[tuple[int, int], datetime] = {}
+        self._recent_voice_events: dict[tuple[str, int, int, int], datetime] = {}
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -101,6 +102,8 @@ class VoiceLogger(commands.Cog):
 
     async def _handle_voice_join(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC入室を記録してロギング"""
+        if self._is_duplicate_voice_event("join", member, channel, guild):
+            return
         # 入室時刻を記録
         self._voice_join_times[(member.id, guild.id)] = datetime.now(timezone.utc)
 
@@ -119,10 +122,13 @@ class VoiceLogger(commands.Cog):
                 ("チャンネル", channel.name, False),
             ],
             channel_kind="voice",
+            send_discord=False,
         )
 
     async def _handle_voice_leave(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
         """VC離脱を記録してロギング"""
+        if self._is_duplicate_voice_event("leave", member, channel, guild):
+            return
         # 入室時刻を取得
         join_time = self._voice_join_times.pop((member.id, guild.id), None)
         duration = self._calculate_duration(join_time) if join_time else "不明"
@@ -148,6 +154,7 @@ class VoiceLogger(commands.Cog):
                 ("通話時間", duration, False),
             ],
             channel_kind="voice",
+            send_discord=False,
         )
 
     def _calculate_duration(self, join_time: Optional[datetime]) -> str:
@@ -160,3 +167,22 @@ class VoiceLogger(commands.Cog):
         minutes, seconds = divmod(remainder, 60)
 
         return f"{hours}:{minutes:02d}:{seconds:02d}"
+
+    def _is_duplicate_voice_event(
+        self,
+        action: str,
+        member: discord.Member,
+        channel: discord.VoiceChannel,
+        guild: discord.Guild,
+        *,
+        window_seconds: int = 3,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=max(1, int(window_seconds)))
+        self._recent_voice_events = {
+            key: ts for key, ts in self._recent_voice_events.items() if ts >= cutoff
+        }
+        event_key = (action, guild.id, channel.id, member.id)
+        previous = self._recent_voice_events.get(event_key)
+        self._recent_voice_events[event_key] = now
+        return previous is not None

@@ -1,6 +1,7 @@
 # bot.py
 # MyBot メインクラス
 
+import asyncio
 import logging
 import os
 import time
@@ -36,6 +37,16 @@ from src.kennybot.utils.logger import install_asyncio_exception_handler
 
 logger = logging.getLogger(__name__)
 apply_voice_recv_resilience_patch()
+
+
+def _resolve_ollama_host_for_runtime(host: str | None) -> str | None:
+    value = (host or "").strip()
+    if not value:
+        return None
+    lowered = value.lower()
+    if "ollama.com" in lowered:
+        return None
+    return value
 
 
 class MyBot(commands.Bot):
@@ -122,7 +133,7 @@ class MyBot(commands.Bot):
 
         # 方法2: ollama_util.py スタイルの Client API
         # ローカルの ollama を使う場合
-        ollama_host = os.getenv("OLLAMA_HOST")
+        ollama_host = _resolve_ollama_host_for_runtime(os.getenv("OLLAMA_HOST"))
         if ollama_host:
             logger.info("Using remote Ollama: %s", ollama_host)
             self.ollama_client = create_ollama_client(host=ollama_host)
@@ -130,7 +141,7 @@ class MyBot(commands.Bot):
             logger.info("Using local Ollama (http://localhost:11434)")
             self.ollama_client = create_ollama_client()
 
-        ollama_embed_host = os.getenv("OLLAMA_EMBED_HOST")
+        ollama_embed_host = _resolve_ollama_host_for_runtime(os.getenv("OLLAMA_EMBED_HOST"))
         if ollama_embed_host:
             logger.info("Using dedicated embed Ollama host: %s", ollama_embed_host)
             self.ollama_embed_client = create_ollama_client(host=ollama_embed_host)
@@ -153,7 +164,7 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         """Bot セットアップ（Cog登録）"""
-        install_asyncio_exception_handler(self.loop)
+        install_asyncio_exception_handler(asyncio.get_running_loop())
         self.tree.on_error = self.on_app_command_error
         await self.add_cog(VoiceLogger(self))
         await self.add_cog(MemberLogger(self))

@@ -80,7 +80,3 @@ global:
     auto_cook_formats:
     - flac
     - mix
-guilds:
-  '123':
-    logging:
-      event_channel_id: 456

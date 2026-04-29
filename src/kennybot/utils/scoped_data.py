@@ -2,38 +2,73 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.kennybot.utils.paths import DATA_DIR, SCOPED_LOG_DIR
+from src.kennybot.utils.paths import (
+    LEGACY_SCOPED_DATA_DIR as LEGACY_SCOPED_DATA_DIR_CONST,
+    LEGACY_SCOPED_LOG_DIR as LEGACY_SCOPED_LOG_DIR_CONST,
+    SCOPED_LOG_DIR,
+    SERVER_RAG_DIR,
+)
 
 
-SCOPED_DATA_DIR = DATA_DIR / "channel_rag"
+SCOPED_DATA_DIR = SERVER_RAG_DIR
+LEGACY_SCOPED_DATA_DIR = LEGACY_SCOPED_DATA_DIR_CONST
+LEGACY_SCOPED_LOG_DIR = LEGACY_SCOPED_LOG_DIR_CONST
 
 
 def guild_scope_dir(guild_id: int) -> Path:
     return SCOPED_DATA_DIR / str(int(guild_id))
 
 
+def legacy_guild_scope_dir(guild_id: int) -> Path:
+    return LEGACY_SCOPED_DATA_DIR / str(int(guild_id))
+
+
 def channel_scope_dir(guild_id: int, channel_id: int) -> Path:
     return guild_scope_dir(guild_id) / "channels" / str(int(channel_id))
+
+
+def legacy_channel_scope_dir(guild_id: int, channel_id: int) -> Path:
+    return legacy_guild_scope_dir(guild_id) / "channels" / str(int(channel_id))
 
 
 def guild_logs_dir(guild_id: int) -> Path:
     return SCOPED_LOG_DIR / str(int(guild_id)) / "logs"
 
 
+def legacy_guild_logs_dir(guild_id: int) -> Path:
+    return LEGACY_SCOPED_LOG_DIR / str(int(guild_id)) / "logs"
+
+
 def channel_logs_dir(guild_id: int, channel_id: int) -> Path:
     return SCOPED_LOG_DIR / str(int(guild_id)) / "channels" / str(int(channel_id)) / "logs"
+
+
+def legacy_channel_logs_dir(guild_id: int, channel_id: int) -> Path:
+    return LEGACY_SCOPED_LOG_DIR / str(int(guild_id)) / "channels" / str(int(channel_id)) / "logs"
 
 
 def guild_settings_path(guild_id: int) -> Path:
     return guild_scope_dir(guild_id) / "settings.yaml"
 
 
+def legacy_guild_settings_path(guild_id: int) -> Path:
+    return legacy_guild_scope_dir(guild_id) / "settings.yaml"
+
+
 def guild_rules_path(guild_id: int) -> Path:
     return guild_scope_dir(guild_id) / "rules.md"
 
 
+def legacy_guild_rules_path(guild_id: int) -> Path:
+    return legacy_guild_scope_dir(guild_id) / "rules.md"
+
+
 def channel_chat_rag_path(guild_id: int, channel_id: int) -> Path:
     return channel_scope_dir(guild_id, channel_id) / "chat_rag.md"
+
+
+def legacy_channel_chat_rag_path(guild_id: int, channel_id: int) -> Path:
+    return legacy_channel_scope_dir(guild_id, channel_id) / "chat_rag.md"
 
 
 def ensure_scoped_dirs(guild_id: int, channel_id: int | None = None) -> None:

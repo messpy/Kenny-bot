@@ -759,6 +759,7 @@ class SlashCommands(commands.Cog):
 
     @app_commands.command(name=BOT_INFO_META.name, description=BOT_INFO_META.description)
     async def slash_bot_info(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=False)
         now = discord.utils.utcnow()
         uptime = now - self._started_at
         total_seconds = int(max(0, uptime.total_seconds()))
@@ -797,7 +798,7 @@ class SlashCommands(commands.Cog):
         embed.add_field(name="会話モデル", value=f"`{ai_model}`", inline=True)
         embed.add_field(name="Version", value=f"`{version}`", inline=True)
         embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name=SUMMARIZE_RECENT_META.name, description=SUMMARIZE_RECENT_META.description)
     @app_commands.checks.cooldown(1, 20.0)

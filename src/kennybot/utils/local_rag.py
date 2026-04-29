@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import CHANNEL_RAG_DIR, KNOWLEDGE_DIR, SERVER_RAG_DIR
-from src.kennybot.utils.scoped_data import channel_scope_dir, guild_scope_dir
-from src.kennybot.utils.server_registry import get_server_registry
+from src.kennybot.utils.paths import KNOWLEDGE_DIR, SERVER_DIR, SERVER_REGISTRY_SQLITE_PATH
+from src.kennybot.utils.server_registry import ServerRegistryStore, create_server_registry, get_server_registry
 
 
 @dataclass
@@ -23,6 +23,10 @@ def _tokenize(text: str) -> list[str]:
     text = (text or "").lower()
     parts = re.split(r"[\s\r\n\t:：、。・,./()（）\[\]{}!?！？]+", text)
     return [p for p in parts if p]
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _split_markdown_sections(text: str) -> list[RagChunk]:
@@ -126,9 +130,6 @@ def load_rag_chunks_from_directory(directory: Path) -> list[RagChunk]:
         "rules.md",
         "rules.json",
         "rules.toml",
-        "settings.yaml",
-        "settings.json",
-        "settings.toml",
     )
     for name in extra_names:
         path = directory / name
@@ -143,6 +144,69 @@ def load_rag_chunks_from_directory(directory: Path) -> list[RagChunk]:
         except Exception:
             pass
     return chunks
+
+
+def _registry_store_for_root(root: Path) -> ServerRegistryStore:
+    return create_server_registry(root)
+
+
+def _registry_marker_path(root: Path, registry: ServerRegistryStore) -> Path:
+    if registry._db.backend == "sqlite":
+        return root / SERVER_REGISTRY_SQLITE_PATH
+    return root / SERVER_DIR / "registry.mariadb"
+
+
+def load_rag_chunks_from_registry(
+    registry: ServerRegistryStore,
+    *,
+    guild_id: int | None = None,
+    channel_id: int | None = None,
+    scope: str = "auto",
+    limit: int = 50,
+) -> list[RagChunk]:
+    normalized_scope = (scope or "auto").strip().lower()
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[object, object, object]] = set()
+
+    def add_documents(*, doc_scope: str, guild: int | None, channel: int | None) -> None:
+        if guild is None and doc_scope in {"guild", "channel"}:
+            return
+        if doc_scope == "channel" and channel is None:
+            return
+        for row in registry.list_rag_documents(
+            guild_id=guild,
+            channel_id=channel,
+            scope=doc_scope,
+            limit=limit,
+        ):
+            key = (row.get("scope"), row.get("source_path"), row.get("title"))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+
+    if normalized_scope == "guild":
+        add_documents(doc_scope="guild", guild=guild_id, channel=None)
+    elif normalized_scope == "channel":
+        add_documents(doc_scope="channel", guild=guild_id, channel=channel_id)
+    else:
+        add_documents(doc_scope="channel", guild=guild_id, channel=channel_id)
+        add_documents(doc_scope="guild", guild=guild_id, channel=None)
+
+    chunks: list[RagChunk] = []
+    for row in rows:
+        body = str(row.get("body") or row.get("summary") or "").strip()
+        if not body:
+            continue
+        source_name = Path(str(row.get("source_path") or "")).name or "registry"
+        chunks.append(
+            RagChunk(
+                source=f"RAG:{source_name}",
+                title=str(row.get("title") or source_name),
+                body=body,
+            )
+        )
+    return chunks[: max(1, int(limit or 50))]
 
 
 def _static_chunks() -> list[RagChunk]:
@@ -229,38 +293,29 @@ class LocalRAG:
         return paths
 
     def _channel_extra_paths(self, guild_id: int | None, channel_id: int | None) -> list[Path]:
-        if not guild_id and not channel_id:
+        del guild_id, channel_id
+        return []
+
+    def _scoped_registry_chunks(
+        self,
+        *,
+        guild_id: int | None,
+        channel_id: int | None,
+        channel_only: bool,
+        limit: int = 24,
+    ) -> list[RagChunk]:
+        try:
+            registry = _registry_store_for_root(self.root)
+            scope = "channel" if channel_only else "auto"
+            return load_rag_chunks_from_registry(
+                registry,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                scope=scope,
+                limit=limit,
+            )
+        except Exception:
             return []
-        paths: list[Path] = []
-        extra_names = (
-            "faq.json",
-            "faq.md",
-            "chat_rag.md",
-            "chat_rag.json",
-            "chat_rag.toml",
-            "rules.md",
-            "rules.json",
-            "rules.toml",
-            "settings.yaml",
-            "settings.json",
-            "settings.toml",
-        )
-        if guild_id:
-            server_guild_root = self.root / SERVER_RAG_DIR / str(guild_id)
-            legacy_guild_root = guild_scope_dir(guild_id)
-            paths.extend(server_guild_root / name for name in extra_names if (server_guild_root / name).exists())
-            paths.extend(legacy_guild_root / name for name in extra_names if (legacy_guild_root / name).exists())
-        if guild_id and channel_id:
-            server_channel_root = self.root / SERVER_RAG_DIR / str(guild_id) / "channels" / str(channel_id)
-            legacy_channel_root = channel_scope_dir(guild_id, channel_id)
-            paths.extend(server_channel_root / name for name in extra_names if (server_channel_root / name).exists())
-            paths.extend(legacy_channel_root / name for name in extra_names if (legacy_channel_root / name).exists())
-        if channel_id:
-            server_channel_root = self.root / SERVER_RAG_DIR / str(channel_id)
-            legacy_channel_root = self.root / CHANNEL_RAG_DIR / str(channel_id)
-            paths.extend(server_channel_root / name for name in extra_names if (server_channel_root / name).exists())
-            paths.extend(legacy_channel_root / name for name in extra_names if (legacy_channel_root / name).exists())
-        return paths
 
     def _load_chunks(
         self,
@@ -271,6 +326,13 @@ class LocalRAG:
         channel_only: bool = False,
     ) -> list[RagChunk]:
         chunks = [] if channel_only else _static_chunks()
+        scoped_registry_chunks = self._scoped_registry_chunks(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            channel_only=channel_only,
+        )
+        if scoped_registry_chunks:
+            chunks.extend(scoped_registry_chunks)
         for path in self._channel_extra_paths(guild_id, channel_id):
             if not path.exists():
                 continue
@@ -352,19 +414,9 @@ class LocalRAG:
             raise ValueError("answer is required")
 
         if guild_id is not None:
-            channel_root = self.root / SERVER_RAG_DIR / str(int(guild_id)) / "channels" / str(int(channel_id))
+            source_path = f"rag://guild/{int(guild_id)}/channel/{int(channel_id)}/faq/{_sha256_text(question + chr(10) + answer)}"
         else:
-            channel_root = self.root / SERVER_RAG_DIR / str(channel_id)
-        channel_root.mkdir(parents=True, exist_ok=True)
-        faq_path = channel_root / "faq.json"
-        entries: list[dict[str, object]] = []
-        if faq_path.exists():
-            try:
-                loaded = json.loads(faq_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, list):
-                    entries = [item for item in loaded if isinstance(item, dict)]
-            except Exception:
-                entries = []
+            source_path = f"rag://channel/{int(channel_id)}/faq/{_sha256_text(question + chr(10) + answer)}"
 
         entry: dict[str, object] = {
             "title": question,
@@ -379,17 +431,13 @@ class LocalRAG:
                 if value is None:
                     continue
                 entry[key] = value
-        entries.append(entry)
-        faq_path.write_text(
-            json.dumps(entries, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        registry = get_server_registry()
         try:
-            get_server_registry().upsert_rag_document(
+            registry.upsert_rag_document(
                 scope="channel",
                 guild_id=guild_id,
                 channel_id=channel_id,
-                source_path=faq_path,
+                source_path=source_path,
                 doc_type="faq.json",
                 title=question,
                 summary=answer[:500],
@@ -402,7 +450,7 @@ class LocalRAG:
             )
         except Exception:
             pass
-        return faq_path
+        return _registry_marker_path(self.root, registry)
 
     def append_guild_qa(self, **kwargs: object) -> Path:
         guild_id = kwargs.pop("guild_id", None)
@@ -410,23 +458,12 @@ class LocalRAG:
             guild_id = kwargs.pop("channel_id", None)
         if guild_id is None:
             raise TypeError("guild_id is required")
-        guild_root = self.root / SERVER_RAG_DIR / str(int(guild_id))
-        guild_root.mkdir(parents=True, exist_ok=True)
         question = str(kwargs.pop("question", "")).strip()
         answer = str(kwargs.pop("answer", "")).strip()
         if not question:
             raise ValueError("question is required")
         if not answer:
             raise ValueError("answer is required")
-        faq_path = guild_root / "faq.json"
-        entries: list[dict[str, object]] = []
-        if faq_path.exists():
-            try:
-                loaded = json.loads(faq_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, list):
-                    entries = [item for item in loaded if isinstance(item, dict)]
-            except Exception:
-                entries = []
         entry: dict[str, object] = {
             "title": question,
             "question": question,
@@ -442,16 +479,13 @@ class LocalRAG:
                 if value is None:
                     continue
                 entry[key] = value
-        entries.append(entry)
-        faq_path.write_text(
-            json.dumps(entries, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        source_path = f"rag://guild/{int(guild_id)}/faq/{_sha256_text(question + chr(10) + answer)}"
+        registry = get_server_registry()
         try:
-            get_server_registry().upsert_rag_document(
+            registry.upsert_rag_document(
                 scope="guild",
                 guild_id=int(guild_id),
-                source_path=faq_path,
+                source_path=source_path,
                 doc_type="faq.json",
                 title=question,
                 summary=answer[:500],
@@ -464,4 +498,4 @@ class LocalRAG:
             )
         except Exception:
             pass
-        return faq_path
+        return _registry_marker_path(self.root, registry)

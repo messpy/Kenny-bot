@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-
 from src.kennybot.utils.app_settings import OLLAMA_MODEL_DEFAULT, OLLAMA_TIMEOUT_SEC
 from src.kennybot.utils.prompts import get_prompt
 from src.kennybot.utils.text import strip_ansi_and_ctrl
@@ -154,7 +153,17 @@ def _build_ai_profile_answer(
     try:
         answer = _ollama_http_chat(prompt=prompt, model=str(model_name), payload=payload, args=args)
     except requests.HTTPError as exc:
-        logger.info("Preview AI generation failed; using fallback profile summary", exc_info=True)
+        logger.info("Preview AI HTTP generation failed; trying Ollama client fallback", exc_info=True)
+        answer = _ollama_client_chat(prompt=prompt, model=str(model_name), payload=payload, args=args)
+        normalized = _normalize_ai_answer(str(answer or ""), str(preview.get("question") or ""))
+        if normalized:
+            return normalized, {
+                "requested": True,
+                "available": True,
+                "mode": "ai",
+                "reason": "ollama_client_ok_after_http_error",
+                "model": str(model_name),
+            }
         reason = "ollama_model_missing" if getattr(exc.response, "status_code", None) == 404 else "ollama_http_error"
         return fallback_answer, {
             "requested": True,
@@ -164,7 +173,17 @@ def _build_ai_profile_answer(
             "model": str(model_name),
         }
     except Exception:
-        logger.info("Preview AI generation failed; using fallback profile summary", exc_info=True)
+        logger.info("Preview AI HTTP generation failed; trying Ollama client fallback", exc_info=True)
+        answer = _ollama_client_chat(prompt=prompt, model=str(model_name), payload=payload, args=args)
+        normalized = _normalize_ai_answer(str(answer or ""), str(preview.get("question") or ""))
+        if normalized:
+            return normalized, {
+                "requested": True,
+                "available": True,
+                "mode": "ai",
+                "reason": "ollama_client_ok_after_http_failure",
+                "model": str(model_name),
+            }
         return fallback_answer, {
             "requested": True,
             "available": False,
@@ -273,6 +292,20 @@ def _ollama_http_chat(*, prompt: str, model: str, payload: dict[str, Any] | None
     if not isinstance(message, dict):
         raise ValueError("unexpected ollama response message")
     return str(message.get("content") or "")
+
+
+def _ollama_client_chat(*, prompt: str, model: str, payload: dict[str, Any] | None = None, args: Any | None = None) -> str:
+    from src.kennybot.ai.client import create_ollama_client
+
+    host = _resolve_ollama_host(payload, args=args)
+    client = create_ollama_client(host=host)
+    answer = client.chat_simple(
+        model=model,
+        prompt=prompt,
+        stream=False,
+        timeout_sec=OLLAMA_TIMEOUT_SEC,
+    )
+    return str(answer or "")
 
 
 def _ollama_failure_reason() -> str:

@@ -1,24 +1,14 @@
 from __future__ import annotations
 
+import os
 import json
 import re
 from pathlib import Path
 from typing import Any
 
-from src.kennybot.utils.local_rag import RagChunk, load_rag_chunks_from_directory
-from src.kennybot.utils.paths import CHANNEL_RAG_DIR, SERVER_RAG_DIR
-
-
-GENERIC_TITLE_TOKENS = {"README", "定義", "概要", "紹介", "説明"}
-SECTION_PRIORITY = ("定義", "体験内容", "主催", "運営", "活動カテゴリ")
-DISPLAY_REPLACEMENTS = (("出典", "出展"),)
-OPERATIONAL_TITLE_TOKENS = (
-    "運用方針",
-    "メモ",
-    "向けメモ",
-    "管理メモ",
-    "内部メモ",
-)
+from src.kennybot.utils.local_rag import RagChunk, load_rag_chunks_from_directory, load_rag_chunks_from_registry
+from src.kennybot.utils.paths import CHANNEL_RAG_DIR, SERVER_DIR, SERVER_RAG_DIR
+from src.kennybot.utils.server_registry import create_server_registry
 
 
 def _scoped_directories(
@@ -60,6 +50,32 @@ def _scoped_directories(
     return out
 
 
+GENERIC_TITLE_TOKENS = {"README", "定義", "概要", "紹介", "説明"}
+SECTION_PRIORITY = ("定義", "体験内容", "主催", "運営", "活動カテゴリ")
+DISPLAY_REPLACEMENTS = (("出典", "出展"),)
+OPERATIONAL_TITLE_TOKENS = (
+    "運用方針",
+    "メモ",
+    "向けメモ",
+    "管理メモ",
+    "内部メモ",
+)
+QUESTION_STOPWORDS = (
+    "この",
+    "その",
+    "どの",
+    "なに",
+    "何",
+    "ところ",
+    "チャンネル",
+    "サーバー",
+    "何をする",
+    "何する",
+    "ですか",
+    "とは",
+)
+
+
 def build_profile_chunks(
     *,
     root: Path,
@@ -69,6 +85,19 @@ def build_profile_chunks(
     limit: int = 6,
 ) -> list[RagChunk]:
     normalized_limit = max(1, min(int(limit or 6), 6))
+    registry = create_server_registry(root)
+    registry_chunks = load_rag_chunks_from_registry(
+        registry,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        scope=scope,
+        limit=normalized_limit,
+    )
+    if registry_chunks:
+        return registry_chunks[:normalized_limit]
+    allow_file_fallback = os.environ.get("KENNYBOT_ALLOW_FILE_RAG_FALLBACK", "").strip().lower() in {"1", "true", "yes"}
+    if not allow_file_fallback:
+        return []
     for directory in _scoped_directories(
         root=root,
         guild_id=guild_id,
@@ -193,16 +222,62 @@ def _summarize_for_log(chunks: list[RagChunk], *, max_chars: int = 500) -> str:
     return text
 
 
-def _build_natural_answer(chunks: list[RagChunk]) -> str:
+def _question_keywords(question: str) -> list[str]:
+    text = re.sub(r"[？?！!。、「」『』（）()\[\]`]", " ", str(question or ""))
+    raw_tokens = [token.strip() for token in re.split(r"[\s,./]+", text) if token.strip()]
+    keywords: list[str] = []
+    for token in raw_tokens:
+        normalized = token.strip()
+        if len(normalized) <= 1:
+            continue
+        if any(stop in normalized for stop in QUESTION_STOPWORDS):
+            continue
+        if normalized not in keywords:
+            keywords.append(normalized)
+    return keywords
+
+
+def _question_target_chunks(chunks: list[RagChunk], question: str) -> list[RagChunk]:
+    question_text = str(question or "")
+    direct_title_matches = [
+        chunk
+        for chunk in chunks
+        if (chunk.title or "").strip() and (chunk.title or "").strip() in question_text
+    ]
+    if direct_title_matches:
+        return direct_title_matches
+
+    keywords = _question_keywords(question)
+    if not keywords:
+        return []
+    matched: list[RagChunk] = []
+    for chunk in chunks:
+        title = (chunk.title or "").strip()
+        body = chunk.body or ""
+        if any(keyword == title or keyword in title or keyword in body for keyword in keywords):
+            matched.append(chunk)
+    return matched
+
+
+def _build_natural_answer(chunks: list[RagChunk], question: str = "") -> str:
     if not chunks:
         return ""
 
     priority_chunks: list[RagChunk] = []
-    priority_chunks.extend(_collect_chunks_by_keywords(chunks, ("定義", "概要", "紹介", "説明")))
-    priority_chunks.extend(_collect_chunks_by_keywords(chunks, ("体験内容", "特徴")))
-    priority_chunks.extend(
-        chunk for chunk in chunks if _chunk_matches(chunk, ("活動カテゴリ", "主催", "運営"))
-    )
+    target_chunks = _question_target_chunks(chunks, question)
+    if target_chunks:
+        priority_chunks.extend(target_chunks)
+        priority_chunks.extend(
+            chunk
+            for chunk in chunks
+            if chunk not in priority_chunks and _chunk_matches(chunk, ("サーバー全体", "概要", "説明"))
+        )
+    else:
+        priority_chunks.extend(_collect_chunks_by_keywords(chunks, ("定義", "概要", "紹介", "説明")))
+        priority_chunks.extend(_collect_chunks_by_keywords(chunks, ("体験内容", "特徴")))
+        priority_chunks.extend(
+            chunk for chunk in chunks if _chunk_matches(chunk, ("活動カテゴリ", "主催", "運営"))
+        )
     if not priority_chunks:
         priority_chunks = chunks[:3]
 
@@ -225,8 +300,7 @@ def _build_natural_answer(chunks: list[RagChunk]) -> str:
 
 
 def summarize_profile_chunks(chunks: list[RagChunk], question: str = "") -> str:
-    del question
-    return _build_natural_answer(chunks)
+    return _build_natural_answer(chunks, question=question)
 
 
 def build_channel_profile_preview(

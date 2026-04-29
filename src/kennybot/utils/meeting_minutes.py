@@ -23,7 +23,7 @@ from discord.ext import commands
 
 from src.kennybot.ai.google_speech import GoogleSpeechClient, GoogleSpeechConfig
 from src.kennybot.utils.app_constants import GLOBAL_MEETING_LOG_CHANNEL_ID
-from src.kennybot.utils.paths import ROOT_DIR
+from src.kennybot.utils.paths import AUDIO_DEBUG_DIR, ROOT_DIR
 from src.kennybot.utils.runtime_settings import get_settings
 from src.kennybot.utils.prompts import get_prompt
 
@@ -86,7 +86,7 @@ class MeetingStopResult:
 class MeetingMinutesManager:
     """議事録セッション管理"""
 
-    _AUDIO_DEBUG_DIR = Path("data") / "meeting_audio_debug"
+    _AUDIO_DEBUG_DIR = AUDIO_DEBUG_DIR
     _EXTERNAL_RECORDER_DIR = ROOT_DIR / "external_recorder"
     _EXTERNAL_RECORDER_SCRIPT = _EXTERNAL_RECORDER_DIR / "helper_record.mjs"
     _MOONSHINE_PYTHON_CANDIDATES = (

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from src.kennybot.utils.profile_preview_api import build_profile_preview_respons
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Standalone local channel profile preview")
-    parser.add_argument("--root", type=Path, default=sys_root, help="Repository root used to resolve data/channel_rag")
+    parser.add_argument("--root", type=Path, default=sys_root, help="Repository root used to resolve data/server")
     parser.add_argument("--guild-id", type=int, default=972052382315855912)
     parser.add_argument("--channel-id", type=int, default=972052382315855912)
     parser.add_argument(
@@ -30,6 +31,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-chars", type=int, default=2600)
     parser.add_argument("--emit-log", action="store_true", help="Append a local management-log style JSONL entry")
     parser.add_argument("--log-file", type=Path, default=sys_root / "runtime" / "logs" / "profile_preview.log")
+    parser.add_argument("--no-ai", action="store_true", help="Disable AI answer generation and use the local summary fallback")
+    parser.add_argument("--ollama-model", type=str, default="", help="Override the Ollama model used for AI generation")
+    parser.add_argument("--ollama-host", type=str, default="", help="Override the Ollama HTTP base URL, e.g. http://127.0.0.1:11435")
     parser.add_argument("--input-json", type=str, default="", help="Override arguments from a JSON object")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of human-readable text")
     return parser
@@ -38,6 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     payload = parse_json_payload(args.input_json) if args.input_json else {}
     response = build_profile_preview_response(root=sys_root, payload=payload, args=args)
 

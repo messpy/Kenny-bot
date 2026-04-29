@@ -137,9 +137,10 @@ def format_messages_for_context(messages: list[discord.Message]) -> str:
         if msg.author.id:
             author_display = f"{msg.author} ({msg.author.id})"
         time_str = ""
-        if msg.created_at:
+        created_at = getattr(msg, "created_at", None)
+        if created_at:
             try:
-                dt = msg.created_at.astimezone(JST)
+                dt = created_at.astimezone(JST)
                 time_str = dt.strftime("%H:%M")
             except Exception:
                 pass

@@ -6,11 +6,13 @@ from pathlib import Path
 import unittest
 import textwrap
 from unittest.mock import patch
+import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+os.environ["KENNYBOT_DB_BACKEND"] = "sqlite"
 
 from src.kennybot.utils.profile_preview import (
     build_channel_profile_preview,
@@ -23,9 +25,33 @@ from src.kennybot.utils.profile_preview import (
 from src.kennybot.utils.config import get_prompt
 from src.kennybot.utils.profile_preview_api import build_profile_preview_response
 from src.kennybot.utils.profile_preview_api import _normalize_ai_answer
+from src.kennybot.utils.server_registry import ServerRegistryStore
 
 
 class ProfilePreviewTests(unittest.TestCase):
+    def _seed_doc(
+        self,
+        *,
+        root: Path,
+        guild_id: int,
+        channel_id: int | None,
+        scope: str,
+        title: str,
+        body: str,
+        source_path: str,
+    ) -> None:
+        registry = ServerRegistryStore(root / "data" / "server" / "server.sqlite3")
+        registry.upsert_rag_document(
+            scope=scope,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            source_path=source_path,
+            doc_type="markdown",
+            title=title,
+            summary=body.splitlines()[0],
+            body=body,
+        )
+
     def test_profile_scope_guild_is_explicit(self) -> None:
         preview = build_channel_profile_preview(
             root=ROOT,
@@ -56,44 +82,8 @@ class ProfilePreviewTests(unittest.TestCase):
     def test_local_rag_returns_scoped_chunks_for_vrc_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            server_guild_dir = root / "data" / "server" / "10"
-            server_channel_dir = server_guild_dir / "channels" / "20"
-            legacy_guild_dir = root / "data" / "channel_rag" / "10"
-            legacy_channel_dir = legacy_guild_dir / "channels" / "20"
-            server_guild_dir.mkdir(parents=True, exist_ok=True)
-            server_channel_dir.mkdir(parents=True, exist_ok=True)
-            legacy_guild_dir.mkdir(parents=True, exist_ok=True)
-            legacy_channel_dir.mkdir(parents=True, exist_ok=True)
-            (server_guild_dir / "chat_rag.md").write_text(
-                textwrap.dedent(
-                    """\
-                    # Server profile
-                    これは server 側の説明です。
-                    - server-only
-                    """
-                ),
-                encoding="utf-8",
-            )
-            (server_channel_dir / "chat_rag.md").write_text(
-                textwrap.dedent(
-                    """\
-                    # Channel profile
-                    これは server のチャンネル説明です。
-                    - channel-only
-                    """
-                ),
-                encoding="utf-8",
-            )
-            (legacy_guild_dir / "chat_rag.md").write_text(
-                textwrap.dedent(
-                    """\
-                    # Legacy profile
-                    これは channel_rag 側の説明です。
-                    - legacy-only
-                    """
-                ),
-                encoding="utf-8",
-            )
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="Server profile", body="これは server 側の説明です。\n- server-only", source_path="rag://guild/10/server-profile")
+            self._seed_doc(root=root, guild_id=10, channel_id=20, scope="channel", title="Channel profile", body="これは server のチャンネル説明です。\n- channel-only", source_path="rag://guild/10/channel/20/channel-profile")
 
             preview = build_channel_profile_preview(
                 root=root,
@@ -115,7 +105,7 @@ class ProfilePreviewTests(unittest.TestCase):
                 question="このサーバーは何の場？",
             )
             self.assertIn("Server profile", guild_preview["profile"])
-            self.assertNotIn("Legacy profile", guild_preview["profile"])
+            self.assertNotIn("legacy-only", guild_preview["profile"])
 
     def test_summary_is_deterministic_and_question_aware(self) -> None:
         chunks = build_profile_chunks(
@@ -134,23 +124,9 @@ class ProfilePreviewTests(unittest.TestCase):
     def test_display_profile_filters_operational_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            guild_dir = root / "data" / "server" / "10"
-            guild_dir.mkdir(parents=True, exist_ok=True)
-            (guild_dir / "chat_rag.md").write_text(
-                textwrap.dedent(
-                    """\
-                    # ワールド概要
-                    - このワールドは交流用の場所です。
-
-                    # 運用方針
-                    - 前提は簡潔に説明する。
-
-                    # オーナー向けメモ
-                    - 交流の場として扱う。
-                    """
-                ),
-                encoding="utf-8",
-            )
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="ワールド概要", body="- このワールドは交流用の場所です。", source_path="rag://guild/10/overview")
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="運用方針", body="- 前提は簡潔に説明する。", source_path="rag://guild/10/ops")
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="オーナー向けメモ", body="- 交流の場として扱う。", source_path="rag://guild/10/owner-memo")
 
             chunks = build_profile_chunks(
                 root=root,
@@ -233,6 +209,25 @@ class ProfilePreviewTests(unittest.TestCase):
         self.assertEqual(response["ai_status"]["mode"], "fallback")
         self.assertEqual(response["ai_status"]["model"], "llama3.2:1b")
 
+    def test_profile_preview_answer_prioritizes_question_target_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="適当", body="`適当` は、特定のテーマを決めずに気軽に話すための雑談チャンネルです。", source_path="rag://guild/10/tekitou")
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="サーバー全体の説明", body="このサーバー全体は小規模な私用サーバーです。", source_path="rag://guild/10/summary")
+            self._seed_doc(root=root, guild_id=10, channel_id=None, scope="guild", title="bot-events", body="`bot-events` は、Bot の通知を見るチャンネルです。", source_path="rag://guild/10/bot-events")
+
+            preview = build_channel_profile_preview(
+                root=root,
+                guild_id=10,
+                channel_id=20,
+                scope="guild",
+                question="適当って何をするチャンネル？",
+            )
+
+            first_paragraph = preview["answer"].split("\n\n", 1)[0]
+            self.assertIn("適当", first_paragraph)
+            self.assertIn("雑談チャンネル", first_paragraph)
+
     def test_profile_preview_response_uses_ai_when_available(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
@@ -300,6 +295,50 @@ class ProfilePreviewTests(unittest.TestCase):
         self.assertEqual(response["ai_status"]["mode"], "ai")
         self.assertEqual(response["ai_status"]["reason"], "ollama_http_ok")
         self.assertEqual(mocked_post.call_count, 1)
+
+    def test_profile_preview_response_falls_back_to_ollama_client_before_summary_fallback(self) -> None:
+        class FakeHttpErrorResponse:
+            status_code = 404
+
+        class FakeClient:
+            def chat_simple(self, model: str, prompt: str, stream: bool = False, **kwargs: object) -> str:
+                return "AIクライアントで整形した説明です。"
+
+        old_host = os.environ.get("OLLAMA_HOST")
+        os.environ["OLLAMA_HOST"] = "http://127.0.0.1:11434"
+        try:
+            with (
+                patch(
+                    "src.kennybot.utils.profile_preview_api.requests.post",
+                    side_effect=requests.HTTPError(response=FakeHttpErrorResponse()),
+                ) as mocked_post,
+                patch(
+                    "src.kennybot.utils.profile_preview_api._ollama_client_chat",
+                    return_value="AIクライアントで整形した説明です。",
+                ) as mocked_client_chat,
+            ):
+                response = build_profile_preview_response(
+                    root=ROOT,
+                    payload={
+                        "guild_id": 972052382315855912,
+                        "channel_id": 1493246078357606430,
+                        "scope": "auto",
+                        "question": "このサーバーはなにするところ？",
+                        "use_ai": True,
+                        "ollama_model": "llama3.2:1b",
+                    },
+                )
+        finally:
+            if old_host is None:
+                os.environ.pop("OLLAMA_HOST", None)
+            else:
+                os.environ["OLLAMA_HOST"] = old_host
+
+        self.assertEqual(response["answer"], "AIクライアントで整形した説明です。")
+        self.assertEqual(response["ai_status"]["mode"], "ai")
+        self.assertEqual(response["ai_status"]["reason"], "ollama_client_ok_after_http_error")
+        self.assertEqual(mocked_post.call_count, 1)
+        self.assertEqual(mocked_client_chat.call_count, 1)
 
     def test_normalize_ai_answer_strips_meta_prefixes(self) -> None:
         answer = _normalize_ai_answer(

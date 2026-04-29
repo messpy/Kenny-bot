@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.kennybot.utils.paths import MESSAGE_VECTOR_DB_PATH, RUNTIME_LOG_DIR, LEGACY_LOG_DIR
+from src.kennybot.utils.db import connect_database, sql_placeholders
+from src.kennybot.utils.message_vector_store import MessageVectorStore
+from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH, RUNTIME_LOG_DIR, LEGACY_LOG_DIR
 from src.kennybot.utils.text import looks_like_web_search_artifact
 
 
@@ -38,19 +39,25 @@ def _purge_json_messages(path: Path) -> int:
 
 
 def _purge_message_embeddings(db_path: Path) -> int:
-    if not db_path.exists():
+    store = MessageVectorStore(db_path)
+    config = store._db
+    if config.backend == "sqlite" and (config.sqlite_path is None or not config.sqlite_path.exists()):
         return 0
-
     deleted = 0
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT message_id, content FROM message_embeddings").fetchall()
+    with connect_database(config) as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql_placeholders("SELECT message_id, content FROM message_embeddings", config))
+        rows = cursor.fetchall()
         for row in rows:
             content = str(row["content"] or "")
             if not looks_like_web_search_artifact(content):
                 continue
-            conn.execute("DELETE FROM message_embeddings WHERE message_id = ?", (int(row["message_id"]),))
+            cursor.execute(
+                sql_placeholders("DELETE FROM message_embeddings WHERE message_id = ?", config),
+                (int(row["message_id"]),),
+            )
             deleted += 1
+        conn.commit()
     return deleted
 
 
@@ -78,9 +85,11 @@ def _purge_runtime_logs(root: Path) -> int:
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    message_files = list((root / "data" / "channel_rag").rglob("messages.json"))
+    message_files = []
+    for data_root in ("server", "server_rag", "channel_rag"):
+        message_files.extend((root / "data" / data_root).rglob("messages.json"))
     removed_messages = sum(_purge_json_messages(path) for path in message_files)
-    removed_embeddings = _purge_message_embeddings(root / MESSAGE_VECTOR_DB_PATH)
+    removed_embeddings = _purge_message_embeddings(root / MESSAGE_VECTOR_SQLITE_PATH)
     removed_logs = _purge_runtime_logs(root)
     print(
         f"removed_messages={removed_messages} removed_embeddings={removed_embeddings} removed_logs={removed_logs}"

@@ -41,24 +41,20 @@ class ChannelCountdown:
         text_factory: Callable[[int], str] | None = None,
         mention_user_id: int | None = None,
         start_seconds: int = 1,
+        initial_delay_seconds: float = 2.0,
     ) -> None:
         await self.stop(key, delete_message=True)
         prefix = f"<@{mention_user_id}> " if mention_user_id else ""
         elapsed = max(1, int(start_seconds))
-        text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
-        msg = await channel.send(
-            f"{prefix}{text}",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        self._messages[key] = msg
         task = asyncio.create_task(
             self._run_countup(
                 key=key,
-                msg=msg,
                 base_text=base_text,
                 text_factory=text_factory,
                 mention_user_id=mention_user_id,
                 elapsed=elapsed,
+                channel=channel,
+                initial_delay_seconds=initial_delay_seconds,
             )
         )
         self._tasks[key] = task
@@ -129,21 +125,55 @@ class ChannelCountdown:
         self,
         *,
         key: str,
-        msg: discord.Message,
         base_text: str,
         text_factory: Callable[[int], str] | None,
         mention_user_id: int | None,
         elapsed: int,
+        channel: discord.abc.Messageable,
+        initial_delay_seconds: float,
     ) -> None:
+        current_msg: discord.Message | None = None
+        send_task: asyncio.Task[discord.Message] | None = None
+        cancelled = False
         try:
+            if initial_delay_seconds > 0:
+                await asyncio.sleep(float(initial_delay_seconds))
             while True:
                 await asyncio.sleep(1)
                 elapsed += 1
                 prefix = f"<@{mention_user_id}> " if mention_user_id else ""
                 text = text_factory(elapsed) if text_factory is not None else f"{base_text} {self._format_elapsed(elapsed)}"
-                await msg.edit(content=f"{prefix}{text}", allowed_mentions=discord.AllowedMentions.none())
+                msg = self._messages.get(key)
+                if msg is None:
+                    send_task = asyncio.create_task(
+                        channel.send(
+                            f"{prefix}{text}",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    )
+                    msg = await asyncio.shield(send_task)
+                    send_task = None
+                    current_msg = msg
+                    self._messages[key] = msg
+                else:
+                    current_msg = msg
+                    await msg.edit(content=f"{prefix}{text}", allowed_mentions=discord.AllowedMentions.none())
         except asyncio.CancelledError:
+            cancelled = True
+            if send_task is not None:
+                try:
+                    current_msg = await send_task
+                except Exception:
+                    current_msg = None
             return
         finally:
             self._tasks.pop(key, None)
-            self._messages.pop(key, None)
+            tracked_msg = self._messages.get(key)
+            if tracked_msg is not None and tracked_msg is current_msg:
+                self._messages.pop(key, None)
+                tracked_msg = None
+            if cancelled and current_msg is not None and tracked_msg is None:
+                try:
+                    await current_msg.delete()
+                except Exception:
+                    pass
