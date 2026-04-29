@@ -4,6 +4,7 @@
 import json
 import io
 import logging
+import os
 import re
 import subprocess
 import time
@@ -124,6 +125,44 @@ class MessageLogger(BaseCog):
         self._vector_store = MessageVectorStore(MESSAGE_VECTOR_DB_PATH)
         self._ai_retry_countdowns = ChannelCountdown()
         self._ai_progress_countdowns = ChannelCountdown()
+        self._message_claim_dir = self.root / "data" / "runtime" / "message_claims"
+        self._last_message_claim_prune = 0.0
+
+    def _prune_message_claims(self, *, max_age_seconds: int = 86400) -> None:
+        now = time.time()
+        if now - self._last_message_claim_prune < 300:
+            return
+        self._last_message_claim_prune = now
+        try:
+            self._message_claim_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        for path in self._message_claim_dir.glob("*.claim"):
+            try:
+                if now - path.stat().st_mtime > max_age_seconds:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    def _claim_message_once(self, message_id: int) -> bool:
+        self._prune_message_claims()
+        try:
+            self._message_claim_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return True
+
+        claim_path = self._message_claim_dir / f"{message_id}.claim"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(claim_path, flags, 0o644)
+        except FileExistsError:
+            return False
+        except OSError:
+            return True
+
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{time.time()}\n")
+        return True
 
     def _prune_recent_mention_windows(self) -> None:
         now = time.monotonic()
@@ -4016,6 +4055,10 @@ class MessageLogger(BaseCog):
         """メッセージイベント（リアクション＆会話）"""
         # Bot自身のメッセージは無視
         if self.bot.user and msg.author.id == self.bot.user.id:
+            return
+
+        if not self._claim_message_once(msg.id):
+            logger.info("Skipped duplicate message handling for message_id=%s", msg.id)
             return
 
         # DM は AI 会話のみ許可

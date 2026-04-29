@@ -20,6 +20,16 @@ from src.kennybot.bootstrap import create_bot
 from src.kennybot.utils.message_logger import log_codex_repair_mode
 
 
+def _lock_holder_summary(lock_path: Path) -> str:
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    return f" holder={raw}"
+
+
 def main():
     """Discord Bot メイン実行"""
     setup_logging()
@@ -27,21 +37,25 @@ def main():
     lock_path = Path("data") / "kennybot.lock"
     lock_retry_delay = 2
     waited_seconds = 0
+    lock_log_interval = 30
     while True:
         try:
             acquire_lock(lock_path)
             break
         except SingleInstanceError as exc:
             waited_seconds += lock_retry_delay
-            logger.warning(
-                "Another kennybot instance is already running, waiting %ss: %s",
-                waited_seconds,
-                exc,
-            )
-            print(
-                f"[BOOT] Another kennybot instance is already running, waiting {waited_seconds}s: {exc}",
-                file=sys.stderr,
-            )
+            holder = _lock_holder_summary(lock_path)
+            if waited_seconds == lock_retry_delay or waited_seconds % lock_log_interval == 0:
+                logger.warning(
+                    "Another kennybot instance is already running, waiting %ss: %s%s",
+                    waited_seconds,
+                    exc,
+                    holder,
+                )
+                print(
+                    f"[BOOT] Another kennybot instance is already running, waiting {waited_seconds}s: {exc}{holder}",
+                    file=sys.stderr,
+                )
             time.sleep(lock_retry_delay)
 
     # .env ファイルを読み込む
