@@ -98,6 +98,13 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.assertEqual(targets["replied_user"], (2, "reply"))
         self.assertEqual(targets["mentioned_1"], (3, "mention"))
 
+    def test_ai_auth_error_detection_matches_ollama_401_text(self) -> None:
+        self.logger.bot = SimpleNamespace(ollama_client=SimpleNamespace())
+        err = RuntimeError("unauthorized (status code: 401)")
+
+        self.assertTrue(self.logger._is_ai_auth_error(err))
+        self.assertIn("ollama signin", self.logger._ai_auth_error_message())
+
     def test_person_lookup_plan_promotes_mentioned_target(self) -> None:
         plan = [
             {"source": "recent_user_history"},
@@ -132,6 +139,35 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.assertTrue(self.logger._is_channel_profile_query("このサーバの情報を教えて"))
         self.assertTrue(self.logger._is_channel_profile_query("サーバの説明を教えて"))
         self.assertFalse(self.logger._is_channel_profile_query("このBotの機能を教えて"))
+
+    def test_capability_query_detection_accepts_about_features(self) -> None:
+        self.assertTrue(self.logger._is_capability_query("機能について"))
+        self.assertTrue(self.logger._is_capability_query("どんな機能がある？"))
+        self.assertTrue(self.logger._is_capability_query("なにができる？"))
+
+    def test_generic_capability_answer_detection_matches_discord_bot_intro(self) -> None:
+        answer = (
+            "私はDiscord Botとして、皆さんの質問に答えたり、"
+            "情報を提供したりすることができます。文脈を理解して"
+            "自然な日本語で会話することを目指していますので、"
+            "何か知りたいことがあればお気軽に聞いてくださいね！"
+        )
+
+        self.assertTrue(self.logger._is_generic_capability_answer(answer))
+
+    def test_generic_capability_answer_detection_matches_main_feature_intro(self) -> None:
+        answer = (
+            "私の主な機能は、皆さんとの対話を通じて、質問に答えたり、"
+            "情報を提供したりすることです。何か特定の機能について知りたい場合は、"
+            "どうぞ具体的に質問してくださいね。"
+        )
+
+        self.assertTrue(self.logger._is_generic_capability_answer(answer))
+
+    def test_generic_capability_answer_detection_keeps_real_help(self) -> None:
+        answer = "KennyBot はAI会話に加えて `/help` や `/minutes_start` を使えます。"
+
+        self.assertFalse(self.logger._is_generic_capability_answer(answer))
 
     def test_build_planned_context_channel_profile_is_strict(self) -> None:
         guild = SimpleNamespace(id=10, name="Test Guild")
@@ -319,6 +355,59 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._answer_channel_profile_query.assert_awaited_once()
         self.logger._answer_capability_query.assert_not_awaited()
         self.logger._send_runtime_model_reply.assert_not_awaited()
+        self.logger.bot.process_commands.assert_awaited_once_with(msg)
+
+    def test_on_message_bare_mention_routes_capability_help(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            guild_permissions=SimpleNamespace(kick_members=True, ban_members=True),
+        )
+        guild = SimpleNamespace(id=10, name="guild", me=bot_member)
+        self.logger.bot = SimpleNamespace(
+            user=SimpleNamespace(id=999),
+            spam_guard=SimpleNamespace(
+                allow_message=lambda *_args, **_kwargs: True,
+                allow_ai=lambda *_args, **_kwargs: True,
+            ),
+            process_commands=AsyncMock(),
+        )
+        self.logger._is_kenny_chat = lambda _msg: False
+        self.logger._has_recent_mention_window = lambda _msg: False
+        self.logger._answer_capability_query = AsyncMock()
+        self.logger._schedule_message_index = lambda *args, **kwargs: None
+        self.logger._arm_recent_mention_window = lambda _msg: None
+
+        author = SimpleNamespace(
+            id=1,
+            display_name="author",
+            name="author",
+            bot=False,
+            mention="<@1>",
+        )
+        channel = SimpleNamespace(id=20, name="channel", guild=guild, send=AsyncMock())
+        msg = SimpleNamespace(
+            id=30,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="<@999>",
+            mentions=[SimpleNamespace(id=999)],
+            webhook_id=None,
+            reference=None,
+        )
+
+        import asyncio
+
+        asyncio.run(self.logger.on_message(msg))
+
+        self.logger._answer_capability_query.assert_awaited_once_with(
+            channel,
+            "機能一覧",
+            mention="<@1>",
+            source_msg=msg,
+            channel_id=20,
+        )
+        channel.send.assert_not_awaited()
         self.logger.bot.process_commands.assert_awaited_once_with(msg)
 
     def test_on_message_routes_server_stats_directly(self) -> None:

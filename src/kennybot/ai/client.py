@@ -23,6 +23,10 @@ _GEMINI_API_BASE = os.getenv(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 ).rstrip("/")
 _OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
+_DEFAULT_OLLAMA_FALLBACK_MODEL = os.getenv(
+    "KENNYBOT_DEFAULT_OLLAMA_FALLBACK_MODEL",
+    "gpt-oss:120b-cloud",
+).strip()
 _KNOWN_GEMINI_MODELS = (
     "gemini-2.5-flash",
     "gemini-2.5-pro",
@@ -45,9 +49,13 @@ class OllamaClientConfig:
         host: Optional[str] = None,
         api_key: Optional[str] = None,
         api_key_env: str = "OLLAMA_API_KEY",
+        timeout_sec: Optional[float] = None,
     ):
         self.host = host
         self.api_key = api_key or os.getenv(api_key_env)
+        if timeout_sec is None:
+            timeout_sec = float(os.getenv("KENNYBOT_OLLAMA_HTTP_TIMEOUT_SEC", "180") or "180")
+        self.timeout_sec = max(1.0, float(timeout_sec))
 
     def _is_local_host(self) -> bool:
         if not self.host:
@@ -62,7 +70,7 @@ class OllamaClientConfig:
             if self._is_local_host():
                 old_api_key = os.environ.pop("OLLAMA_API_KEY", None)
                 try:
-                    return Client(host=self.host)
+                    return Client(host=self.host, timeout=self.timeout_sec)
                 finally:
                     if old_api_key is not None:
                         os.environ["OLLAMA_API_KEY"] = old_api_key
@@ -74,9 +82,10 @@ class OllamaClientConfig:
             return Client(
                 host=self.host,
                 headers={"Authorization": "Bearer " + self.api_key},
+                timeout=self.timeout_sec,
             )
         # ローカル ollama
-        return Client()
+        return Client(host="http://127.0.0.1:11434", timeout=self.timeout_sec)
 
 
 class OllamaClientService:
@@ -314,7 +323,7 @@ class OllamaClientService:
         url = f"{_GEMINI_API_BASE}/{self._gemini_model_name(model)}:generateContent"
         response = self._http.post(
             url,
-            params={"key": api_key},
+            headers={"x-goog-api-key": api_key},
             json=payload,
             timeout=timeout,
         )
@@ -327,6 +336,7 @@ class OllamaClientService:
                 fallback_models: list[str] = []
                 for candidate in (
                     _OLLAMA_FALLBACK_MODEL,
+                    _DEFAULT_OLLAMA_FALLBACK_MODEL,
                     models.chat.strip(),
                     models.summary.strip(),
                     models.default.strip(),
@@ -468,11 +478,15 @@ class OllamaClientService:
             return value[: -len("-cloud")]
         return value
 
+    def _is_cloud_model(self, model: str) -> bool:
+        return (model or "").strip().endswith("-cloud")
+
     def _configured_fallback_models(self, primary_model: str) -> list[str]:
         models = get_app_config().ai_models()
         candidates: list[str] = []
         for candidate in (
             _OLLAMA_FALLBACK_MODEL,
+            _DEFAULT_OLLAMA_FALLBACK_MODEL,
             models.chat.strip(),
             models.summary.strip(),
             models.default.strip(),
@@ -494,10 +508,6 @@ class OllamaClientService:
             if not model_name or model_name in candidates:
                 continue
             candidates.append(model_name)
-            if not self._is_gemini_model(model_name) and not model_name.endswith("-cloud"):
-                cloud_variant = f"{model_name}-cloud"
-                if cloud_variant not in candidates:
-                    candidates.append(cloud_variant)
         return candidates
 
     def _try_local_chat_fallback(
@@ -511,6 +521,8 @@ class OllamaClientService:
     ):
         if self._local_fallback_client is None:
             raise RuntimeError("local fallback client is not available")
+        if self._is_cloud_model(model):
+            raise RuntimeError(f"refusing local fallback for cloud model '{model}'")
         local_model = self._normalize_local_fallback_model(model)
         logger.warning("Falling back to local Ollama model '%s' after remote failure", local_model)
         try:
@@ -542,6 +554,7 @@ class OllamaClientService:
         format: Optional[str | dict] = None,
         **kwargs,
     ):
+        kwargs.pop("timeout_sec", None)
         if self._is_gemini_model(model):
             return self._gemini_generate_content(
                 model=model,
@@ -834,6 +847,7 @@ class OllamaClientService:
 def create_ollama_client(
     host: Optional[str] = None,
     api_key_env: str = "OLLAMA_API_KEY",
+    timeout_sec: Optional[float] = None,
 ) -> OllamaClientService:
     """
     Ollama Client を作成（ローカルまたはリモート）
@@ -845,5 +859,5 @@ def create_ollama_client(
     Returns:
         OllamaClientService インスタンス
     """
-    config = OllamaClientConfig(host=host, api_key_env=api_key_env)
+    config = OllamaClientConfig(host=host, api_key_env=api_key_env, timeout_sec=timeout_sec)
     return OllamaClientService(config)

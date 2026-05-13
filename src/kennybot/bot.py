@@ -42,9 +42,6 @@ def _resolve_ollama_host_for_runtime(host: str | None) -> str | None:
     value = (host or "").strip()
     if not value:
         return None
-    lowered = value.lower()
-    if "ollama.com" in lowered:
-        return None
     return value
 
 

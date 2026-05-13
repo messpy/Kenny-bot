@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import io
 import json
@@ -184,6 +185,13 @@ class MeetingMinutesManager:
     @staticmethod
     def _recorder_start_confirm_timeout_seconds(guild_id: int) -> int:
         return max(5, int(_settings.get("recorder.start_confirm_timeout_seconds", 30, guild_id=guild_id)))
+
+    @staticmethod
+    def _recording_backend(guild_id: int) -> str:
+        raw = str(_settings.get("meeting.recording_backend", "auto", guild_id=guild_id) or "auto").strip().lower()
+        if raw in {"external", "voice_recv", "auto"}:
+            return raw
+        return "auto"
 
     @staticmethod
     def _redact_paths(text: str) -> str:
@@ -738,6 +746,8 @@ print(json.dumps({"text": text}, ensure_ascii=False))
 
         if provider == "google":
             try:
+                if not self._google_credentials_configured():
+                    raise RuntimeError("Google 認証情報が未設定です")
                 self._get_google_client(guild_id)
                 fallback_name = self._resolve_whisper_model_name(guild_id, whisper_model)
                 return f"Google Speech-to-Text を使用 / Whisper fallback: {fallback_name}"
@@ -748,6 +758,26 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         self._get_whisper_model(guild_id, model_name)
         notes.append(f"Whisper 準備完了 ({model_name})")
         return " / ".join(notes)
+
+    @staticmethod
+    def _google_credentials_configured() -> bool:
+        inline_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+        inline_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "").strip()
+        adc_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+
+        if inline_json:
+            return True
+        if inline_b64:
+            try:
+                base64.b64decode(inline_b64, validate=True)
+                return True
+            except Exception:
+                return False
+        if adc_path:
+            return Path(adc_path).expanduser().exists()
+
+        gcloud_adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+        return gcloud_adc.exists()
 
     def _get_google_client(self, guild_id: int) -> GoogleSpeechClient:
         cfg = GoogleSpeechConfig(
@@ -1068,7 +1098,9 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             whisper_model=(whisper_model or "").strip() or None,
             runtime=runtime,
         )
-        if runtime.voice_client is not None:
+        if runtime.recorder_process is not None:
+            runtime.recorder_watch_task = asyncio.create_task(self._watch_external_recorder(bot, guild.id))
+        elif runtime.voice_client is not None:
             runtime.phrase_queue = asyncio.Queue()
             runtime.realtime_live_enabled = False
             runtime.realtime_task = asyncio.create_task(self._run_realtime_updates(bot, guild.id))
@@ -1252,18 +1284,35 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         return embed
 
     async def _start_recording(self, bot: commands.Bot, voice_channel: VoiceLikeChannel) -> _RecordingRuntime:
+        backend = self._recording_backend(voice_channel.guild.id)
+        backend_warnings: list[str] = []
+
+        if backend in {"auto", "external"}:
+            runtime = await self._start_external_recorder(bot, voice_channel)
+            if runtime.recorder_process is not None:
+                return runtime
+            if runtime.warning:
+                backend_warnings.append(f"external_recorder: {runtime.warning}")
+            if backend == "external":
+                runtime.warning = " / ".join(backend_warnings)
+                return runtime
+
         runtime = _RecordingRuntime()
+        if backend_warnings:
+            runtime.warning = " / ".join(backend_warnings)
 
         try:
             vr = importlib.import_module("discord.ext.voice_recv")
         except Exception:
-            runtime.warning = "音声受信ライブラリ未導入のため、音声文字起こしは無効です。"
+            voice_recv_warning = "音声受信ライブラリ未導入のため、音声文字起こしは無効です。"
+            runtime.warning = f"{runtime.warning} / {voice_recv_warning}".strip(" /")
             return runtime
 
         recv_client_cls = getattr(vr, "VoiceRecvClient", None)
         audio_sink_cls = getattr(vr, "AudioSink", object)
         if recv_client_cls is None:
-            runtime.warning = "voice_recv の VoiceRecvClient が見つからず、録音を開始できません。"
+            voice_recv_warning = "voice_recv の VoiceRecvClient が見つからず、録音を開始できません。"
+            runtime.warning = f"{runtime.warning} / {voice_recv_warning}".strip(" /")
             return runtime
 
         chunks = runtime.chunks
@@ -1381,13 +1430,15 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 runtime.voice_client = vc
                 runtime.sink = sink
             else:
-                runtime.warning = "voice_recv の listen API が見つからず、録音を開始できません。"
+                voice_recv_warning = "voice_recv の listen API が見つからず、録音を開始できません。"
+                runtime.warning = f"{runtime.warning} / {voice_recv_warning}".strip(" /")
                 try:
                     await vc.disconnect(force=True)
                 except Exception:
                     pass
         except Exception as e:
-            runtime.warning = f"録音開始に失敗しました: {e}"
+            voice_recv_warning = f"録音開始に失敗しました: {e}"
+            runtime.warning = f"{runtime.warning} / {voice_recv_warning}".strip(" /")
 
         return runtime
 

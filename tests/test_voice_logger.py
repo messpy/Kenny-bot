@@ -98,7 +98,7 @@ class VoiceLoggerTests(unittest.TestCase):
         self.logger._should_log_channel = lambda guild, channel: True
         self.logger._calculate_duration = lambda join_time: "0:00:05"
 
-    def test_duplicate_leave_is_suppressed(self) -> None:
+    def test_duplicate_leave_skips_voice_log(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -116,9 +116,9 @@ class VoiceLoggerTests(unittest.TestCase):
         finally:
             module.send_event_log = original
 
-        send_event_log_mock.assert_awaited_once()
+        send_event_log_mock.assert_not_awaited()
 
-    def test_voice_join_sends_to_discord_voice_log(self) -> None:
+    def test_voice_join_skips_voice_log(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -134,10 +134,10 @@ class VoiceLoggerTests(unittest.TestCase):
         finally:
             module.send_event_log = original
 
-        self.assertEqual(send_event_log_mock.await_args.kwargs["channel_kind"], "voice")
-        self.assertEqual(send_event_log_mock.await_args.kwargs["send_discord"], True)
+        send_event_log_mock.assert_not_awaited()
+        self.assertIn((member.id, guild.id), self.logger._voice_join_times)
 
-    def test_voice_leave_sends_to_discord_voice_log_with_duration(self) -> None:
+    def test_voice_leave_skips_voice_log_and_clears_join_time(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -154,10 +154,8 @@ class VoiceLoggerTests(unittest.TestCase):
         finally:
             module.send_event_log = original
 
-        kwargs = send_event_log_mock.await_args.kwargs
-        self.assertEqual(kwargs["channel_kind"], "voice")
-        self.assertEqual(kwargs["send_discord"], True)
-        self.assertIn(("通話時間", "0:00:05", False), kwargs["fields"])
+        send_event_log_mock.assert_not_awaited()
+        self.assertNotIn((member.id, guild.id), self.logger._voice_join_times)
 
 
 if __name__ == "__main__":

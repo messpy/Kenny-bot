@@ -129,6 +129,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="議事録モードを開始（VC参加者のみ）",
         category="議事録",
     ),
+    "minutes_start_google": SlashCommandMeta(
+        name="minutes_start_google",
+        description="Google Speech-to-Text で議事録モードを開始",
+        category="議事録",
+    ),
     "minutes_stop": SlashCommandMeta(
         name="minutes_stop",
         description="議事録モードを停止して要約を作成",

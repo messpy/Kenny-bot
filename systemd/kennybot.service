@@ -2,20 +2,22 @@
 Description=Kenny Bot Discord service
 After=network-online.target
 Wants=network-online.target
-After=kennybot-voicevox.service
-Wants=kennybot-voicevox.service
+After=shared-voicevox.service kennybot-mariadb.service
+Wants=shared-voicevox.service kennybot-mariadb.service
 
 [Service]
 Type=simple
 WorkingDirectory=/home/kennypi/work/Kenny-bot
 Environment=HOME=/home/kennypi
 Environment=PYTHONUNBUFFERED=1
+Environment=KENNYBOT_LOCK_WAIT_SEC=0
 EnvironmentFile=-/home/kennypi/work/Kenny-bot/.env
-ExecStart=/home/kennypi/.local/bin/uv run bin/run.py
-Restart=always
+ExecStart=/home/kennypi/work/Kenny-bot/.venv/bin/python3 bin/run.py
+Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 KillSignal=SIGINT
+KillMode=control-group
 
 [Install]
 WantedBy=default.target

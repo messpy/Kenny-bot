@@ -1,0 +1,15 @@
+[Unit]
+Description=Kenny Bot MariaDB container
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/kennypi/work/Kenny-bot
+ExecStart=/usr/bin/docker compose up -d mariadb
+ExecStop=/usr/bin/docker compose stop mariadb
+TimeoutStartSec=0
+
+[Install]
+WantedBy=default.target

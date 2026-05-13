@@ -7,6 +7,7 @@
 
 import sys
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -24,15 +25,26 @@ def main():
     """Discord Bot メイン実行"""
     setup_logging()
     logger = logging.getLogger("kennybot.bootstrap")
-    lock_path = Path("data") / "kennybot.lock"
+    lock_path = Path("runtime") / "state" / "kennybot.lock"
     lock_retry_delay = 2
+    lock_wait_limit = float(os.getenv("KENNYBOT_LOCK_WAIT_SEC", "-1") or "-1")
     waited_seconds = 0
     while True:
         try:
             acquire_lock(lock_path)
             break
         except SingleInstanceError as exc:
+            if lock_wait_limit == 0:
+                logger.warning("Another kennybot instance is already running, exiting: %s", exc)
+                return
             waited_seconds += lock_retry_delay
+            if lock_wait_limit > 0 and waited_seconds >= lock_wait_limit:
+                logger.warning(
+                    "Another kennybot instance is already running, lock wait timeout after %ss: %s",
+                    waited_seconds,
+                    exc,
+                )
+                return
             logger.warning(
                 "Another kennybot instance is already running, waiting %ss: %s",
                 waited_seconds,

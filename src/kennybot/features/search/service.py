@@ -113,6 +113,7 @@ class DuckDuckGoSearch:
         cfg = self.config
         use_news_only = cfg.news_only if news_only is None else news_only
         items: List[WebItem] = []
+        allow_text_fallback = False
 
         logger.info("[search] ddgs search start: query=%r news_only=%s", query, use_news_only)
 
@@ -135,19 +136,20 @@ class DuckDuckGoSearch:
                         break
             except TimeoutException as e:
                 logger.warning("[search] ddgs.news timeout: %r", e)
-                raise
+                allow_text_fallback = True
             except DDGSException as e:
                 # 「No results found.」だけは 0 件扱いにしておく
                 if "No results found" in str(e):
                     logger.info("[search] ddgs.news no results: %r", e)
                 else:
                     logger.warning("[search] ddgs.news error: %r", e)
-                    raise
+                    allow_text_fallback = True
             except Exception as e:
                 logger.warning("[search] ddgs.news unexpected error: %r", e)
+                allow_text_fallback = True
 
             # ---- 通常 Web 検索 ----
-            if (not use_news_only) and len(items) < cfg.max_results:
+            if (allow_text_fallback or not use_news_only) and len(items) < cfg.max_results:
                 seen_urls = {it.url for it in items}
                 try:
                     for r in ddgs.text(

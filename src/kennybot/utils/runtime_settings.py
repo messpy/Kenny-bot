@@ -18,17 +18,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
         "ai": {
             "models": {
-                "default": "gpt-oss:120b",
-                "chat": "gpt-oss:120b",
-                "summary": "gpt-oss:120b",
+                "default": "gpt-oss:120b-cloud",
+                "chat": "gpt-oss:120b-cloud",
+                "summary": "gpt-oss:120b-cloud",
                 "embedding": "embeddinggemma",
             },
             "timeout_sec": 180,
         },
         "ollama": {
-            "model_default": "gemini-2.5-flash",
-            "model_chat": "gpt-oss:120b",
-            "model_summary": "gpt-oss:120b",
+            "model_default": "gpt-oss:120b-cloud",
+            "model_chat": "gpt-oss:120b-cloud",
+            "model_summary": "gpt-oss:120b-cloud",
             "model_embedding": "embeddinggemma",
             "timeout_sec": 180,
         },
@@ -77,6 +77,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "max_minutes": 90,
             "audio_max_total_mb": 0,
             "audio_max_user_mb": 0,
+            "recording_backend": "auto",
             "transcription_provider": "google",
             "google_language_code": "ja-JP",
             "google_chunk_seconds": 20,

@@ -1541,11 +1541,16 @@ class GameCommands(commands.Cog):
 
     async def _ask_ollama(self, prompt: str) -> str:
         try:
-            model_default = get_app_config().ai_models().default
-            text = self.bot.ollama_client.chat_simple(
-                model=model_default,
-                prompt=prompt,
-                stream=False,
+            ai_models = get_app_config().ai_models()
+            text = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.bot.ollama_client.chat_simple,
+                    model=ai_models.default,
+                    prompt=prompt,
+                    stream=False,
+                    timeout_sec=ai_models.timeout_sec,
+                ),
+                timeout=ai_models.timeout_sec,
             )
             return (text or "").strip()
         except Exception:

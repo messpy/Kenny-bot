@@ -59,7 +59,7 @@ class AppConfig:
                 self._get_first(
                     "ai.models.default",
                     "ollama.model_default",
-                    default="gpt-oss:120b",
+                    default="gpt-oss:120b-cloud",
                     guild_id=guild_id,
                 )
             ),
@@ -67,7 +67,7 @@ class AppConfig:
                 self._get_first(
                     "ai.models.chat",
                     "ollama.model_chat",
-                    default="gpt-oss:120b",
+                    default="gpt-oss:120b-cloud",
                     guild_id=guild_id,
                 )
             ),
@@ -75,7 +75,7 @@ class AppConfig:
                 self._get_first(
                     "ai.models.summary",
                     "ollama.model_summary",
-                    default="gpt-oss:120b",
+                    default="gpt-oss:120b-cloud",
                     guild_id=guild_id,
                 )
             ),

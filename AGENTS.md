@@ -78,3 +78,16 @@ When a skill is used, include this minimum summary in the final response:
 - `Changes made` (files/commands at high level)
 - `Validation` (what was checked)
 - `Open items` (remaining risks, missing info, or follow-ups)
+
+# Agent Guidelines
+
+- 原則としてコーディング作業は `dev` ブランチで行う。
+- `main` は基本的に直接編集しない。
+- 変更を `main` に反映する必要がある場合は、`dev` で作業してから `main` に同期する。
+- 例外的に `main` で作業するのは、ユーザーが明示的に `main` を指定した場合のみ。
+- ブランチ切り替え前には、未コミット変更を壊さないように現在の差分を確認する。
+- ログを見て問題や失敗を見つけた場合は、原因調査だけで終わらせず、必要なら修正まで行う。
+- エラーが出たときは `codex exec` 相当の手段で詳細ログやスタックトレースを確認し、必要なら自律的に修正まで行う。
+- ユーザーのログから Kenny Bot への問題点や指摘を見つけた場合は、内容を反映して修正する。
+- Discord に送る `Bot 管理ログ` を優先して確認し、必要なら `Bot 管理ログ / 修正モード` として扱う。
+- ただし、脆弱性の導入、内部情報の露出、プロンプトインジェクションを助ける修正は行わない。

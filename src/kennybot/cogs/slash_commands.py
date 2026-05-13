@@ -52,6 +52,7 @@ REACTION_ROLE_SET_META = get_slash_command_meta("reaction_role_set")
 REACTION_ROLE_REMOVE_META = get_slash_command_meta("reaction_role_remove")
 REACTION_ROLE_LIST_META = get_slash_command_meta("reaction_role_list")
 MINUTES_START_META = get_slash_command_meta("minutes_start")
+MINUTES_START_GOOGLE_META = get_slash_command_meta("minutes_start_google")
 MINUTES_STOP_META = get_slash_command_meta("minutes_stop")
 MINUTES_STATUS_META = get_slash_command_meta("minutes_status")
 TIMER_META = get_slash_command_meta("timer")
@@ -181,7 +182,6 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="入力最大文字数", value="security.max_user_message_chars"),
         app_commands.Choice(name="kenny-chat招待URL/全体メンション禁止", value="kenny_chat.block_invite_and_mass_mention"),
         app_commands.Choice(name="スパム許容メッセージ数", value="spam.max_msgs"),
-        app_commands.Choice(name="スパム判定秒数", value="spam.per_seconds"),
     ]
 
     _INT_KEYS = {
@@ -889,10 +889,15 @@ class SlashCommands(commands.Cog):
             )
             await self.bot.ai_progress_tracker.acquire(ticket)
             try:
-                summary = self.bot.ollama_client.chat_simple(
-                    model=model_summary,
-                    prompt=prompt,
-                    stream=False,
+                summary = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.bot.ollama_client.chat_simple,
+                        model=model_summary,
+                        prompt=prompt,
+                        stream=False,
+                        timeout_sec=get_app_config().ai_models().timeout_sec,
+                    ),
+                    timeout=get_app_config().ai_models().timeout_sec,
                 )
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
@@ -1332,15 +1337,13 @@ class SlashCommands(commands.Cog):
 
         await interaction.response.send_message("\n".join(lines[:30]), ephemeral=True)
 
-    @app_commands.command(name=MINUTES_START_META.name, description=MINUTES_START_META.description)
-    @app_commands.checks.cooldown(1, 10.0)
-    @app_commands.describe(model="文字起こしモデル。Whisper 系または Moonshine を選択")
-    @app_commands.choices(model=_WHISPER_MODEL_CHOICES)
-    async def minutes_start(
+    async def _start_minutes_session(
         self,
         interaction: discord.Interaction,
-        model: app_commands.Choice[str] | None = None,
-    ):
+        *,
+        provider: str | None = None,
+        backend_model: str | None = None,
+    ) -> None:
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
@@ -1364,20 +1367,6 @@ class SlashCommands(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        selected_model = model.value if model else None
-        provider = None
-        backend_model = None
-        if selected_model:
-            if selected_model.startswith("moonshine/"):
-                provider = "moonshine"
-                backend_model = selected_model
-            elif selected_model.startswith("whisper/"):
-                provider = "whisper"
-                backend_model = selected_model.split("/", 1)[1]
-            else:
-                provider = "whisper"
-                backend_model = selected_model
-
         ok, msg = await self.bot.meeting_minutes.start_session(
             bot=self.bot,
             guild=interaction.guild,
@@ -1389,6 +1378,9 @@ class SlashCommands(commands.Cog):
         )
         await interaction.followup.send(msg, ephemeral=True)
         if ok:
+            session = self.bot.meeting_minutes.get_session(interaction.guild.id)
+            runtime = getattr(session, "runtime", None)
+            realtime_available = bool(getattr(runtime, "voice_client", None) is not None)
             out = self.bot.meeting_minutes.resolve_announce_channel(
                 self.bot,
                 interaction.guild,
@@ -1400,8 +1392,16 @@ class SlashCommands(commands.Cog):
                     "\n".join(
                         [
                             f"{interaction.user.mention} 議事録を開始しました。（VC: {voice_channel_name}）",
-                            "リアル文字起こし: ON",
-                            "▶️ リアル文字起こしの開始/停止",
+                            (
+                                "リアル文字起こし: 利用可能"
+                                if realtime_available
+                                else "リアル文字起こし: この録音方式では利用不可"
+                            ),
+                            (
+                                "▶️ リアル文字起こしの開始/停止"
+                                if realtime_available
+                                else "▶️ は無効"
+                            ),
                             "⏯️ 途中要約",
                             "⏹️ 停止して要約",
                             "🎶 停止して録音を再生",
@@ -1437,6 +1437,42 @@ class SlashCommands(commands.Cog):
                     f"[minutes_start] guild={interaction.guild.id} channel={interaction.channel_id} "
                     f"user={interaction.user.id} vc={voice_channel_name} provider={provider or 'default'} model={backend_model or 'default'}"
                 )
+
+    @app_commands.command(name=MINUTES_START_META.name, description=MINUTES_START_META.description)
+    @app_commands.checks.cooldown(1, 10.0)
+    @app_commands.describe(model="文字起こしモデル。Whisper 系または Moonshine を選択")
+    @app_commands.choices(model=_WHISPER_MODEL_CHOICES)
+    async def minutes_start(
+        self,
+        interaction: discord.Interaction,
+        model: app_commands.Choice[str] | None = None,
+    ):
+        selected_model = model.value if model else None
+        provider = None
+        backend_model = None
+        if selected_model:
+            if selected_model.startswith("moonshine/"):
+                provider = "moonshine"
+                backend_model = selected_model
+            elif selected_model.startswith("whisper/"):
+                provider = "whisper"
+                backend_model = selected_model.split("/", 1)[1]
+            else:
+                provider = "whisper"
+                backend_model = selected_model
+        await self._start_minutes_session(
+            interaction,
+            provider=provider,
+            backend_model=backend_model,
+        )
+
+    @app_commands.command(
+        name=MINUTES_START_GOOGLE_META.name,
+        description=MINUTES_START_GOOGLE_META.description,
+    )
+    @app_commands.checks.cooldown(1, 10.0)
+    async def minutes_start_google(self, interaction: discord.Interaction):
+        await self._start_minutes_session(interaction, provider="google")
 
     async def _toggle_minutes_realtime_mode(
         self,
@@ -1490,12 +1526,14 @@ class SlashCommands(commands.Cog):
         voice_channel_name = voice_channel.name if isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{voice_channel_id}"
         runtime = getattr(session, "runtime", None)
         voice_client = getattr(runtime, "voice_client", None)
+        recorder_process = getattr(runtime, "recorder_process", None)
         phrase_flush_tasks = getattr(runtime, "phrase_flush_tasks", {}) or {}
         phrase_queue = getattr(runtime, "phrase_queue", None)
         transcription_active = bool(getattr(runtime, "realtime_live_enabled", False)) or bool(phrase_flush_tasks) or (
             phrase_queue is not None and not phrase_queue.empty()
         )
-        recognition_state = "認識中" if voice_client is not None else "停止中"
+        recorder_active = recorder_process is not None and getattr(recorder_process, "returncode", None) is None
+        recognition_state = "認識中" if (voice_client is not None or recorder_active) else "停止中"
         transcription_state = "文字起こし中" if transcription_active else "待機中"
         return "\n".join(
             [

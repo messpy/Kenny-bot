@@ -40,6 +40,7 @@ DM でも同样的に応答できます。
 ### 議事録
 
 VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が自動でチャンネルに投稿されます。
+既定の文字起こしは Google Speech-to-Text で、`/minutes_start model:google` でも明示指定できます。Google が使えない場合は Whisper にフォールバックします。
 
 ### ローカル検証
 
@@ -70,6 +71,11 @@ VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が�
 2. `docker compose up -d mariadb` で DB を起動する
 3. 既存の SQLite データがある場合は `uv run bin/migrate_sqlite_to_mariadb.py` で移行する
 4. `systemctl --user restart kennybot.service` で bot を再起動する
+
+### systemd stack
+
+`VOICEVOX` と `MariaDB` を含めてまとめて起動したい場合は、共通の [systemd/README.md](/home/kennypi/work/systemd/README.md) にある `kennybot.target` を使います。
+この target は `shared-voicevox.service`、`kennybot-mariadb.service`、`kennybot.service` をまとめて扱います。
 
 ## Data Layout
 

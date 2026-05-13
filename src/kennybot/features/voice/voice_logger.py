@@ -102,62 +102,18 @@ class VoiceLogger(commands.Cog):
         )
 
     async def _handle_voice_join(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
-        """VC入室を記録してロギング"""
+        """VC入室時刻を記録"""
         if self._is_duplicate_voice_event("join", member, channel, guild):
             return
         # 入室時刻を記録
         self._voice_join_times[(member.id, guild.id)] = now_utc()
 
-        if not self._should_log_channel(guild, channel):
-            return
-
-        await send_event_log(
-            self.bot,
-            guild=guild,
-            level="success",
-            title="VC入室",
-            description=f"{member.mention} が {channel.name} に入室しました",
-            fields=[
-                ("ユーザー", f"{member.name} ({member.id})", False),
-                ("サーバー", f"{guild.name} ({guild.id})", False),
-                ("チャンネル", channel.name, False),
-            ],
-            channel_kind="voice",
-            send_discord=True,
-        )
-
     async def _handle_voice_leave(self, member: discord.Member, channel: discord.VoiceChannel, guild: discord.Guild):
-        """VC離脱を記録してロギング"""
+        """VC離脱時に入室時刻を破棄"""
         if self._is_duplicate_voice_event("leave", member, channel, guild):
             return
         # 入室時刻を取得
-        join_time = self._voice_join_times.pop((member.id, guild.id), None)
-        duration = self._calculate_duration(join_time) if join_time else "不明"
-
-        if not self._should_log_channel(guild, channel):
-            return
-
-        await send_event_log(
-            self.bot,
-            guild=guild,
-            level="warning",
-            title="VC離脱",
-            description=f"{member.mention} が {channel.name} から離脱しました",
-            fields=[
-                ("ユーザー", f"{member.name} ({member.id})", False),
-                ("サーバー", f"{guild.name} ({guild.id})", False),
-                ("チャンネル", channel.name, False),
-                ("通話時間", duration, False),
-            ],
-            local_fields=[
-                ("ユーザー", f"{member.name} ({member.id})", False),
-                ("サーバー", f"{guild.name} ({guild.id})", False),
-                ("チャンネル", channel.name, False),
-                ("通話時間", duration, False),
-            ],
-            channel_kind="voice",
-            send_discord=True,
-        )
+        self._voice_join_times.pop((member.id, guild.id), None)
 
     def _calculate_duration(self, join_time: Optional[datetime]) -> str:
         """入室時刻から通話時間を計算"""

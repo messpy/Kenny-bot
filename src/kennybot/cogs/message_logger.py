@@ -1458,11 +1458,15 @@ class MessageLogger(BaseCog):
         channel_id: int | None = None,
         user_id: int | None = None,
     ) -> tuple[str | None, list[str], list[str], list[str]]:
-        response = await asyncio.to_thread(
-            self.bot.ollama_client.chat,
-            model=model,
-            messages=messages,
-            stream=False,
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                self.bot.ollama_client.chat,
+                model=model,
+                messages=messages,
+                stream=False,
+                timeout_sec=self._cfg_ai_timeout(),
+            ),
+            timeout=self._cfg_ai_timeout(),
         )
         answer = ""
         if isinstance(response, dict):
@@ -1582,6 +1586,25 @@ class MessageLogger(BaseCog):
     def _cfg_ai_timeout(self) -> int:
         return get_app_config().ai_models().timeout_sec
 
+    def _is_ai_auth_error(self, err: Exception) -> bool:
+        checker = getattr(getattr(self.bot, "ollama_client", None), "_is_unauthorized_error", None)
+        if callable(checker):
+            try:
+                if checker(err):
+                    return True
+            except Exception:
+                logger.debug("AI auth error checker failed", exc_info=True)
+        text = f"{type(err).__name__}: {err}".lower()
+        return "unauthorized" in text or "status code: 401" in text or "status_code=401" in text
+
+    def _ai_auth_error_message(self, *, mention: str = "") -> str:
+        prefix = f"{mention}\n" if mention else ""
+        return (
+            f"{prefix}Ollama Cloud の認証に失敗しています。"
+            "`gpt-oss:120b-cloud` を使うには、実行ユーザーで `ollama signin` するか "
+            "`OLLAMA_API_KEY` を設定してください。"
+        )
+
     def _cfg_nicknames(self) -> dict[int, str]:
         raw = self._cfg_map("user_nicknames")
         out: dict[int, str] = {}
@@ -1622,12 +1645,18 @@ class MessageLogger(BaseCog):
         return out
 
     def _is_capability_query(self, text: str) -> bool:
-        t = (text or "").lower()
+        t = normalize_keyword_match_text(text or "")
         keys = (
             "どういう機能",
             "何ができる",
+            "なにができる",
+            "何できる",
+            "なにできる",
             "できること",
             "使い方",
+            "機能について",
+            "機能一覧",
+            "どんな機能",
             "機能を教えて",
             "きのうを教えて",
             "君の機能",
@@ -3044,6 +3073,8 @@ class MessageLogger(BaseCog):
 
         references: list[str] = []
         reference_details: list[str] = []
+        tool_queries: list[str] = []
+        tool_references: list[str] = []
         history_context, planned_refs, web_queries, planned_details = await self._resolve_chat_context(
             msg=msg,
             user_display=user_name or str(msg.author.id),
@@ -3199,6 +3230,11 @@ class MessageLogger(BaseCog):
                         mention=msg.author.mention,
                         model=model_name,
                     )
+                )
+            elif self._is_ai_auth_error(e):
+                await msg.channel.send(
+                    self._ai_auth_error_message(),
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
                 await msg.channel.send(
@@ -3386,6 +3422,63 @@ class MessageLogger(BaseCog):
             "/vc_control: VCミュート操作パネルを作成\n"
             "/group_match: リアクション参加で2人組/3人組を自動作成\n"
         )
+
+    def _build_capability_fallback_answer(self) -> str:
+        """Build a deterministic help answer from confirmed command metadata."""
+        command_lines: list[str] = []
+        for category in COMMAND_CATEGORY_ORDER:
+            items = [
+                meta
+                for meta in SLASH_COMMANDS.values()
+                if meta.category == category
+            ]
+            if not items:
+                continue
+            short_items = "、".join(f"`/{meta.name}`" for meta in items[:8])
+            if len(items) > 8:
+                short_items += " など"
+            command_lines.append(f"- {category}: {short_items}")
+
+        lines = [
+            "KennyBot は、メンション・返信・DMでAI会話できます。詳しい一覧は `/help` で確認できます。",
+            "主なスラッシュコマンドは次の通りです。",
+            *command_lines,
+        ]
+        return "\n".join(line for line in lines if line).strip()
+
+    def _is_generic_capability_answer(self, answer: str) -> bool:
+        """Detect generic self-introductions that ignored the injected help context."""
+        normalized = normalize_keyword_match_text(answer or "")
+        if not normalized:
+            return True
+        generic_markers = (
+            "私はkennybotです",
+            "わたしはkennybotです",
+            "私はkennybot",
+            "私はdiscord botとして",
+            "わたしはdiscord botとして",
+            "私の主な機能",
+            "わたしの主な機能",
+            "主な機能は",
+            "皆さんとの対話",
+            "対話を通じて",
+            "discordの会話をサポート",
+            "discord botとして",
+            "質問に答えたり",
+            "質問に答えたりすることができます",
+            "情報を提供",
+            "自然な日本語で会話",
+            "特定の機能について",
+            "具体的に質問",
+            "何か知りたいことがあれば",
+            "何かお手伝いできることがあれば",
+        )
+        has_generic_marker = any(marker in normalized for marker in generic_markers)
+        mentions_help_surface = any(
+            token in answer
+            for token in ("/help", "/tts_join", "/minutes_start", "/summarize_recent")
+        )
+        return has_generic_marker and not mentions_help_surface
 
     def _get_runtime_model_info(self) -> str:
         """Get the user-facing current chat model without exposing internal settings."""
@@ -3924,6 +4017,8 @@ class MessageLogger(BaseCog):
                 strip_ansi_and_ctrl((answer or "").strip())
                 or "不明です。"
             )
+            if self._is_generic_capability_answer(answer):
+                answer = self._build_capability_fallback_answer()
             prefix = f"{mention}\n" if mention else ""
             await self._send_chunked_text(channel, answer, prefix=prefix)
             if source_msg is not None:
@@ -3964,9 +4059,8 @@ class MessageLogger(BaseCog):
                         )
                     )
             else:
-                await channel.send(
-                    f"{prefix}機能説明の生成に失敗しました。\n```{str(e)[:180]}```"
-                )
+                fallback_answer = self._build_capability_fallback_answer()
+                await self._send_chunked_text(channel, fallback_answer, prefix=prefix)
             if source_msg is not None:
                 await self._log_bot_activity_event(
                     source_msg,
@@ -4210,10 +4304,13 @@ class MessageLogger(BaseCog):
         # =========================
         text = normalize_user_text(content)
         if not text:
-            if should_treat_as_mention:
-                await msg.channel.send(
-                    f"{msg.author.mention}\nはい、どうしましたか？",
-                    allowed_mentions=discord.AllowedMentions.none(),
+            if mentioned_bot or is_reply_to_bot:
+                await self._answer_capability_query(
+                    msg.channel,
+                    "機能一覧",
+                    mention=msg.author.mention,
+                    source_msg=msg,
+                    channel_id=msg.channel.id,
                 )
                 self._arm_recent_mention_window(msg)
                 await self.bot.process_commands(msg)
@@ -4581,6 +4678,13 @@ class MessageLogger(BaseCog):
                         model=model_name,
                     )
                 )
+                return
+            if self._is_ai_auth_error(e):
+                await msg.channel.send(
+                    self._ai_auth_error_message(mention=msg.author.mention),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                self._arm_recent_mention_window(msg)
                 return
             try:
                 await msg.channel.send(
