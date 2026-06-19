@@ -16,6 +16,7 @@ class SpamPolicy:
     ai_per_seconds: float = 20.0
     dup_window_seconds: float = 12.0
     warn_cooldown_seconds: float = 20.0
+    everyone_cross_channel_window_seconds: float = 1.0
 
 
 @dataclass
@@ -40,6 +41,22 @@ class UserViolationLevel:
         self.last_reset = time.time()
 
 
+@dataclass(frozen=True)
+class EveryoneMentionEvent:
+    guild_id: int
+    user_id: int
+    channel_id: int
+    message_id: int
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class EveryoneCrossChannelViolation:
+    guild_id: int
+    user_id: int
+    events: tuple[EveryoneMentionEvent, ...]
+
+
 class SpamGuard:
     """Discord に依存しないスパム判定。"""
 
@@ -50,6 +67,7 @@ class SpamGuard:
         self._last_text: dict[int, tuple[str, float]] = {}
         self._last_warn: dict[int, float] = {}
         self._violations: dict[tuple[int, int], UserViolationLevel] = {}
+        self._everyone_mentions: dict[tuple[int, int], Deque[EveryoneMentionEvent]] = {}
 
     def _allow(
         self,
@@ -89,6 +107,47 @@ class SpamGuard:
 
     def allow_ai(self, user_id: int) -> bool:
         return self._allow(self._ai_times, user_id, self.p.max_ai_calls, self.p.ai_per_seconds)
+
+    def record_everyone_mention(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        message_id: int,
+        now: float | None = None,
+    ) -> EveryoneCrossChannelViolation | None:
+        timestamp = time.time() if now is None else now
+        window = self.p.everyone_cross_channel_window_seconds
+        key = (guild_id, user_id)
+        dq = self._everyone_mentions.get(key)
+        if dq is None:
+            dq = deque()
+            self._everyone_mentions[key] = dq
+
+        while dq and (timestamp - dq[0].timestamp) > window:
+            dq.popleft()
+
+        event = EveryoneMentionEvent(
+            guild_id=guild_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            message_id=message_id,
+            timestamp=timestamp,
+        )
+        dq.append(event)
+
+        channels = {item.channel_id for item in dq}
+        if len(channels) < 2:
+            return None
+
+        events = tuple(dq)
+        dq.clear()
+        return EveryoneCrossChannelViolation(
+            guild_id=guild_id,
+            user_id=user_id,
+            events=events,
+        )
 
     def ai_retry_after(self, user_id: int) -> float:
         now = time.time()

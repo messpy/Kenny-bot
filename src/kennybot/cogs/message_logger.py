@@ -62,7 +62,7 @@ from src.kennybot.utils.tool_planner import (
 )
 from src.kennybot.utils.time import JST, now_jst
 from src.kennybot.features.moderation import ModActions
-from src.kennybot.features.spam import SpamGuard
+from src.kennybot.features.spam import EveryoneCrossChannelViolation, SpamGuard
 
 
 logger = logging.getLogger(__name__)
@@ -3272,6 +3272,146 @@ class MessageLogger(BaseCog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
+    @staticmethod
+    def _is_everyone_mention(msg: discord.Message, content: str) -> bool:
+        return bool(
+            getattr(msg, "mention_everyone", False)
+            and "@everyone" in content.lower()
+        )
+
+    async def _delete_everyone_violation_messages(
+        self,
+        msg: discord.Message,
+        violation: EveryoneCrossChannelViolation,
+    ) -> int:
+        deleted = 0
+        seen: set[tuple[int, int]] = set()
+        channel_cache: dict[int, object] = {}
+        for event in violation.events:
+            key = (event.channel_id, event.message_id)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if event.message_id == msg.id:
+                channel_cache[event.channel_id] = msg.channel
+                if await ModActions.delete_message(msg, "クロスチャンネル @everyone"):
+                    deleted += 1
+                continue
+
+            channel = channel_cache.get(event.channel_id)
+            if channel is None:
+                channel = self.bot.get_channel(event.channel_id)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(event.channel_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to fetch channel for @everyone cleanup: channel_id=%s",
+                        event.channel_id,
+                    )
+                    continue
+            channel_cache[event.channel_id] = channel
+
+            get_partial_message = getattr(channel, "get_partial_message", None)
+            if get_partial_message is None:
+                continue
+            try:
+                await get_partial_message(event.message_id).delete()
+                deleted += 1
+            except discord.NotFound:
+                pass
+            except Exception:
+                logger.exception(
+                    "Failed to delete @everyone violation message: channel_id=%s message_id=%s",
+                    event.channel_id,
+                    event.message_id,
+                )
+
+        after = discord.utils.utcnow() - timedelta(seconds=60)
+        for channel_id, channel in channel_cache.items():
+            history = getattr(channel, "history", None)
+            if history is None:
+                continue
+            try:
+                async for recent in history(limit=100, after=after):
+                    recent_author_id = getattr(
+                        getattr(recent, "author", None),
+                        "id",
+                        None,
+                    )
+                    if recent_author_id != violation.user_id:
+                        continue
+                    key = (channel_id, recent.id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if await ModActions.delete_message(
+                        recent,
+                        "クロスチャンネル @everyone の直近投稿",
+                    ):
+                        deleted += 1
+            except discord.Forbidden:
+                logger.warning(
+                    "Missing permissions to clean @everyone spam history: channel_id=%s",
+                    channel_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to clean @everyone spam history: channel_id=%s",
+                    channel_id,
+                )
+        return deleted
+
+    async def _handle_everyone_cross_channel_violation(
+        self,
+        msg: discord.Message,
+        violation: EveryoneCrossChannelViolation,
+    ) -> None:
+        deleted_count = await self._delete_everyone_violation_messages(msg, violation)
+
+        member = msg.author if isinstance(msg.author, discord.Member) else None
+        if member is None:
+            try:
+                member = await msg.guild.fetch_member(msg.author.id)
+            except Exception:
+                logger.exception(
+                    "Failed to fetch member for @everyone kick: guild_id=%s user_id=%s",
+                    msg.guild.id,
+                    msg.author.id,
+                )
+        action_result = None
+        if member:
+            action_result = await ModActions.execute_level(
+                self.bot,
+                msg.guild,
+                member,
+                "kick",
+            )
+
+        channels = ", ".join(f"<#{event.channel_id}>" for event in violation.events)
+        result_text = "未実行"
+        if action_result is not None:
+            result_text = (
+                "成功"
+                if action_result.success
+                else f"失敗: {action_result.detail[:160]}"
+            )
+
+        await send_event_log(
+            self.bot,
+            guild=msg.guild,
+            level="error",
+            title="🚨 クロスチャンネル @everyone 検出",
+            description=f"{msg.author.mention} が1秒以内に複数チャンネルで @everyone を投稿しました。",
+            fields=[
+                ("ユーザー", f"{msg.author} ({msg.author.id})", False),
+                ("対象チャンネル", channels[:1000] or "-", False),
+                ("削除", f"{deleted_count} 件", True),
+                ("処罰", f"KICK: {result_text}", True),
+            ],
+        )
+
     def _read_readme_excerpt(self, max_chars: int = 6000) -> str:
         try:
             root = getattr(self, "root", None) or ROOT_DIR
@@ -4125,6 +4265,18 @@ class MessageLogger(BaseCog):
 
         # 全メッセージ共通のスパム検出
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
+        if not spam_guard_disabled and self._is_everyone_mention(msg, content):
+            violation = guard.record_everyone_mention(
+                guild_id=msg.guild.id,
+                user_id=msg.author.id,
+                channel_id=msg.channel.id,
+                message_id=msg.id,
+            )
+            if violation is not None:
+                await self._handle_everyone_cross_channel_violation(msg, violation)
+                await self.bot.process_commands(msg)
+                return
+
         if not spam_guard_disabled and not guard.allow_message(msg.author.id, content):
             violation = guard.add_violation(msg.author.id, msg.guild.id)
             await self._handle_spam_violation(
