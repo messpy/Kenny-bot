@@ -1,4 +1,4 @@
 [submodule "vendor/voiceai"]
-	path = vendor/voiceai
+	path = vendor/conversation_core
 	url = /mnt/ssd/gittea/git/repositories/every_holiday/shared_voice_ai.git
 	branch = main

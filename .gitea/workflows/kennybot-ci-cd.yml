@@ -1,0 +1,80 @@
+name: Kennybot CI/CD
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - dev
+  workflow_dispatch:
+
+env:
+  PYTHONUNBUFFERED: "1"
+  DEPLOY_HOST: "192.168.3.40"
+  DEPLOY_USER: "kennypi"
+  DEPLOY_PORT: "22"
+  DEPLOY_PATH: "/home/kennypi/deploy/Kenny-bot"
+  DEPLOY_BRANCH: "dev"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      volumes:
+        - /mnt/ssd/gittea/git/repositories/every_holiday:/mnt/ssd/gittea/git/repositories/every_holiday:ro
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip uv
+          uv --version
+
+      - name: Sync environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+
+      - name: Run test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -m unittest discover -s tests -p 'test_*.py' -q
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "set -euo pipefail; \
+             cd ${DEPLOY_PATH}; \
+             GIT_BRANCH=${DEPLOY_BRANCH} bash bin/deploy_update.sh"
