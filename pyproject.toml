@@ -7,11 +7,17 @@ requires-python = ">=3.13"
 dependencies = [
     "ddgs>=9.10.0",
     "discord.py>=2.7.1",
-    "discord-ext-voice-recv>=0.5.2a179",
+    "discord-ext-voice-recv @ git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git@ddd28601fe556f585b869e215f29c8236b95f88f",
     "dotenv>=0.9.9",
     "faster-whisper>=1.1.1",
     "google-auth>=2.41.1",
     "ollama>=0.6.1",
     "PyMySQL>=1.1.1",
+    "localagent>=0.1.0",
     "requests>=2.32.5",
+    "vrchatapi>=1.20.7",
+    "speechrecognition>=3.16.1",
 ]
+
+[tool.uv.sources]
+localagent = { path = "vendor/localagent" }
