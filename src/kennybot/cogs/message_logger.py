@@ -119,6 +119,7 @@ class MessageLogger(BaseCog):
         # AI応答のチャンネル単位クールダウン
         self._ai_channel_last: dict[int, float] = {}
         self._recent_image_contexts: dict[tuple[int, int, int], tuple[float, str]] = {}
+        self._topic_relation_by_message_id: dict[int, str] = {}
         # (guild_id, channel_id, user_id) -> expires_at (monotonic seconds)
         self._recent_mention_windows: dict[tuple[int, int, int], float] = {}
         self._spam_guard_disabled_guilds: set[int] = set()
@@ -486,6 +487,113 @@ class MessageLogger(BaseCog):
                 continue
         return None
 
+    def _explicit_topic_relation(self, text: str, *, is_reply: bool = False) -> str | None:
+        normalized = normalize_keyword_match_text(text or "")
+        if not normalized:
+            return None
+        new_topic_markers = (
+            "ところで",
+            "話変わる",
+            "話を変える",
+            "別件",
+            "関係ないけど",
+            "それはさておき",
+            "それとは別",
+            "ちなみに",
+        )
+        if any(marker in normalized for marker in new_topic_markers):
+            return "new_topic"
+        continuation_markers = (
+            "それ",
+            "これ",
+            "あれ",
+            "さっき",
+            "さきほど",
+            "先ほど",
+            "直前",
+            "続き",
+            "この画像",
+            "その画像",
+            "この人",
+            "この方",
+            "この件",
+            "前の",
+        )
+        if is_reply or any(marker in normalized for marker in continuation_markers):
+            return "continuation"
+        return None
+
+    async def _classify_topic_relation(
+        self,
+        *,
+        text: str,
+        recent_history: str,
+        is_reply: bool = False,
+    ) -> str:
+        explicit = self._explicit_topic_relation(text, is_reply=is_reply)
+        if explicit is not None:
+            return explicit
+        if not (recent_history or "").strip():
+            return "new_topic"
+
+        prompt = (
+            "あなたはDiscord botの内部分類器です。\n"
+            "最新メッセージが直近会話の続きか、別の新しい話題かを判定してください。\n"
+            "出力はJSONのみです。説明、Markdown、コードフェンスは禁止です。\n"
+            "{\"relation\":\"continuation\" または \"new_topic\", \"confidence\":0.0〜1.0}\n\n"
+            "判定基準:\n"
+            "- 代名詞、前の回答への質問、画像/添付への参照、返信メッセージなら continuation\n"
+            "- 明示的な話題転換、独立した質問、前文脈なしで答えられる質問なら new_topic\n"
+            "- 迷う場合は new_topic を選ぶ\n\n"
+            f"[直近会話]\n{recent_history[:1600] or 'なし'}\n\n"
+            f"[最新メッセージ]\n{text[:800]}"
+        )
+        model_name = self._current_chat_model_name()
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.bot.ollama_client.chat_simple,
+                    model=model_name,
+                    prompt=prompt,
+                    stream=False,
+                    format="json",
+                ),
+                timeout=min(8, max(4, self._cfg_ai_timeout())),
+            )
+            payload = self._parse_json_payload(raw or "")
+            if isinstance(payload, dict):
+                relation = str(payload.get("relation") or "").strip().lower()
+                confidence = float(payload.get("confidence") or 0)
+                if relation in {"continuation", "new_topic"} and confidence >= 0.55:
+                    return relation
+        except Exception:
+            logger.debug("Failed to classify topic relation", exc_info=True)
+        return "new_topic"
+
+    def _filter_plan_for_topic_relation(
+        self,
+        plan: list[dict[str, object]],
+        *,
+        relation: str,
+        text: str,
+    ) -> list[dict[str, object]]:
+        if relation != "new_topic":
+            return plan
+        blocked_sources = {
+            "recent_turns",
+            "reply_chain",
+            "channel_history",
+            "semantic_history",
+        }
+        if not self._is_local_activity_query(text):
+            blocked_sources.update({"recent_user_history", "member_history"})
+        filtered = [
+            item
+            for item in plan
+            if str(item.get("source") or "").strip().lower() not in blocked_sources
+        ]
+        return filtered
+
     def _normalize_retrieval_plan(self, payload: object | None) -> list[dict[str, object]]:
         if payload is None:
             return []
@@ -758,6 +866,12 @@ class MessageLogger(BaseCog):
         target_candidates = self._context_target_candidates(msg)
         recent_messages = await fetcher.fetch_recent(msg.channel, max(2, min(channel_lines, 8)))
         recent_history = format_messages_for_context(recent_messages)
+        topic_relation = await self._classify_topic_relation(
+            text=text,
+            recent_history=recent_history,
+            is_reply=bool(msg.reference),
+        )
+        self._topic_relation_by_message_id[int(msg.id)] = topic_relation
         channel_profile_block = self._build_channel_profile_block(
             channel=msg.channel,
             channel_id=channel_id,
@@ -799,14 +913,23 @@ class MessageLogger(BaseCog):
             )
             plan = self._normalize_retrieval_plan(self._parse_json_payload(raw or ""))
             if plan:
-                return plan
+                return self._filter_plan_for_topic_relation(
+                    plan,
+                    relation=topic_relation,
+                    text=text,
+                )
         except Exception:
             logger.exception("Failed to build retrieval plan via AI")
-        return self._fallback_retrieval_plan(
+        fallback_plan = self._fallback_retrieval_plan(
             text=text,
             user_lines=user_lines,
             channel_lines=channel_lines,
             has_profile=bool(channel_profile_available),
+        )
+        return self._filter_plan_for_topic_relation(
+            fallback_plan,
+            relation=topic_relation,
+            text=text,
         )
 
     async def _build_current_info_context(
@@ -1534,7 +1657,11 @@ class MessageLogger(BaseCog):
                 if source not in used_sources:
                     used_sources.append(source)
 
-        if not blocks:
+        topic_relation = self._topic_relation_by_message_id.pop(
+            int(getattr(msg, "id", 0) or 0),
+            "continuation",
+        )
+        if not blocks and topic_relation != "new_topic":
             query_embedding = await self._embed_text(text)
             if query_embedding:
                 rows = await asyncio.to_thread(
