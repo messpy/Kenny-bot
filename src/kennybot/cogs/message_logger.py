@@ -118,6 +118,7 @@ class MessageLogger(BaseCog):
         self._kenny_chat_reverse: dict[int, int] = {}
         # AI応答のチャンネル単位クールダウン
         self._ai_channel_last: dict[int, float] = {}
+        self._recent_image_contexts: dict[tuple[int, int, int], tuple[float, str]] = {}
         # (guild_id, channel_id, user_id) -> expires_at (monotonic seconds)
         self._recent_mention_windows: dict[tuple[int, int, int], float] = {}
         self._spam_guard_disabled_guilds: set[int] = set()
@@ -219,6 +220,39 @@ class MessageLogger(BaseCog):
             except GeminiVisionError:
                 logger.exception("Gemini image analysis failed")
         return "画像解析に失敗しました。少し時間を置いてもう一度送ってください。"
+
+    def _image_context_key(self, msg: discord.Message) -> tuple[int, int, int]:
+        guild_id = int(getattr(getattr(msg, "guild", None), "id", 0) or 0)
+        channel_id = int(getattr(getattr(msg, "channel", None), "id", 0) or 0)
+        author_id = int(getattr(getattr(msg, "author", None), "id", 0) or 0)
+        return guild_id, channel_id, author_id
+
+    def _remember_image_context(self, msg: discord.Message, text: str) -> None:
+        cleaned = strip_ansi_and_ctrl(str(text or "")).strip()
+        if not cleaned:
+            return
+        expires_at = time.monotonic() + 30 * 60
+        self._recent_image_contexts[self._image_context_key(msg)] = (
+            expires_at,
+            cleaned[:1200],
+        )
+
+    def _recent_image_context_block(self, msg: discord.Message) -> str:
+        key = self._image_context_key(msg)
+        item = self._recent_image_contexts.get(key)
+        if item is None:
+            return ""
+        expires_at, text = item
+        if expires_at <= time.monotonic():
+            self._recent_image_contexts.pop(key, None)
+            return ""
+        return (
+            "[直前の画像解析結果]\n"
+            "このユーザーが直前に送った画像の解析結果です。"
+            "以後の質問で「この画像」「この人」「これは」などと参照されたら、この内容を使ってください。"
+            "この情報がある場合は、画像が見えない、再送してほしい、とは言わないでください。\n"
+            f"{text}"
+        )
 
     def _claim_message_once(self, message_id: int) -> bool:
         claim_store = getattr(self, "_message_claims", None)
@@ -3141,7 +3175,10 @@ class MessageLogger(BaseCog):
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()
-        combined_history_context = history_context
+        recent_image_context = self._recent_image_context_block(msg)
+        combined_history_context = "\n\n".join(
+            part for part in (history_context, recent_image_context) if part.strip()
+        )
         prompt = PROMPT_TEMPLATE.format(
             user_display=user_name or str(msg.author.id),
             history_context=combined_history_context,
@@ -4673,7 +4710,10 @@ class MessageLogger(BaseCog):
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()
-        combined_history_context = history_context
+        recent_image_context = "" if image_attachments else self._recent_image_context_block(msg)
+        combined_history_context = "\n\n".join(
+            part for part in (history_context, recent_image_context) if part.strip()
+        )
         tool_queries: list[str] = []
         tool_references: list[str] = []
         prompt = PROMPT_TEMPLATE.format(
@@ -4753,6 +4793,8 @@ class MessageLogger(BaseCog):
             if not answer:
                 answer = "不明です。"
             answer = self._sanitize_user_visible_answer(answer)
+            if image_payloads:
+                self._remember_image_context(msg, answer)
 
             # 応答文字数制限（メンション部分を考慮：メンション約25文字 + 改行）
             max_len = self._cfg_int("chat.max_response_length", 1800)
