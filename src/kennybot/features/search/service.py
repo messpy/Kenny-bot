@@ -10,7 +10,7 @@ from typing import List, Optional, Dict
 
 from ddgs import DDGS  # uv add ddgs
 from ddgs.exceptions import TimeoutException, DDGSException
-from src.kennybot.utils.text import normalize_keyword_match_text
+from src.kennybot.utils.text import normalize_keyword_match_text, strip_ansi_and_ctrl
 from src.kennybot.utils.time import JST, now_jst
 
 logger = logging.getLogger(__name__)
@@ -37,11 +37,12 @@ class SearchConfig:
     safesearch: str = "moderate"
     news_only: bool = True      # True: news のみ / False: news + text
     # 旧実装互換用（DummySearcher / 古い main.py からも呼ばれる）
-    prefer_news: bool = True
+    prefer_news: bool | None = None
 
     def __post_init__(self) -> None:
-        # prefer_news を優先的に news_only に反映（後方互換用）
-        self.news_only = bool(self.prefer_news)
+        # prefer_news が明示された古い呼び出しだけ news_only に反映する。
+        if self.prefer_news is not None:
+            self.news_only = bool(self.prefer_news)
 
 
 @dataclass
@@ -142,7 +143,11 @@ class DuckDuckGoSearch:
                     logger.info("[search] ddgs.news no results: %r", e)
                 else:
                     logger.warning("[search] ddgs.news error: %r", e)
-                    raise
+                    if use_news_only:
+                        logger.info("[search] falling back to ddgs.text after news error")
+                        use_news_only = False
+                    else:
+                        raise
             except Exception as e:
                 logger.warning("[search] ddgs.news unexpected error: %r", e)
 
