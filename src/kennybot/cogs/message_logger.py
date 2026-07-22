@@ -335,6 +335,21 @@ class MessageLogger(BaseCog):
             return ""
         return "\n\n".join(parts) + "\n\n"
 
+    def _build_direct_web_search_answer(self, body: str) -> str:
+        lines: list[str] = ["検索結果で確認できた範囲です。"]
+        for raw_line in (body or "").splitlines():
+            line = strip_ansi_and_ctrl(raw_line).strip()
+            if not line:
+                continue
+            if line in {"検索結果", "全体要約", "回答", "補足"}:
+                continue
+            if line.startswith("注意:"):
+                continue
+            lines.append(line)
+        if len(lines) == 1:
+            return ""
+        return "\n".join(lines)
+
     def _extract_urls(self, text: str) -> list[str]:
         seen: set[str] = set()
         urls: list[str] = []
@@ -459,6 +474,15 @@ class MessageLogger(BaseCog):
             "買える",
             "店舗",
             "店頭",
+            "本当",
+            "ほんとう",
+            "嘘",
+            "うそ",
+            "正しい",
+            "事実",
+            "ファクトチェック",
+            "出典",
+            "ソース",
         )
         return any(keyword in normalized for keyword in keywords)
 
@@ -1264,7 +1288,7 @@ class MessageLogger(BaseCog):
         msg: discord.Message,
         user_display: str,
         text: str,
-    ) -> tuple[str, list[str], list[str], list[str]]:
+    ) -> tuple[str, list[str], list[str], list[str], str]:
         return await self._build_planned_context(
             msg=msg,
             user_display=user_display,
@@ -1458,6 +1482,7 @@ class MessageLogger(BaseCog):
         references: list[str] = []
         reference_details: list[str] = []
         web_queries: list[str] = []
+        direct_web_answer = ""
         used_sources: list[str] = []
         context_trace: dict[str, object] = {
             "mode": "planned_context",
@@ -1645,6 +1670,8 @@ class MessageLogger(BaseCog):
                 references.extend(web_refs)
                 title = "検索結果の要約"
                 web_queries.extend([q for q in search_queries if q])
+                if body and not direct_web_answer:
+                    direct_web_answer = self._build_direct_web_search_answer(body)
                 _append_reference_detail(
                     "web_search",
                     f"query={query or text or ''}",
@@ -1722,6 +1749,7 @@ class MessageLogger(BaseCog):
             self._merge_unique_strings(references),
             self._merge_unique_strings(web_queries),
             self._merge_unique_strings(reference_details),
+            direct_web_answer,
         )
 
     async def _run_ollama_chat_with_tools(
@@ -2854,7 +2882,7 @@ class MessageLogger(BaseCog):
         msg: discord.Message,
         user_display: str,
         text: str,
-    ) -> tuple[str, list[str], list[str], list[str]]:
+    ) -> tuple[str, list[str], list[str], list[str], str]:
         guild_id = msg.guild.id if msg.guild else 0
         channel_id = msg.channel.id
         guild_name = msg.guild.name if msg.guild else "DM"
@@ -2897,6 +2925,7 @@ class MessageLogger(BaseCog):
                 self._merge_unique_strings(references),
                 [],
                 self._merge_unique_strings(details),
+                "",
             )
 
         fetcher = MessageFetcher.get_instance()
@@ -2956,10 +2985,19 @@ class MessageLogger(BaseCog):
         if self._is_channel_profile_query(text):
             plan["rag"] = {"enabled": False, "query": None, "limit": 0}
             plan["web_search"] = {"enabled": False, "query": None, "limit": 0}
+        elif self._needs_web_search_for_accuracy(text):
+            web_plan = plan.get("web_search") if isinstance(plan.get("web_search"), dict) else {}
+            if not bool(web_plan.get("enabled")):
+                plan["web_search"] = {
+                    "enabled": True,
+                    "query": text[:300],
+                    "limit": max(1, min(self._cfg_int("chat.web_search_limit", 3), 8)),
+                }
 
         blocks: list[tuple[str, str]] = []
         references: list[str] = []
         web_queries: list[str] = []
+        direct_web_answer = ""
         details: list[str] = [
             f"planner_response_mode={plan.get('response_mode', 'normal')}",
         ]
@@ -3019,6 +3057,7 @@ class MessageLogger(BaseCog):
                     references.extend(self._collect_reference_labels(body))
                     web_queries.extend([q for q in search_queries if q])
                     references.append("source:web_search")
+                    direct_web_answer = self._build_direct_web_search_answer(body)
                 else:
                     details.append("web_search_result=empty")
             else:
@@ -3045,6 +3084,7 @@ class MessageLogger(BaseCog):
             self._merge_unique_strings(references),
             self._merge_unique_strings(web_queries),
             self._merge_unique_strings(details),
+            direct_web_answer,
         )
 
     async def _answer_channel_profile_query(
@@ -3321,13 +3361,49 @@ class MessageLogger(BaseCog):
 
         references: list[str] = []
         reference_details: list[str] = []
-        history_context, planned_refs, web_queries, planned_details = await self._resolve_chat_context(
+        history_context, planned_refs, web_queries, planned_details, direct_web_answer = await self._resolve_chat_context(
             msg=msg,
             user_display=user_name or str(msg.author.id),
             text=text,
         )
         references.extend(planned_refs)
         reference_details.extend(planned_details)
+        if direct_web_answer:
+            final_message = f"{msg.author.mention}\n{direct_web_answer}"
+            if len(final_message) > 2000:
+                await self._send_chunked_text(
+                    msg.channel,
+                    direct_web_answer,
+                    prefix=f"{msg.author.mention}\n",
+                )
+            else:
+                await msg.channel.send(
+                    final_message,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            log_ai_output(
+                msg.author,
+                response=direct_web_answer,
+                model="web_search",
+                msg=msg,
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries,
+            )
+            await self._log_bot_activity_event(
+                msg,
+                kind="DM",
+                processing="Web検索",
+                input_text=text,
+                output_text=direct_web_answer,
+                model_name="web_search",
+                title="Bot 管理ログ",
+                description="DM の Web 検索応答を送信しました。",
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries,
+            )
+            return
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()
@@ -4860,13 +4936,51 @@ class MessageLogger(BaseCog):
         today_local = now_jst()
         absolute_date = today_local.strftime("%Y-%m-%d")
         absolute_datetime = today_local.strftime("%Y-%m-%d %H:%M:%S JST")
-        history_context, planned_refs, web_queries, planned_details = await self._resolve_chat_context(
+        history_context, planned_refs, web_queries, planned_details, direct_web_answer = await self._resolve_chat_context(
             msg=msg,
             user_display=user_display,
             text=text,
         )
         references.extend(planned_refs)
         reference_details.extend(planned_details)
+        if direct_web_answer and not image_attachments:
+            final_message = f"{msg.author.mention}\n{direct_web_answer}"
+            if len(final_message) > 2000:
+                await self._send_chunked_text(
+                    msg.channel,
+                    direct_web_answer,
+                    prefix=f"{msg.author.mention}\n",
+                )
+            else:
+                await msg.channel.send(
+                    final_message,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            log_ai_output(
+                msg.author,
+                response=direct_web_answer,
+                model="web_search",
+                msg=msg,
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries,
+            )
+            await self._log_bot_activity_event(
+                msg,
+                kind="メンション",
+                processing="Web検索",
+                input_text=text,
+                output_text=direct_web_answer,
+                model_name="web_search",
+                title="Bot 管理ログ",
+                description="Web 検索応答を送信しました。",
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries,
+            )
+            self._arm_recent_mention_window(msg)
+            await self.bot.process_commands(msg)
+            return
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()

@@ -1479,13 +1479,15 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
         print(f"text={text!r}", flush=True)
         print(f"mentions={[m.id for m in mentions]!r}", flush=True)
         print("=== debug trace: direct prompt flow ===", flush=True)
-        history_context, planned_refs, web_queries, planned_details = await cog._resolve_chat_context(
+        history_context, planned_refs, web_queries, planned_details, direct_web_answer = await cog._resolve_chat_context(
             msg=msg,
             user_display=user_display,
             text=text,
         )
         print("=== retrieval context ===", flush=True)
         print(history_context or "<empty>", flush=True)
+        if direct_web_answer:
+            print("\n[direct_web_answer]\n" + direct_web_answer, flush=True)
         print("=== planned refs ===", flush=True)
         print(json.dumps(planned_refs, ensure_ascii=False, indent=2), flush=True)
         print("=== planned details ===", flush=True)
@@ -1597,13 +1599,15 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
         emit("=== user ===")
         emit(f"【ユーザー】<@{author.id}> {text}")
         emit("=== debug trace: direct prompt flow ===")
-        history_context, planned_refs, web_queries, planned_details = await cog._resolve_chat_context(
+        history_context, planned_refs, web_queries, planned_details, direct_web_answer = await cog._resolve_chat_context(
             msg=msg,
             user_display=user_display,
             text=text,
         )
         emit("=== retrieval context ===")
         emit(history_context or "<empty>")
+        if direct_web_answer:
+            emit("\n[direct_web_answer]\n" + direct_web_answer)
         emit_json("=== planned refs ===", planned_refs)
         emit_json("=== planned details ===", planned_details)
         trace_lines.extend(_context_trace_lines(getattr(cog, "_last_context_trace", {})))
