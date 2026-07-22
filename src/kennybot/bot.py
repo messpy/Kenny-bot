@@ -15,6 +15,8 @@ from src.kennybot.utils.app_settings import MAX_RESPONSE_LENGTH
 from src.kennybot.ai.runner import OllamaRunner, OllamaConfig
 from src.kennybot.features.chat import ChatMemory, ChatService, ChatConfig
 from src.kennybot.ai.client import OllamaClientService, OllamaClientConfig, create_ollama_client
+from src.kennybot.ai.gemini_vision import GeminiVisionClient
+from src.kennybot.ai.openai_vision import OpenAIVisionClient
 from src.kennybot.features.games import GameCommands
 from src.kennybot.features.moderation import ModPanel
 from src.kennybot.features.search import AISearchService, DuckDuckGoSearch, SearchConfig, SummaryConfig, WebSummarizer
@@ -142,6 +144,30 @@ class MyBot(commands.Bot):
         else:
             logger.info("Using local Ollama (http://localhost:11434)")
             self.ollama_client = create_ollama_client()
+
+        openai_api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        self.openai_vision_client = None
+        if openai_api_key:
+            self.openai_vision_client = OpenAIVisionClient(
+                api_key=openai_api_key,
+                model=os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                timeout_seconds=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120")),
+            )
+        gemini_api_key = (
+            os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+        ).strip()
+        self.gemini_vision_client = None
+        if gemini_api_key:
+            self.gemini_vision_client = GeminiVisionClient(
+                api_key=gemini_api_key,
+                model=os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash"),
+                base_url=os.getenv(
+                    "GEMINI_API_BASE",
+                    "https://generativelanguage.googleapis.com/v1beta",
+                ),
+                timeout_seconds=float(os.getenv("GEMINI_TIMEOUT_SECONDS", "120")),
+            )
 
         ollama_embed_host = _resolve_ollama_host_for_runtime(os.getenv("OLLAMA_EMBED_HOST"))
         if ollama_embed_host:

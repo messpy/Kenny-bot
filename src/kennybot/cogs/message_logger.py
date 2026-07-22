@@ -54,6 +54,8 @@ from src.kennybot.utils.text import (
 from src.kennybot.utils.prompts import get_prompt
 from src.kennybot.features.search import build_tool_response
 from src.kennybot.utils.codex_jobs import CodexJobHandle, CodexJobManager
+from src.kennybot.ai.gemini_vision import GeminiVisionError
+from src.kennybot.ai.openai_vision import OpenAIVisionError, detect_image_mime_type
 from src.kennybot.utils.vrchat_world import format_vrchat_world_text, search_vrchat_worlds
 from src.kennybot.utils.tool_planner import (
     normalize_planner_plan,
@@ -132,6 +134,91 @@ class MessageLogger(BaseCog):
         self._message_claims = MessageClaimStore(
             self.root / RUNTIME_STATE_DIR / "message_claims"
         )
+
+    def _image_attachments(self, msg: discord.Message) -> list[discord.Attachment]:
+        attachments = []
+        for attachment in getattr(msg, "attachments", []) or []:
+            content_type = str(getattr(attachment, "content_type", "") or "").lower()
+            filename = str(getattr(attachment, "filename", "") or "").lower()
+            if content_type.startswith("image/") or filename.endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".webp")
+            ):
+                attachments.append(attachment)
+        return attachments[:4]
+
+    async def _read_image_attachments(
+        self,
+        msg: discord.Message,
+        *,
+        max_total_bytes: int = 12 * 1024 * 1024,
+    ) -> tuple[list[tuple[bytes, str]], list[str]]:
+        images: list[tuple[bytes, str]] = []
+        labels: list[str] = []
+        total = 0
+        for attachment in self._image_attachments(msg):
+            size = int(getattr(attachment, "size", 0) or 0)
+            if size and total + size > max_total_bytes:
+                labels.append(f"{getattr(attachment, 'filename', 'image')}: サイズ超過で省略")
+                continue
+            data = await attachment.read()
+            total += len(data)
+            if total > max_total_bytes:
+                labels.append(f"{getattr(attachment, 'filename', 'image')}: サイズ超過で省略")
+                continue
+            fallback_mime = str(getattr(attachment, "content_type", "") or "image/jpeg")
+            images.append((data, detect_image_mime_type(data, fallback=fallback_mime)))
+            labels.append(str(getattr(attachment, "filename", "") or "image"))
+        return images, labels
+
+    def _build_image_analysis_prompt(self, text: str, user_display: str) -> str:
+        request = (text or "").strip()
+        if not request:
+            request = "この画像を説明して。"
+        return (
+            f"{user_display} から画像付きメッセージが届きました。\n"
+            f"依頼: {request}\n\n"
+            "画像から読み取れる事実を日本語で簡潔に答えてください。"
+            "不確かな推測は断定せず、読めない文字や判断できない内容は不明と書いてください。"
+        )
+
+    async def _run_image_analysis(
+        self,
+        *,
+        model: str,
+        chat_messages: list[dict],
+        prompt: str,
+        images: list[tuple[bytes, str]],
+    ) -> str | None:
+        openai_vision = getattr(self.bot, "openai_vision_client", None)
+        gemini_vision = getattr(self.bot, "gemini_vision_client", None)
+        if openai_vision is None and gemini_vision is None:
+            return "画像解析にはOPENAI_API_KEYまたはGEMINI_API_KEYの設定が必要です。"
+        system_prompt = ""
+        for message in chat_messages:
+            if message.get("role") == "system":
+                system_prompt = str(message.get("content") or "")
+                break
+        if openai_vision is not None:
+            try:
+                return await asyncio.to_thread(
+                    openai_vision.analyze_images,
+                    prompt=prompt,
+                    images=images,
+                    system_prompt=system_prompt,
+                )
+            except OpenAIVisionError:
+                logger.exception("OpenAI image analysis failed")
+        if gemini_vision is not None:
+            try:
+                return await asyncio.to_thread(
+                    gemini_vision.analyze_images,
+                    prompt=prompt,
+                    images=images,
+                    system_prompt=system_prompt,
+                )
+            except GeminiVisionError:
+                logger.exception("Gemini image analysis failed")
+        return "画像解析に失敗しました。OPENAI_API_KEYまたはGEMINI_API_KEYと画像解析モデルの設定を確認してください。"
 
     def _claim_message_once(self, message_id: int) -> bool:
         claim_store = getattr(self, "_message_claims", None)
@@ -4361,6 +4448,9 @@ class MessageLogger(BaseCog):
         # ここから AI 応答処理（メンション or リプライの場合）
         # =========================
         text = normalize_user_text(content)
+        image_attachments = self._image_attachments(msg)
+        if not text and image_attachments:
+            text = "この画像を説明して"
         if not text:
             if should_treat_as_mention:
                 await msg.channel.send(
@@ -4608,6 +4698,19 @@ class MessageLogger(BaseCog):
                 "content": prompt,
             },
         ]
+        image_payloads: list[tuple[bytes, str]] = []
+        image_labels: list[str] = []
+        if image_attachments:
+            image_payloads, image_labels = await self._read_image_attachments(msg)
+            if not image_payloads:
+                await msg.channel.send(
+                    f"{msg.author.mention}\n画像を読み取れませんでした。サイズを小さくしてもう一度送ってください。",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                self._arm_recent_mention_window(msg)
+                await self.bot.process_commands(msg)
+                return
+            references.extend([f"attachment:{label}" for label in image_labels])
 
         try:
             await self._ai_progress_countdowns.start_countup(
@@ -4625,15 +4728,24 @@ class MessageLogger(BaseCog):
                 model_name=model_name,
             )
             try:
-                answer, tool_references, tool_queries, tool_reference_details = await self._run_ollama_chat_with_tools(
-                    model=model_name,
-                    messages=chat_messages,
-                    tools=[],
-                    guild=msg.guild,
-                    channel_id=msg.channel.id,
-                    user_id=msg.author.id,
-                )
-                reference_details.extend(tool_reference_details)
+                if image_payloads:
+                    image_prompt = self._build_image_analysis_prompt(text, user_display)
+                    answer = await self._run_image_analysis(
+                        model=model_name,
+                        chat_messages=chat_messages,
+                        prompt=image_prompt,
+                        images=image_payloads,
+                    )
+                else:
+                    answer, tool_references, tool_queries, tool_reference_details = await self._run_ollama_chat_with_tools(
+                        model=model_name,
+                        messages=chat_messages,
+                        tools=[],
+                        guild=msg.guild,
+                        channel_id=msg.channel.id,
+                        user_id=msg.author.id,
+                    )
+                    reference_details.extend(tool_reference_details)
             finally:
                 await self.bot.ai_progress_tracker.release(ticket)
 
@@ -4679,15 +4791,17 @@ class MessageLogger(BaseCog):
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",
-                processing="修正モード応答" if is_fix_request else "通常会話",
+                processing="画像解析" if image_payloads else ("修正モード応答" if is_fix_request else "通常会話"),
                 codex_mode=is_fix_request,
-                input_text=text,
+                input_text=f"{text}\n[画像: {', '.join(image_labels)}]" if image_labels else text,
                 output_text=answer_with_refs,
                 model_name=model_name,
                 title="Bot 管理ログ",
                 description=(
                     "修正依頼を受けた会話応答を送信しました。"
                     if is_fix_request
+                    else "添付画像への AI 解析応答を送信しました。"
+                    if image_payloads
                     else "メンションまたはリプライへの AI 応答を送信しました。"
                 ),
                 references=references,
@@ -4701,16 +4815,18 @@ class MessageLogger(BaseCog):
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",
-                processing="修正モード応答" if is_fix_request else "通常会話",
+                processing="画像解析" if image_payloads else ("修正モード応答" if is_fix_request else "通常会話"),
                 codex_mode=is_fix_request,
                 level="error",
                 title="Bot 管理ログ",
                 description=(
                     "修正依頼を受けた会話応答に失敗しました。"
                     if is_fix_request
+                    else "添付画像への AI 解析応答に失敗しました。"
+                    if image_payloads
                     else "メンションまたはリプライへの AI 応答に失敗しました。"
                 ),
-                input_text=text,
+                input_text=f"{text}\n[画像: {', '.join(image_labels)}]" if image_labels else text,
                 error_text=str(e),
                 model_name=model_name,
                 references=references,
