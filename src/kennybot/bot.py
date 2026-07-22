@@ -162,6 +162,14 @@ class MyBot(commands.Bot):
             self.gemini_vision_client = GeminiVisionClient(
                 api_key=gemini_api_key,
                 model=os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash"),
+                fallback_models=tuple(
+                    item.strip()
+                    for item in os.getenv(
+                        "GEMINI_VISION_FALLBACK_MODELS",
+                        "gemini-2.5-flash,gemini-flash-latest,gemini-2.0-flash-lite",
+                    ).split(",")
+                    if item.strip()
+                ),
                 base_url=os.getenv(
                     "GEMINI_API_BASE",
                     "https://generativelanguage.googleapis.com/v1beta",

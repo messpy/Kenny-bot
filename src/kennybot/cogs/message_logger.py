@@ -192,7 +192,7 @@ class MessageLogger(BaseCog):
         openai_vision = getattr(self.bot, "openai_vision_client", None)
         gemini_vision = getattr(self.bot, "gemini_vision_client", None)
         if openai_vision is None and gemini_vision is None:
-            return "画像解析にはOPENAI_API_KEYまたはGEMINI_API_KEYの設定が必要です。"
+            return "今は画像を読み取れません。少し時間を置いてもう一度送ってください。"
         system_prompt = ""
         for message in chat_messages:
             if message.get("role") == "system":
@@ -218,7 +218,7 @@ class MessageLogger(BaseCog):
                 )
             except GeminiVisionError:
                 logger.exception("Gemini image analysis failed")
-        return "画像解析に失敗しました。OPENAI_API_KEYまたはGEMINI_API_KEYと画像解析モデルの設定を確認してください。"
+        return "画像解析に失敗しました。少し時間を置いてもう一度送ってください。"
 
     def _claim_message_once(self, message_id: int) -> bool:
         claim_store = getattr(self, "_message_claims", None)

@@ -20,9 +20,10 @@ class GeminiVisionError(RuntimeError):
 @dataclass(frozen=True)
 class GeminiVisionClient:
     api_key: str
-    model: str = "gemini-flash-latest"
+    model: str = "gemini-2.5-flash"
     base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     timeout_seconds: float = 120.0
+    fallback_models: tuple[str, ...] = ()
 
     def analyze_images(
         self,
@@ -49,7 +50,27 @@ class GeminiVisionClient:
                 }
             )
 
-        model_name = self.model if self.model.startswith("models/") else f"models/{self.model}"
+        last_error: GeminiVisionError | None = None
+        for model in self._candidate_models():
+            try:
+                return self._post_parts(parts, model=model)
+            except GeminiVisionError as exc:
+                last_error = exc
+                logger.warning("Gemini vision model failed: model=%s error=%s", model, exc)
+        if last_error is not None:
+            raise last_error
+        raise GeminiVisionError("No Gemini model configured")
+
+    def _candidate_models(self) -> list[str]:
+        candidates: list[str] = []
+        for model in (self.model, *self.fallback_models):
+            value = str(model or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    def _post_parts(self, parts: list[dict[str, Any]], *, model: str) -> str:
+        model_name = model if model.startswith("models/") else f"models/{model}"
         try:
             response = requests.post(
                 f"{self.base_url.rstrip('/')}/{model_name}:generateContent",
