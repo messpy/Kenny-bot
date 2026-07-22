@@ -254,6 +254,32 @@ class MessageLogger(BaseCog):
             f"{text}"
         )
 
+    def _should_use_recent_image_context(self, text: str) -> bool:
+        normalized = normalize_user_text(text or "").lower()
+        if not normalized:
+            return False
+        markers = (
+            "この画像",
+            "その画像",
+            "あの画像",
+            "画像",
+            "写真",
+            "添付",
+            "スクショ",
+            "画面",
+            "写って",
+            "映って",
+            "この人",
+            "この方",
+            "これは",
+            "これって",
+            "職業",
+            "何して",
+            "どこ",
+            "誰",
+        )
+        return any(marker in normalized for marker in markers)
+
     def _claim_message_once(self, message_id: int) -> bool:
         claim_store = getattr(self, "_message_claims", None)
         if claim_store is None:
@@ -3175,7 +3201,11 @@ class MessageLogger(BaseCog):
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()
-        recent_image_context = self._recent_image_context_block(msg)
+        recent_image_context = (
+            self._recent_image_context_block(msg)
+            if self._should_use_recent_image_context(text)
+            else ""
+        )
         combined_history_context = "\n\n".join(
             part for part in (history_context, recent_image_context) if part.strip()
         )
@@ -4710,7 +4740,11 @@ class MessageLogger(BaseCog):
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()
-        recent_image_context = "" if image_attachments else self._recent_image_context_block(msg)
+        recent_image_context = (
+            self._recent_image_context_block(msg)
+            if not image_attachments and self._should_use_recent_image_context(text)
+            else ""
+        )
         combined_history_context = "\n\n".join(
             part for part in (history_context, recent_image_context) if part.strip()
         )
