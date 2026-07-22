@@ -1044,11 +1044,12 @@ class MessageLogger(BaseCog):
             }
             queries = [text.strip()] if text.strip() else []
             lines: list[str] = []
-            lines.append("全体要約")
+            lines.append("検索結果")
+            lines.append("注意: 以下のタイトル・日付・URL・抜粋だけを根拠にし、出典にない具体事項は確認できないと扱うこと。")
             for item in ranked_items[:2]:
-                date_str = f" ({item.date})" if item.date else ""
+                date_str = item.date or "日付未確認"
                 snippet = f"\n{item.snippet.strip()}" if item.snippet.strip() else ""
-                lines.append(f"- {item.title}{date_str}\n  {item.url}{snippet}")
+                lines.append(f"- {date_str}: {item.title}\n  {item.url}{snippet}")
             return "\n".join(lines), refs, title_map, queries
 
         refs: list[str] = ["method:ai_search.answer_ai_async", "method:ddgs.search"]
@@ -1066,10 +1067,12 @@ class MessageLogger(BaseCog):
 
         if ranked_items:
             item_lines: list[str] = []
+            item_lines.append("検索結果")
+            item_lines.append("注意: 以下のタイトル・日付・URL・抜粋だけを根拠にし、出典にない具体事項は確認できないと扱うこと。")
             for item in ranked_items[:2]:
-                date_str = f" ({item.date})" if item.date else ""
+                date_str = item.date or "日付未確認"
                 snippet = f"\n{item.snippet.strip()}" if item.snippet.strip() else ""
-                item_lines.append(f"- {item.title}{date_str}\n  {item.url}{snippet}")
+                item_lines.append(f"- {date_str}: {item.title}\n  {item.url}{snippet}")
             if item_lines:
                 return "\n".join(item_lines).strip(), refs, title_map, queries
         answer = (result.answer or "").strip()

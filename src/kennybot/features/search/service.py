@@ -648,18 +648,13 @@ class AISearchService:
 
         lines: List[str] = []
         lines.append("回答")
-        lines.append(f"- {question.strip() or query.strip() or '質問'} に対して確認できた範囲では、以下の内容が有力です。")
-        if summaries:
-            for sm in summaries[: self.searcher.config.top_n]:
-                lines.append(f"- {sm}")
-        else:
-            for item in items[: self.searcher.config.top_n]:
-                lines.append(f"- {_snippet_summary(item)}")
-
+        lines.append("- 検索結果で確認できた範囲だけを示します。出典にない具体的な評価、日付、順位、回数は確認できません。")
         lines.append("")
         lines.append("補足")
         for item in items[: self.searcher.config.top_n]:
-            lines.append(f"- {_snippet_summary(item)}")
+            date_str = f"{item.date}: " if item.date else "日付未確認: "
+            url = f"\n  {item.url}" if item.url else ""
+            lines.append(f"- {date_str}{_snippet_summary(item)}{url}")
         return "\n".join(lines)
 
     def _looks_like_structured_web_answer(self, text: str) -> bool:
@@ -791,62 +786,12 @@ class AISearchService:
             )
             return AISearchAnswer(query=q, searched_queries=[q], items=fallback_items, summaries=[], answer=answer)
 
-        # Discord 向けにまとめるためのプロンプトを構築
-        overall_prompt_parts: List[str] = []
-        for idx, (it, sm) in enumerate(zip(used_items, summaries), start=1):
-            date_str = it.date or "日付情報なし"
-            overall_prompt_parts.append(
-                f"【記事{idx}】\n"
-                f"タイトル: {it.title}\n"
-                f"日付: {date_str}\n"
-                f"要約: {sm}\n"
-            )
-
-        overall_prompt = "\n".join(overall_prompt_parts)
-        today_jst = now_jst().strftime("%Y-%m-%d")
-        current_jst = now_jst().strftime("%Y-%m-%d %H:%M:%S JST")
-
-        final_prompt = f"""あなたはWeb検索結果を統合して質問に答える日本語アシスタントです。
-以下はユーザーの質問と、それに関連すると判断されたニュース/記事の要約一覧です。
-事実ベースで、分かりやすく、質問への答えを先に述べてください。
-検索結果を単に並べるのではなく、質問に直接関係する情報だけを統合して答えてください。
-冒頭の挨拶、雑談、検索実施の宣言、自己言及は書かないでください。
-今の判断基準として、Today in JST is {today_jst} を使ってください。
-Current time in JST is {current_jst}.
-「今」「この時期」「季節」はこの日付基準で解釈してください。
-
-【ユーザーの質問】
-{question}
-
-【検索クエリ】
-{q}
-
-【記事要約一覧】
-{overall_prompt}
-
-【出力フォーマット（必ずこの形式で）】
-1. まず「回答」として、質問への答えを2〜5行でまとめる
-2. 必要なら「補足」として、重要なポイントを箇条書きで最大5件まで書く
-
-※ 検索結果にない情報は推測しないでください。
-※ 挨拶文、雑談、ユーザー名の言い回し、日付の補完、ニュースの創作はしないでください。
-※ 記事から確認できない話題は「検索結果からは確認できません」と書いてください。
-※ 形式が崩れそうなら、本文は短くしてもよいので、必ず「回答」「補足」の順で出力してください。
-"""
-
-        try:
-            answer_text = await self._run_with_model_fallbacks(final_prompt)
-        except Exception as e:
-            logger.warning("[ai_search] final answer generation failed: %r", e)
-            answer_text = ""
-
-        if not answer_text or not self._looks_like_structured_web_answer(answer_text):
-            answer_text = self._build_direct_answer(
-                question=question,
-                query=q,
-                items=used_items,
-                summaries=summaries,
-            )
+        answer_text = self._build_direct_answer(
+            question=question,
+            query=q,
+            items=used_items,
+            summaries=[],
+        )
 
         max_chars = self._mode_to_max_chars.get(mode, _MODE_TO_MAX_CHARS["normal"])
         if len(answer_text) > max_chars:
