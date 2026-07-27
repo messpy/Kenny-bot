@@ -11,6 +11,7 @@ import subprocess
 import time
 import asyncio
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -74,10 +75,25 @@ if hasattr(discord, "AllowedMentions") and not hasattr(discord.AllowedMentions, 
 
 URL_RE = re.compile(r"https?://[^\s)>\"]+")
 RAG_HEADER_RE = re.compile(r"^\[([^\]]+)\]")
+AI_REVIEW_EMOJI = "🤔"
 
 import random
 
 _settings = get_settings()
+
+
+@dataclass(frozen=True)
+class AiAnswerReviewContext:
+    guild_id: int | None
+    channel_id: int
+    question_message_id: int | None
+    question_author_id: int | None
+    question_text: str
+    answer_text: str
+    model_name: str
+    references: tuple[str, ...] = ()
+    reference_details: tuple[str, ...] = ()
+    web_queries: tuple[str, ...] = ()
 
 
 def get_user_display_name(
@@ -133,6 +149,8 @@ class MessageLogger(BaseCog):
         self._ai_progress_countdowns = ChannelCountdown()
         self._codex_job_manager = CodexJobManager(self.root)
         self._codex_job_tasks: set[asyncio.Task[None]] = set()
+        self._ai_answer_reviews: dict[int, AiAnswerReviewContext] = {}
+        self._ai_answer_reviews_in_progress: set[int] = set()
         self._message_claims = MessageClaimStore(
             self.root / RUNTIME_STATE_DIR / "message_claims"
         )
@@ -3190,7 +3208,16 @@ class MessageLogger(BaseCog):
                 )
             answer = self._sanitize_user_visible_answer(answer)
             prefix = f"{mention}\n" if mention else ""
-            await self._send_chunked_text(channel, answer, prefix=prefix)
+            references = self._collect_reference_labels(channel_profile_block)
+            await self._send_ai_text_response(
+                channel,
+                answer,
+                prefix=prefix,
+                source_msg=source_msg,
+                question_text=query,
+                model_name=model_name,
+                references=references,
+            )
             if source_msg is not None:
                 await self._log_bot_activity_event(
                     source_msg,
@@ -3201,7 +3228,7 @@ class MessageLogger(BaseCog):
                     title="Bot 管理ログ",
                     description="サーバー・チャンネル・ワールドの説明に応答しました。",
                     model_name=model_name,
-                    references=self._collect_reference_labels(channel_profile_block),
+                    references=references,
                 )
         except Exception as e:
             prefix = f"{mention}\n" if mention else ""
@@ -3221,7 +3248,15 @@ class MessageLogger(BaseCog):
                     part for part in [location_meta_block, channel_profile_block] if str(part or "").strip()
                 ).strip()
             )
-            await channel.send(f"{prefix}{answer}", allowed_mentions=discord.AllowedMentions.none())
+            await self._send_ai_text_response(
+                channel,
+                answer,
+                prefix=prefix,
+                source_msg=source_msg,
+                question_text=query,
+                model_name=model_name,
+                references=self._collect_reference_labels(channel_profile_block),
+            )
         finally:
             await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
 
@@ -3369,18 +3404,17 @@ class MessageLogger(BaseCog):
         references.extend(planned_refs)
         reference_details.extend(planned_details)
         if direct_web_answer:
-            final_message = f"{msg.author.mention}\n{direct_web_answer}"
-            if len(final_message) > 2000:
-                await self._send_chunked_text(
-                    msg.channel,
-                    direct_web_answer,
-                    prefix=f"{msg.author.mention}\n",
-                )
-            else:
-                await msg.channel.send(
-                    final_message,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+            await self._send_ai_text_response(
+                msg.channel,
+                direct_web_answer,
+                prefix=f"{msg.author.mention}\n",
+                source_msg=msg,
+                question_text=text,
+                model_name="web_search",
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries,
+            )
             log_ai_output(
                 msg.author,
                 response=direct_web_answer,
@@ -3482,18 +3516,17 @@ class MessageLogger(BaseCog):
             if web_urls:
                 references.extend([url for url in web_urls if url not in references])
                 display_answer = self._build_display_answer_with_references(answer, web_urls)
-            final_message = f"{msg.author.mention}\n{display_answer}"
-            if len(final_message) > 2000:
-                await self._send_chunked_text(
-                    msg.channel,
-                    display_answer,
-                    prefix=f"{msg.author.mention}\n",
-                )
-            else:
-                await msg.channel.send(
-                    final_message,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+            await self._send_ai_text_response(
+                msg.channel,
+                display_answer,
+                prefix=f"{msg.author.mention}\n",
+                source_msg=msg,
+                question_text=text,
+                model_name=model_name,
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries + tool_queries,
+            )
 
             # 総合ログにAI応答を記録
             log_ai_output(
@@ -4295,6 +4328,81 @@ class MessageLogger(BaseCog):
             blocks.append(f"[{chunk.source} / {chunk.title}]\n{body}")
         return "\n\n".join(blocks)
 
+    async def _add_ai_review_reaction(self, message: discord.Message) -> None:
+        try:
+            await message.add_reaction(AI_REVIEW_EMOJI)
+        except Exception:
+            logger.debug("Failed to add AI review reaction", exc_info=True)
+
+    def _remember_ai_answer_review(
+        self,
+        message: discord.Message,
+        *,
+        source_msg: discord.Message | None,
+        question_text: str,
+        answer_text: str,
+        model_name: str,
+        references: list[str] | None = None,
+        reference_details: list[str] | None = None,
+        web_queries: list[str] | None = None,
+    ) -> None:
+        channel_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
+        if channel_id <= 0:
+            return
+        guild = getattr(message, "guild", None) or getattr(getattr(message, "channel", None), "guild", None)
+        guild_id = int(guild.id) if getattr(guild, "id", None) is not None else None
+        if not hasattr(self, "_ai_answer_reviews"):
+            self._ai_answer_reviews = {}
+        self._ai_answer_reviews[message.id] = AiAnswerReviewContext(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            question_message_id=int(source_msg.id)
+            if source_msg is not None and getattr(source_msg, "id", None) is not None
+            else None,
+            question_author_id=int(source_msg.author.id)
+            if source_msg is not None and getattr(getattr(source_msg, "author", None), "id", None) is not None
+            else None,
+            question_text=question_text,
+            answer_text=answer_text,
+            model_name=model_name,
+            references=tuple(references or ()),
+            reference_details=tuple(reference_details or ()),
+            web_queries=tuple(web_queries or ()),
+        )
+        if len(self._ai_answer_reviews) > 300:
+            for old_id in list(self._ai_answer_reviews.keys())[:50]:
+                self._ai_answer_reviews.pop(old_id, None)
+
+    async def _send_ai_text_response(
+        self,
+        channel: discord.abc.Messageable,
+        answer: str,
+        *,
+        prefix: str = "",
+        source_msg: discord.Message | None = None,
+        question_text: str = "",
+        model_name: str = "",
+        references: list[str] | None = None,
+        reference_details: list[str] | None = None,
+        web_queries: list[str] | None = None,
+    ) -> list[discord.Message]:
+        sent_messages = await self._send_chunked_text(channel, answer, prefix=prefix)
+        if not sent_messages:
+            return []
+        first_message = sent_messages[0]
+        self._remember_ai_answer_review(
+            first_message,
+            source_msg=source_msg,
+            question_text=question_text,
+            answer_text=answer,
+            model_name=model_name,
+            references=references,
+            reference_details=reference_details,
+            web_queries=web_queries,
+        )
+        await self._add_ai_review_reaction(first_message)
+        return sent_messages
+
     async def _send_chunked_text(
         self,
         channel: discord.abc.Messageable,
@@ -4302,11 +4410,12 @@ class MessageLogger(BaseCog):
         *,
         prefix: str = "",
         chunk_size: int = 1900,
-    ) -> None:
+    ) -> list[discord.Message]:
         remaining = (text or "").strip()
         if not remaining:
-            return
+            return []
         first = True
+        sent_messages: list[discord.Message] = []
         while remaining:
             headroom = max(200, chunk_size - (len(prefix) if first and prefix else 0))
             if len(remaining) <= headroom:
@@ -4321,8 +4430,109 @@ class MessageLogger(BaseCog):
                 chunk = remaining[:split_at].rstrip()
                 remaining = remaining[split_at:].lstrip()
             content = f"{prefix}{chunk}" if first and prefix else chunk
-            await channel.send(content)
+            sent_messages.append(
+                await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+            )
             first = False
+        return sent_messages
+
+    def _build_ai_review_prompt(self, context: AiAnswerReviewContext) -> str:
+        refs = "\n".join(f"- {ref}" for ref in context.references[:12]) or "なし"
+        details = "\n".join(f"- {detail}" for detail in context.reference_details[:12]) or "なし"
+        queries = "\n".join(f"- {query}" for query in context.web_queries[:8]) or "なし"
+        return (
+            "あなたはDiscord botの回答品質レビュー担当です。\n"
+            "直前の質問とAI回答を見直し、必要がある場合だけ修正版を作ってください。\n"
+            "特に、検索結果依存で質問自体に答えていない、既知の事実や年代関係を組み合わせて答えられるのに止まっている、"
+            "断言できること/推測/不明点の切り分けが悪い、という問題を重視してください。\n"
+            "出力はJSONのみです。Markdown、コードフェンス、説明は禁止です。\n"
+            "{\"needs_resend\":true/false,\"reason\":\"短い理由\",\"revised_answer\":\"必要時のみ修正版。不要なら空文字\"}\n\n"
+            "判断基準:\n"
+            "- 元回答が十分なら needs_resend=false\n"
+            "- 修正版はユーザーへそのまま再送できる自然な文にする\n"
+            "- 不明点は限定して述べ、確認できることまで巻き込んで不明扱いしない\n"
+            "- 参照情報がある場合はそれを無視しない。ただし参照情報に直接ない事実でも、一般知識や年代関係で堅く言えることは整理する\n\n"
+            f"[質問]\n{context.question_text[:1800]}\n\n"
+            f"[元回答]\n{context.answer_text[:2600]}\n\n"
+            f"[参照]\n{refs}\n\n"
+            f"[参照詳細]\n{details}\n\n"
+            f"[検索クエリ]\n{queries}"
+        )
+
+    async def _review_ai_answer_if_needed(
+        self,
+        payload: discord.RawReactionActionEvent,
+        context: AiAnswerReviewContext,
+    ) -> None:
+        if not hasattr(self, "_ai_answer_reviews_in_progress"):
+            self._ai_answer_reviews_in_progress = set()
+        if payload.message_id in self._ai_answer_reviews_in_progress:
+            return
+        self._ai_answer_reviews_in_progress.add(payload.message_id)
+        try:
+            channel = self.bot.get_channel(payload.channel_id)
+            if channel is None and hasattr(self.bot, "fetch_channel"):
+                try:
+                    channel = await self.bot.fetch_channel(payload.channel_id)
+                except Exception:
+                    channel = None
+            if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+                return
+            prompt = self._build_ai_review_prompt(context)
+            model_name = context.model_name or self._current_chat_model_name()
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.bot.ollama_client.chat_simple,
+                    model=model_name,
+                    prompt=prompt,
+                    stream=False,
+                    format="json",
+                ),
+                timeout=max(20, self._cfg_ai_timeout()),
+            )
+            payload_json = self._parse_json_payload(raw or "")
+            if not isinstance(payload_json, dict):
+                return
+            needs_resend = bool(payload_json.get("needs_resend"))
+            revised_answer = strip_ansi_and_ctrl(str(payload_json.get("revised_answer") or "")).strip()
+            if not needs_resend or not revised_answer:
+                try:
+                    source = await channel.fetch_message(payload.message_id)
+                    await source.add_reaction("✅")
+                except Exception:
+                    logger.debug("Failed to mark AI review as ok", exc_info=True)
+                return
+            prefix = ""
+            if context.question_author_id:
+                prefix = f"<@{context.question_author_id}>\n"
+            sent = await self._send_ai_text_response(
+                channel,
+                revised_answer,
+                prefix=prefix,
+                source_msg=None,
+                question_text=context.question_text,
+                model_name=model_name,
+                references=list(context.references),
+                reference_details=list(context.reference_details),
+                web_queries=list(context.web_queries),
+            )
+            if sent:
+                self._ai_answer_reviews[sent[0].id] = AiAnswerReviewContext(
+                    guild_id=context.guild_id,
+                    channel_id=context.channel_id,
+                    question_message_id=context.question_message_id,
+                    question_author_id=context.question_author_id,
+                    question_text=context.question_text,
+                    answer_text=revised_answer,
+                    model_name=model_name,
+                    references=context.references,
+                    reference_details=context.reference_details,
+                    web_queries=context.web_queries,
+                )
+        except Exception:
+            logger.exception("AI answer review failed")
+        finally:
+            self._ai_answer_reviews_in_progress.discard(payload.message_id)
 
     async def _answer_capability_query(
         self,
@@ -4425,7 +4635,15 @@ class MessageLogger(BaseCog):
                 or "不明です。"
             )
             prefix = f"{mention}\n" if mention else ""
-            await self._send_chunked_text(channel, answer, prefix=prefix)
+            await self._send_ai_text_response(
+                channel,
+                answer,
+                prefix=prefix,
+                source_msg=source_msg,
+                question_text=query,
+                model_name=model_name,
+                references=references,
+            )
             if source_msg is not None:
                 await self._log_bot_activity_event(
                     source_msg,
@@ -4559,6 +4777,17 @@ class MessageLogger(BaseCog):
             self._kenny_chat_mirrors[msg.id] = mirrors
 
         return True
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        if str(payload.emoji) != AI_REVIEW_EMOJI:
+            return
+        if payload.user_id == (self.bot.user.id if self.bot.user else 0):
+            return
+        context = self._ai_answer_reviews.get(payload.message_id)
+        if context is None:
+            return
+        await self._review_ai_answer_if_needed(payload, context)
 
     @commands.Cog.listener()
     async def on_message_delete(self, msg: discord.Message):
@@ -4944,18 +5173,17 @@ class MessageLogger(BaseCog):
         references.extend(planned_refs)
         reference_details.extend(planned_details)
         if direct_web_answer and not image_attachments:
-            final_message = f"{msg.author.mention}\n{direct_web_answer}"
-            if len(final_message) > 2000:
-                await self._send_chunked_text(
-                    msg.channel,
-                    direct_web_answer,
-                    prefix=f"{msg.author.mention}\n",
-                )
-            else:
-                await msg.channel.send(
-                    final_message,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+            await self._send_ai_text_response(
+                msg.channel,
+                direct_web_answer,
+                prefix=f"{msg.author.mention}\n",
+                source_msg=msg,
+                question_text=text,
+                model_name="web_search",
+                references=references,
+                reference_details=reference_details,
+                web_queries=web_queries,
+            )
             log_ai_output(
                 msg.author,
                 response=direct_web_answer,
@@ -5092,22 +5320,20 @@ class MessageLogger(BaseCog):
                 references.extend([url for url in web_urls if url not in references])
                 answer_with_refs = self._build_display_answer_with_references(answer, web_urls)
 
-            # メッセージ送信（メンションのみ）
-            final_message = f"{msg.author.mention}\n{answer_with_refs}"
-
             if self._should_send_letter_file(text):
                 await self._send_letter_file(msg, answer_with_refs)
             else:
-                if len(final_message) > 2000:
-                    await self._send_chunked_text(
-                        msg.channel,
-                        answer_with_refs,
-                        prefix=f"{msg.author.mention}\n",
-                    )
-                else:
-                    await msg.channel.send(
-                        final_message, allowed_mentions=discord.AllowedMentions.none()
-                    )
+                await self._send_ai_text_response(
+                    msg.channel,
+                    answer_with_refs,
+                    prefix=f"{msg.author.mention}\n",
+                    source_msg=msg,
+                    question_text=text,
+                    model_name=model_name,
+                    references=references,
+                    reference_details=reference_details,
+                    web_queries=web_queries + tool_queries,
+                )
             await self._log_bot_activity_event(
                 msg,
                 kind="メンション",

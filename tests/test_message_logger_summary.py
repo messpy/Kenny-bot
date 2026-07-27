@@ -160,7 +160,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
 
         import asyncio
 
-        context, refs, web_queries, details = asyncio.run(
+        context, refs, web_queries, details, direct_web_answer = asyncio.run(
             self.logger._build_planned_context(
                 msg=msg,
                 user_display="author",
@@ -175,6 +175,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.assertIn("source:location_meta", refs)
         self.assertIn("source:serverinfo", refs)
         self.assertEqual(web_queries, [])
+        self.assertEqual(direct_web_answer, "")
         self.assertIn("planner_response_mode=serverinfo_strict", details)
         self.assertIn("location_meta=on", details)
         self.assertIn("serverinfo=channel_profile", details)
@@ -254,6 +255,88 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.assertIn("/help", sanitized)
         self.assertIn("totally_fake_command", sanitized)
         self.assertNotIn("/totally_fake_command", sanitized)
+
+    def test_send_ai_text_response_adds_review_reaction_and_context(self) -> None:
+        import asyncio
+
+        reactions: list[str] = []
+
+        class FakeMessage:
+            def __init__(self, message_id: int, channel: object) -> None:
+                self.id = message_id
+                self.channel = channel
+                self.guild = SimpleNamespace(id=10)
+
+            async def add_reaction(self, emoji: str) -> None:
+                reactions.append(emoji)
+
+        class FakeChannel:
+            id = 20
+            guild = SimpleNamespace(id=10)
+
+            async def send(self, content: str, **_kwargs: object) -> FakeMessage:
+                self.content = content
+                return FakeMessage(30, self)
+
+        channel = FakeChannel()
+        source_msg = SimpleNamespace(
+            id=40,
+            author=SimpleNamespace(id=50),
+        )
+        self.logger._ai_answer_reviews = {}
+
+        sent = asyncio.run(
+            self.logger._send_ai_text_response(
+                channel,
+                "回答です",
+                prefix="<@50>\n",
+                source_msg=source_msg,
+                question_text="質問です",
+                model_name="model-a",
+                references=["source:test"],
+            )
+        )
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(reactions, ["🤔"])
+        context = self.logger._ai_answer_reviews[30]
+        self.assertEqual(context.question_message_id, 40)
+        self.assertEqual(context.question_author_id, 50)
+        self.assertEqual(context.question_text, "質問です")
+        self.assertEqual(context.answer_text, "回答です")
+        self.assertEqual(context.references, ("source:test",))
+
+    def test_thinking_reaction_routes_saved_ai_answer_to_review(self) -> None:
+        import asyncio
+
+        calls: list[tuple[int, str]] = []
+        self.logger.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        self.logger._ai_answer_reviews = {
+            30: SimpleNamespace(question_text="質問", answer_text="回答")
+        }
+
+        async def fake_review(payload: object, context: object) -> None:
+            calls.append((payload.message_id, context.question_text))
+
+        self.logger._review_ai_answer_if_needed = fake_review
+
+        asyncio.run(
+            self.logger.on_raw_reaction_add(
+                SimpleNamespace(user_id=50, message_id=30, emoji="🤔")
+            )
+        )
+        asyncio.run(
+            self.logger.on_raw_reaction_add(
+                SimpleNamespace(user_id=50, message_id=31, emoji="🤔")
+            )
+        )
+        asyncio.run(
+            self.logger.on_raw_reaction_add(
+                SimpleNamespace(user_id=50, message_id=30, emoji="✅")
+            )
+        )
+
+        self.assertEqual(calls, [(30, "質問")])
 
     def test_web_search_fallback_plan_prefers_web_search_for_latest_queries(self) -> None:
         self.assertTrue(self.logger._needs_web_search_for_accuracy("今日のニュースは？"))
@@ -410,7 +493,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._is_ai_channel_rate_limited = lambda _channel_id: False
         self.logger._schedule_message_index = lambda *args, **kwargs: None
         self.logger._arm_recent_mention_window = lambda _msg: None
-        self.logger._resolve_chat_context = AsyncMock(return_value=("context", [], [], []))
+        self.logger._resolve_chat_context = AsyncMock(return_value=("context", [], [], [], ""))
         self.logger._current_chat_model_name = lambda: "test-model"
         self.logger._ai_progress_countdowns = SimpleNamespace(
             start_countup=AsyncMock(),
