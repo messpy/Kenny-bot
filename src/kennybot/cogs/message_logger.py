@@ -4852,7 +4852,7 @@ class MessageLogger(BaseCog):
                 msg.guild.id,
             )
 
-        # 全メッセージ共通のスパム検出
+        # @everyone / @here スパム検出
         guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
         if not spam_guard_disabled and self._is_everyone_mention(msg, content):
             violation = guard.record_everyone_mention(
@@ -4865,17 +4865,6 @@ class MessageLogger(BaseCog):
                 await self._handle_everyone_cross_channel_violation(msg, violation)
                 await self.bot.process_commands(msg)
                 return
-
-        if not spam_guard_disabled and not guard.allow_message(msg.author.id, content):
-            violation = guard.add_violation(msg.author.id, msg.guild.id)
-            await self._handle_spam_violation(
-                msg=msg,
-                content=content,
-                level=violation.current_level,
-                violation_count=violation.violation_count,
-            )
-            await self.bot.process_commands(msg)
-            return
 
         # kenny-chat は専用ルールで処理（クロスサーバー中継）
         if self._is_kenny_chat(msg):
@@ -4900,6 +4889,19 @@ class MessageLogger(BaseCog):
         )
         recent_mention_window = self._has_recent_mention_window(msg)
         should_treat_as_mention = mentioned_bot or is_reply_to_bot or recent_mention_window
+        has_direct_mentions = bool(getattr(msg, "mentions", None) or getattr(msg, "role_mentions", None))
+
+        if not spam_guard_disabled and (has_direct_mentions or is_reply_to_bot):
+            if not guard.allow_message(msg.author.id, content):
+                violation = guard.add_violation(msg.author.id, msg.guild.id)
+                await self._handle_spam_violation(
+                    msg=msg,
+                    content=content,
+                    level=violation.current_level,
+                    violation_count=violation.violation_count,
+                )
+                await self.bot.process_commands(msg)
+                return
 
         # メンション / リプライがない場合はリアクションのみ
         if not should_treat_as_mention:
