@@ -48,9 +48,10 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
     HelpSection(
         title="議事録機能",
         lines=(
+            "- `/minutes` の action で start/stop/status を切り替え",
             "- VC参加者が開始できる",
             "- VC無人または停止コマンドで終了する",
-            "- Google Speech-to-Text を優先して文字起こし",
+            "- APIキー不要の Google Web Speech を優先して文字起こし",
             "- Google失敗時だけ faster-whisper にフォールバック",
             "- 音声を文字起こしし、長文はAI要約して投稿",
             "- 投稿時はコマンド実行者をメンション",
@@ -71,6 +72,21 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
             "- `member-events`: 参加/退出ログ",
         ),
     ),
+    HelpSection(
+        title="読み上げ機能",
+        lines=(
+            "- `/tts` の action で join/leave/voice を切り替え",
+            "- `tts status` は廃止",
+        ),
+    ),
+    HelpSection(
+        title="予定機能",
+        lines=(
+            "- `/birthday` の action で add/list/remove を切り替え",
+            "- 誕生日は月日だけでも登録可能",
+            "- 通知時刻も HH:MM で指定可能",
+        ),
+    ),
 )
 
 COMMAND_CATEGORY_ORDER: tuple[str, ...] = (
@@ -79,6 +95,8 @@ COMMAND_CATEGORY_ORDER: tuple[str, ...] = (
     "ナレッジ",
     "議事録",
     "ロール",
+    "モデレーション",
+    "予定",
     "読み上げ",
     "ゲーム・ユーティリティ",
 )
@@ -94,6 +112,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="Bot状態と疎通確認を表示",
         category="基本",
     ),
+    "ping": SlashCommandMeta(
+        name="ping",
+        description="Bot の応答速度を確認",
+        category="基本",
+    ),
     "summarize_recent": SlashCommandMeta(
         name="summarize_recent",
         description="このチャンネルの直近メッセージをAI要約",
@@ -104,14 +127,9 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="チャット要約の既定件数を設定",
         category="要約・設定",
     ),
-    "config_show": SlashCommandMeta(
-        name="config_show",
-        description="設定値を表示",
-        category="要約・設定",
-    ),
-    "config_set": SlashCommandMeta(
-        name="config_set",
-        description="設定値を更新",
+    "config": SlashCommandMeta(
+        name="config",
+        description="設定の表示・更新",
         category="要約・設定",
     ),
     "model_list": SlashCommandMeta(
@@ -124,19 +142,9 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="Bot が使うモデルを切り替え",
         category="要約・設定",
     ),
-    "minutes_start": SlashCommandMeta(
-        name="minutes_start",
-        description="議事録モードを開始（VC参加者のみ）",
-        category="議事録",
-    ),
-    "minutes_stop": SlashCommandMeta(
-        name="minutes_stop",
-        description="議事録モードを停止して要約を作成",
-        category="議事録",
-    ),
-    "minutes_status": SlashCommandMeta(
-        name="minutes_status",
-        description="議事録モードの状態を表示",
+    "minutes": SlashCommandMeta(
+        name="minutes",
+        description="議事録モードの開始・停止・状態表示",
         category="議事録",
     ),
     "reaction_role_set": SlashCommandMeta(
@@ -154,24 +162,19 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="リアクションロール設定を一覧表示",
         category="ロール",
     ),
-    "tts_join": SlashCommandMeta(
-        name="tts_join",
-        description="現在の通話チャンネルに参加し、このチャンネルを読み上げ対象にする",
-        category="読み上げ",
+    "modpanel": SlashCommandMeta(
+        name="modpanel",
+        description="スパム管理パネルを作成",
+        category="モデレーション",
     ),
-    "tts_leave": SlashCommandMeta(
-        name="tts_leave",
-        description="読み上げを停止してVCから切断",
-        category="読み上げ",
+    "birthday": SlashCommandMeta(
+        name="birthday",
+        description="誕生日の登録・一覧・削除・通知時刻設定",
+        category="予定",
     ),
-    "tts_voice": SlashCommandMeta(
-        name="tts_voice",
-        description="読み上げ話者IDを変更",
-        category="読み上げ",
-    ),
-    "tts_status": SlashCommandMeta(
-        name="tts_status",
-        description="読み上げ状態を表示",
+    "tts": SlashCommandMeta(
+        name="tts",
+        description="読み上げの開始・停止・話者変更",
         category="読み上げ",
     ),
     "game": SlashCommandMeta(
@@ -197,6 +200,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
     "vrchat_world": SlashCommandMeta(
         name="vrchat_world",
         description="VRChat のワールドを検索",
+        category="ゲーム・ユーティリティ",
+    ),
+    "vrc_user": SlashCommandMeta(
+        name="vrc_user",
+        description="VRChat ユーザーURLからプロフィールを取得",
         category="ゲーム・ユーティリティ",
     ),
 }
