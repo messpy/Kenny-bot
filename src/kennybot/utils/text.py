@@ -12,6 +12,12 @@ MENTION_RE = re.compile(r"<@!?\d+>")
 ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+MODEL_THINKING_BLOCK_RE = re.compile(
+    r"(?is)^\s*thinking\.\.\..*?\.\.\.done thinking\.\s*"
+)
+ABSOLUTE_PATH_RE = re.compile(r"(?<![\w@])(?:/[^\s`'\")<>:]+)+")
+WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s`'\")<>]+")
+TRACEBACK_SOURCE_LINE_RE = re.compile(r'^\s*File "[^"]+", line \d+(?:, in .*)?$')
 
 
 # =========================
@@ -26,7 +32,8 @@ def strip_ansi_and_ctrl(s: str) -> str:
         if o < 32 and ch not in ("\n", "\r", "\t"):
             continue
         out.append(ch)
-    return "".join(out)
+    cleaned = "".join(out)
+    return MODEL_THINKING_BLOCK_RE.sub("", cleaned).strip()
 
 
 def normalize_user_text(raw: str) -> str:
@@ -37,6 +44,39 @@ def normalize_user_text(raw: str) -> str:
     s = CHANNEL_MENTION_RE.sub("", s)
     s = s.strip()
     return s
+
+
+def sanitize_user_visible_error(error: object, *, max_chars: int = 300) -> str:
+    """ユーザーへ見せる例外詳細からローカルパスやコード断片を除く。"""
+    text = strip_ansi_and_ctrl(str(error or "")).strip()
+    if not text:
+        return "詳細はログを確認してください。"
+
+    kept_lines: list[str] = []
+    skip_source_context = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if skip_source_context and raw_line[:1].isspace():
+            skip_source_context = False
+            continue
+        skip_source_context = False
+        if TRACEBACK_SOURCE_LINE_RE.match(line):
+            skip_source_context = True
+            continue
+        if line.startswith(("Traceback (most recent call last):", "^")):
+            continue
+        line = ABSOLUTE_PATH_RE.sub("[path]", line)
+        line = WINDOWS_PATH_RE.sub("[path]", line)
+        kept_lines.append(line)
+
+    sanitized = " / ".join(kept_lines).strip()
+    if not sanitized:
+        sanitized = "詳細はログを確認してください。"
+    if len(sanitized) > max_chars:
+        sanitized = sanitized[:max_chars].rstrip() + "..."
+    return sanitized
 
 
 def normalize_keyword_match_text(raw: str) -> str:
