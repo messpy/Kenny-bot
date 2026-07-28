@@ -1,4 +1,4 @@
 [submodule "vendor/conversation_core"]
 	path = vendor/conversation_core
-	url = /mnt/ssd/gittea/git/repositories/every_holiday/shared_conversation_core.git
+	url = https://github.com/messpy/shared_conversation_core.git
 	branch = main
