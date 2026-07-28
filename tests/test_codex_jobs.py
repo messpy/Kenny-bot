@@ -75,13 +75,17 @@ class CodexJobManagerTests(unittest.TestCase):
             proc = _DummyProcess()
 
             async def _run() -> tuple[object, asyncio.Task[None], dict[str, object]]:
+                async def _fake_monitor(**kwargs: object) -> None:
+                    kwargs["stdout_fp"].close()
+                    kwargs["stderr_fp"].close()
+
                 with (
                     patch("src.kennybot.utils.codex_jobs.subprocess.run") as run_mock,
                     patch(
                         "src.kennybot.utils.codex_jobs.asyncio.create_subprocess_exec",
                         new=AsyncMock(return_value=proc),
                     ),
-                    patch.object(manager, "_monitor_job", new=AsyncMock(return_value=None)),
+                    patch.object(manager, "_monitor_job", new=AsyncMock(side_effect=_fake_monitor)),
                 ):
                     handle, task = await manager.start_job(
                         issue="直して",
@@ -91,6 +95,7 @@ class CodexJobManagerTests(unittest.TestCase):
                         planned_fix="回答を修正する",
                     )
                     state = json.loads(handle.state_path.read_text(encoding="utf-8"))
+                    await task
                     self.assertTrue(run_mock.called)
                     return handle, task, state
 

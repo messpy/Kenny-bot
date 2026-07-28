@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
-import torch
-from diffusers import StableDiffusionPipeline
+from typing import Any, Optional
 
 
 @dataclass
@@ -21,12 +19,22 @@ class SDConfig:
     out: str = "output.png"
 
 
-def build_pipeline(model_id: str, *, device: str = "cpu") -> StableDiffusionPipeline:
+def _load_sd_dependencies() -> tuple[Any, Any]:
+    try:
+        torch = importlib.import_module("torch")
+        diffusers = importlib.import_module("diffusers")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Stable Diffusion image generation requires optional packages: torch and diffusers") from exc
+    return torch, diffusers.StableDiffusionPipeline
+
+
+def build_pipeline(model_id: str, *, device: str = "cpu") -> Any:
     """
     Build StableDiffusionPipeline.
     - safe to call from import side
     """
-    pipe = StableDiffusionPipeline.from_pretrained(
+    torch, stable_diffusion_pipeline = _load_sd_dependencies()
+    pipe = stable_diffusion_pipeline.from_pretrained(
         model_id,
         torch_dtype=torch.float32,
         safety_checker=None,
@@ -40,7 +48,7 @@ def generate(
     cfg: SDConfig,
     *,
     device: str = "cpu",
-    pipe: Optional[StableDiffusionPipeline] = None,
+    pipe: Optional[Any] = None,
 ) -> Path:
     """
     Generate an image and return output path.
@@ -55,6 +63,7 @@ def generate(
 
     gen = None
     if cfg.seed is not None:
+        torch, _stable_diffusion_pipeline = _load_sd_dependencies()
         gen = torch.Generator(device="cpu").manual_seed(int(cfg.seed))
 
     result = pipe(
