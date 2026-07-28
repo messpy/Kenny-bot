@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.kennybot.utils.db import connect_database, resolve_database_config, sql_placeholders
+from src.kennybot.storage.database import connect_database, resolve_database_config, sql_placeholders
 from src.kennybot.utils.env import load_env_file
 from src.kennybot.utils.paths import SERVER_REGISTRY_SQLITE_PATH
 

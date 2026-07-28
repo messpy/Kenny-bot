@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from src.kennybot.utils.db import connect_database, resolve_database_config, sql_placeholders
+from src.kennybot.storage.database import connect_database, resolve_database_config, sql_placeholders
 from src.kennybot.utils.text import looks_like_web_search_artifact
 
 

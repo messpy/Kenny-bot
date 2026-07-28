@@ -8,7 +8,7 @@ from typing import Any
 
 from src.kennybot.features.search.local_rag import RagChunk, load_rag_chunks_from_directory, load_rag_chunks_from_registry
 from src.kennybot.utils.paths import CHANNEL_RAG_DIR, SERVER_DIR, SERVER_RAG_DIR
-from src.kennybot.utils.server_registry import create_server_registry
+from src.kennybot.storage.server_repository import create_server_registry
 
 
 def _scoped_directories(

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
 from src.kennybot.utils.paths import KNOWLEDGE_DIR, LEGACY_KNOWLEDGE_DIR, SERVER_DIR, SERVER_REGISTRY_SQLITE_PATH
-from src.kennybot.utils.server_registry import ServerRegistryStore, create_server_registry, get_server_registry
+from src.kennybot.storage.server_repository import ServerRegistryStore, create_server_registry, get_server_registry
 
 
 @dataclass

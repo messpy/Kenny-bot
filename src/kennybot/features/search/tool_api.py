@@ -11,8 +11,8 @@ from src.kennybot.features.search.profile_preview import (
     format_profile_chunks,
 )
 from src.kennybot.features.search.profile_preview_api import parse_json_payload
-from src.kennybot.utils.server_registry import get_server_registry
-from src.kennybot.utils.text import strip_ansi_and_ctrl
+from src.kennybot.storage.server_repository import get_server_registry
+from src.kennybot.utils.text import sanitize_user_visible_error, strip_ansi_and_ctrl
 
 
 DEFAULT_TOOL_MENU: list[dict[str, object]] = [
@@ -334,7 +334,7 @@ def build_web_search_response(
                 "ok": False,
                 "tool": "web_search",
                 "error": "search_backend_unavailable",
-                "detail": str(exc),
+                "detail": sanitize_user_visible_error(exc),
                 "query": query,
             }
         searcher = DuckDuckGoSearch(SearchConfig(top_n=limit, max_results=max(10, limit), news_only=news_only))

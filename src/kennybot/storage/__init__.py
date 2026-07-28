@@ -1,7 +1,4 @@
-"""Deprecated compatibility imports for database helpers.
-
-New code should import from src.kennybot.storage.database.
-"""
+"""Storage and database boundaries."""
 
 from __future__ import annotations
 
