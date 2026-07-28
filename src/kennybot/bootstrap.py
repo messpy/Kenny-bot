@@ -9,9 +9,11 @@ from __future__ import annotations
 import discord
 
 from src.kennybot.bot import MyBot
+from src.kennybot.container import build_app_container
 
 
 def create_bot() -> MyBot:
     """Discord Bot インスタンスを生成する。"""
     intents = discord.Intents.all()
-    return MyBot(command_prefix="!", intents=intents)
+    container = build_app_container()
+    return MyBot(command_prefix=lambda _bot, _message: [], intents=intents, container=container)
