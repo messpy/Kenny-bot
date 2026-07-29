@@ -141,6 +141,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._ai_progress_countdowns = SimpleNamespace(
             start_countup=AsyncMock(),
             stop=AsyncMock(),
+            get_message=lambda _key: None,
         )
         self.logger._promote_ai_progress_message = AsyncMock()
         self.logger._run_ollama_chat_with_tools = AsyncMock(
@@ -366,6 +367,18 @@ class MessageLoggerSummaryTests(unittest.TestCase):
     def test_person_lookup_query_detection(self) -> None:
         self.assertTrue(self.logger._is_person_lookup_query("この人のプロフィールを教えて"))
         self.assertFalse(self.logger._is_person_lookup_query("このサーバーはなにするところ？"))
+
+    def test_mentioned_person_lookup_query_detection(self) -> None:
+        self.logger.bot = SimpleNamespace(user=SimpleNamespace(id=999))
+        msg = SimpleNamespace(
+            mentions=[
+                SimpleNamespace(id=999, bot=True),
+                SimpleNamespace(id=387651883847909376, bot=False),
+            ]
+        )
+
+        self.assertTrue(self.logger._is_mentioned_person_lookup_query(msg, "この人の情報を教えて"))
+        self.assertFalse(self.logger._is_mentioned_person_lookup_query(msg, "このサーバーの情報を教えて"))
 
     def test_channel_profile_query_detection(self) -> None:
         self.assertTrue(self.logger._is_channel_profile_query("このサーバーは何のやつ？"))
@@ -611,7 +624,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         )
         guild = SimpleNamespace(id=10, name="guild", me=bot_member)
         self.logger.bot = SimpleNamespace(
-            user=SimpleNamespace(id=999),
+            user=SimpleNamespace(id=999, name="Kennybot"),
             spam_guard=SimpleNamespace(
                 allow_message=lambda *_args, **_kwargs: True,
                 allow_ai=lambda *_args, **_kwargs: True,
@@ -653,6 +666,97 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._answer_channel_profile_query.assert_awaited_once()
         self.logger._answer_capability_query.assert_not_awaited()
         self.logger._send_runtime_model_reply.assert_not_awaited()
+        self.logger.bot.process_commands.assert_awaited_once_with(msg)
+
+    def test_on_message_does_not_route_mentioned_person_lookup_to_channel_profile(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            bot=True,
+            guild_permissions=SimpleNamespace(kick_members=True, ban_members=True),
+        )
+        target_member = SimpleNamespace(id=387651883847909376, bot=False, display_name="Kenny", name="kenny")
+        guild = SimpleNamespace(id=10, name="guild", me=bot_member)
+        ai_progress_tracker = SimpleNamespace(
+            create_ticket=AsyncMock(return_value="ticket"),
+            acquire=AsyncMock(),
+            release=AsyncMock(),
+            render=lambda *_args, **_kwargs: "progress",
+        )
+        self.logger.bot = SimpleNamespace(
+            user=SimpleNamespace(id=999, name="Kennybot"),
+            spam_guard=SimpleNamespace(
+                allow_message=lambda *_args, **_kwargs: True,
+                allow_ai=lambda *_args, **_kwargs: True,
+                ai_retry_after=lambda *_args, **_kwargs: 0,
+                should_warn=lambda *_args, **_kwargs: False,
+            ),
+            ai_progress_tracker=ai_progress_tracker,
+            process_commands=AsyncMock(),
+        )
+        self.logger._spam_guard_disabled_guilds = set()
+        self.logger._claim_message_once = lambda _message_id: True
+        self.logger._cfg_int = lambda _key, default=0: default
+        self.logger._cfg_nicknames = lambda: {}
+        self.logger._is_kenny_chat = lambda _msg: False
+        self.logger._has_recent_mention_window = lambda _msg: False
+        self.logger._arm_recent_mention_window = lambda _msg: None
+        self.logger._is_fix_request_report = lambda _text: False
+        self.logger._is_runtime_model_query = lambda _text: False
+        self.logger._is_capability_query = lambda _text: False
+        self.logger._is_server_owner_query = lambda _text: False
+        self.logger._is_member_count_query = lambda _text: False
+        self.logger._is_top_talker_query = lambda _text: False
+        self.logger._is_ai_channel_rate_limited = lambda _channel_id: False
+        self.logger._schedule_message_index = lambda *args, **kwargs: None
+        self.logger._image_attachments = lambda _msg: []
+        self.logger._sanitize_for_prompt = lambda text, _limit: text.replace("<@999>", "").strip()
+        self.logger._answer_channel_profile_query = AsyncMock()
+        self.logger._resolve_chat_context = AsyncMock(return_value=("", [], [], [], ""))
+        self.logger._current_chat_model_name = lambda: "gemini-2.5-flash"
+        self.logger._cfg_ai_timeout = lambda: 1
+        self.logger._ai_progress_countdowns = SimpleNamespace(
+            start_countup=AsyncMock(),
+            stop=AsyncMock(),
+            get_message=lambda _key: None,
+        )
+        self.logger._render_references_footer = lambda *_args, **_kwargs: ""
+        self.logger._build_final_answer = AsyncMock(return_value="Kenny さんについて確認します。")
+        self.logger._run_ollama_chat_with_tools = AsyncMock(
+            return_value=("Kenny さんについて確認します。", [], [], [])
+        )
+        self.logger._save_ai_answer_for_review = lambda *args, **kwargs: None
+        self.logger._add_ai_review_reaction = AsyncMock()
+        self.logger._log_bot_activity_event = AsyncMock()
+        self.logger._mark_ai_channel_used = lambda _channel_id: None
+        self.logger._should_use_recent_image_context = lambda _text: False
+
+        author = SimpleNamespace(
+            id=1,
+            display_name="author",
+            name="author",
+            bot=False,
+            mention="<@1>",
+        )
+        channel = SimpleNamespace(id=20, name="channel", guild=guild, send=AsyncMock())
+        msg = SimpleNamespace(
+            id=123,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="<@999> <@387651883847909376> この人の情報を教えて",
+            mentions=[bot_member, target_member],
+            role_mentions=[],
+            webhook_id=None,
+            reference=None,
+            attachments=[],
+        )
+
+        import asyncio
+
+        asyncio.run(self.logger.on_message(msg))
+
+        self.logger._answer_channel_profile_query.assert_not_awaited()
+        self.logger._resolve_chat_context.assert_awaited_once()
         self.logger.bot.process_commands.assert_awaited_once_with(msg)
 
     def test_on_message_routes_server_stats_directly(self) -> None:

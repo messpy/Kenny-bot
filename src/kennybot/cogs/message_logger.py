@@ -2337,6 +2337,32 @@ class MessageLogger(BaseCog):
         )
         return any(keyword in normalized for keyword in keywords)
 
+    def _is_mentioned_person_lookup_query(self, msg: discord.Message, text: str) -> bool:
+        if not self._is_person_lookup_query(text):
+            return False
+        normalized = normalize_keyword_match_text(text or "")
+        place_subject_terms = (
+            "サーバー",
+            "さーばー",
+            "サーバ",
+            "さーば",
+            "チャンネル",
+            "ワールド",
+            "ここ",
+            "この場所",
+        )
+        if any(term in normalized for term in place_subject_terms) and "この人" not in normalized:
+            return False
+        bot_user_id = self.bot.user.id if getattr(self.bot, "user", None) else 0
+        for member in getattr(msg, "mentions", []) or []:
+            member_id = int(getattr(member, "id", 0) or 0)
+            if not member_id or member_id == bot_user_id:
+                continue
+            if bool(getattr(member, "bot", False)):
+                continue
+            return True
+        return False
+
     def _is_fix_request_report(self, text: str) -> bool:
         normalized = normalize_keyword_match_text(
             re.sub(r"(?<!\S)/([A-Za-z][A-Za-z0-9_+\-]*)\b", r"\1", text or "")
@@ -3155,8 +3181,9 @@ class MessageLogger(BaseCog):
             max_chars=2600,
         )
         location_meta_block = self._build_location_meta_block(msg=msg)
+        mentioned_person_lookup = self._is_mentioned_person_lookup_query(msg, text)
 
-        if self._is_channel_profile_query(text):
+        if self._is_channel_profile_query(text) and not mentioned_person_lookup:
             blocks: list[tuple[str, str]] = []
             references: list[str] = []
             details: list[str] = [
@@ -3229,7 +3256,7 @@ class MessageLogger(BaseCog):
             logger.exception("Failed to build planner context via AI")
             plan = normalize_planner_plan(None)
 
-        if self._is_channel_profile_query(text):
+        if self._is_channel_profile_query(text) and not mentioned_person_lookup:
             plan["serverinfo"] = True
             rag = dict(plan.get("rag") or {})
             if not bool(rag.get("enabled")):
@@ -3240,7 +3267,7 @@ class MessageLogger(BaseCog):
 
         if plan["serverinfo"] and not channel_profile_block:
             plan["serverinfo"] = False
-        if self._is_channel_profile_query(text):
+        if self._is_channel_profile_query(text) and not mentioned_person_lookup:
             plan["rag"] = {"enabled": False, "query": None, "limit": 0}
             plan["web_search"] = {"enabled": False, "query": None, "limit": 0}
         elif self._needs_web_search_for_accuracy(text):
@@ -5378,7 +5405,11 @@ class MessageLogger(BaseCog):
             await self.bot.process_commands(msg)
             return
 
-        if not image_attachments and self._is_channel_profile_query(text):
+        if (
+            not image_attachments
+            and self._is_channel_profile_query(text)
+            and not self._is_mentioned_person_lookup_query(msg, text)
+        ):
             await self._answer_channel_profile_query(
                 msg.channel,
                 text,
