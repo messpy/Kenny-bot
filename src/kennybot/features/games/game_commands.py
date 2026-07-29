@@ -130,6 +130,7 @@ class GameCommands(commands.Cog):
         self.bot = bot
         self._aiueo_states: dict[int, AiueoBattleState] = {}
         self._werewolf_states: dict[int, WerewolfState] = {}
+        self._werewolf_timeout_tasks: dict[int, asyncio.Task[None]] = {}
         self._wordwolf_sessions: dict[int, WordWolfSessionState] = {}
         self._game_lobbies: dict[int, GameLobbyState] = {}
         self._recent_wordwolf_pairs: list[tuple[str, str]] = []
@@ -868,6 +869,12 @@ class GameCommands(commands.Cog):
             raise ValueError("現在の人狼進行では占い師は1人までです。")
         if role_counts["騎士"] > 1:
             raise ValueError("現在の人狼進行では騎士は1人までです。")
+        if role_counts["人狼"] >= n:
+            raise ValueError("人狼以外の参加者が最低1人必要です。")
+        wolf_side = role_counts["人狼"] + role_counts["狂人"]
+        village_side = n - wolf_side
+        if wolf_side >= village_side:
+            raise ValueError("開始直後に人狼陣営の勝利条件を満たす構成です。人狼または狂人を減らしてください。")
 
         roles: list[str] = []
         for role in ("人狼", "占い師", "霊媒師", "騎士", "狂人"):
@@ -1019,6 +1026,7 @@ class GameCommands(commands.Cog):
         await self._send_knight_prompt(guild, state)
         if self._werewolf_states.get(guild.id) is not state:
             return
+        self._schedule_werewolf_timeout(guild, state, phase="night")
         await self._maybe_resolve_werewolf_night(guild, state)
 
     async def _send_werewolf_prompt(self, guild: discord.Guild, state: WerewolfState) -> None:
@@ -1312,6 +1320,7 @@ class GameCommands(commands.Cog):
             return
 
         await channel.send("📨 生存者へ投票DMを送信しました。DMのリアクションで投票してください。")
+        self._schedule_werewolf_timeout(guild, state, phase="day")
 
     async def _resolve_werewolf_day_vote(self, guild: discord.Guild, state: WerewolfState) -> None:
         assert state.pending_day_votes is not None
@@ -1362,6 +1371,7 @@ class GameCommands(commands.Cog):
     async def _announce_werewolf_end(self, guild: discord.Guild, state: WerewolfState, text: str) -> None:
         state.phase = "ended"
         state.resolving = False
+        self._cancel_werewolf_timeout(guild.id)
         channel = guild.get_channel(state.channel_id)
         if isinstance(channel, discord.TextChannel):
             survivors = []
@@ -1399,7 +1409,70 @@ class GameCommands(commands.Cog):
         if wolves_ready and seer_ready and knight_ready:
             state.resolving = True
             state.phase = "resolving_night"
+            self._cancel_werewolf_timeout(guild.id)
             await self._resolve_werewolf_night(guild, state)
+
+    def _werewolf_timeout_seconds(self, guild_id: int, phase: str) -> int:
+        key = "night_timeout_seconds" if phase == "night" else "day_vote_timeout_seconds"
+        default = 180 if phase == "night" else 300
+        return max(30, int(_settings.get(f"games.werewolf.{key}", default, guild_id=guild_id)))
+
+    def _cancel_werewolf_timeout(self, guild_id: int) -> None:
+        task = self._werewolf_timeout_tasks.pop(guild_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_werewolf_timeout(
+        self,
+        guild: discord.Guild,
+        state: WerewolfState,
+        *,
+        phase: str,
+    ) -> None:
+        self._cancel_werewolf_timeout(guild.id)
+
+        async def runner() -> None:
+            try:
+                await asyncio.sleep(self._werewolf_timeout_seconds(guild.id, phase))
+                current = asyncio.current_task()
+                if self._werewolf_timeout_tasks.get(guild.id) is current:
+                    self._werewolf_timeout_tasks.pop(guild.id, None)
+                await self._resolve_werewolf_timeout(guild, state, phase=phase)
+            except asyncio.CancelledError:
+                return
+
+        self._werewolf_timeout_tasks[guild.id] = asyncio.create_task(runner())
+
+    async def _resolve_werewolf_timeout(
+        self,
+        guild: discord.Guild,
+        state: WerewolfState,
+        *,
+        phase: str,
+    ) -> None:
+        if self._werewolf_states.get(guild.id) is not state:
+            return
+        if state.resolving or state.phase != phase:
+            return
+        channel = guild.get_channel(state.channel_id)
+        if isinstance(channel, discord.TextChannel):
+            if phase == "night":
+                await channel.send("⏱️ 夜行動の制限時間になったため、集まっている行動だけで処理します。")
+            else:
+                await channel.send("⏱️ 昼投票の制限時間になったため、集まっている投票だけで処理します。")
+        if phase == "night":
+            state.resolving = True
+            state.phase = "resolving_night"
+            await self._resolve_werewolf_night(guild, state)
+            return
+        if (
+            phase == "day"
+            and state.pending_day_votes is not None
+            and state.day_vote_candidates is not None
+        ):
+            state.resolving = True
+            state.phase = "resolving_day"
+            await self._resolve_werewolf_day_vote(guild, state)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -1477,6 +1550,7 @@ class GameCommands(commands.Cog):
                 if len(state.pending_day_votes) >= delivered_voter_count:
                     state.resolving = True
                     state.phase = "resolving_day"
+                    self._cancel_werewolf_timeout(guild.id)
                     await self._resolve_werewolf_day_vote(guild, state)
                 return
 

@@ -43,6 +43,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "max_response_length": 1800,
             "max_response_length_prompt": 1800,
         },
+        "games": {
+            "lobby_timeout_seconds": 600,
+            "werewolf": {
+                "night_timeout_seconds": 180,
+                "day_vote_timeout_seconds": 300,
+            },
+        },
         "summarize_recent_default_messages": 30,
         "summarize_recent": {
             "history_fetch_limit": 300,

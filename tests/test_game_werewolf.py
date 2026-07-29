@@ -57,6 +57,26 @@ class WerewolfGameTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "騎士は1人まで"):
             cog._build_werewolf_roles(8, WerewolfRoleOptions(knight_count=2))
 
+    def test_rejects_initial_werewolf_win_composition(self) -> None:
+        cog = self._cog()
+
+        with self.assertRaisesRegex(ValueError, "開始直後に人狼陣営の勝利条件"):
+            cog._build_werewolf_roles(
+                4,
+                WerewolfRoleOptions(wolf_count=2, madman_count=0, seer_count=1),
+            )
+        with self.assertRaisesRegex(ValueError, "人狼以外の参加者"):
+            cog._build_werewolf_roles(
+                4,
+                WerewolfRoleOptions(
+                    wolf_count=4,
+                    seer_count=0,
+                    medium_count=0,
+                    knight_count=0,
+                    madman_count=0,
+                ),
+            )
+
     async def test_start_day_vote_invalidates_night_action_messages(self) -> None:
         class FakeTextChannel:
             def __init__(self) -> None:
@@ -84,6 +104,7 @@ class WerewolfGameTests(unittest.IsolatedAsyncioTestCase):
 
         channel = FakeTextChannel()
         guild = SimpleNamespace(
+            id=10,
             get_channel=lambda _channel_id: channel,
             get_member=fake_member,
         )
@@ -121,7 +142,7 @@ class WerewolfGameTests(unittest.IsolatedAsyncioTestCase):
         cog._resolve_werewolf_night.assert_not_awaited()
 
     async def test_night_resolution_uses_only_prompted_action_users(self) -> None:
-        guild = SimpleNamespace()
+        guild = SimpleNamespace(id=10)
         cog = self._cog(guild)
         state = self._state(
             active_wolf_action_user_ids=set(),
@@ -162,7 +183,7 @@ class WerewolfGameTests(unittest.IsolatedAsyncioTestCase):
         cog._maybe_resolve_werewolf_night.assert_awaited_once_with(guild, state)
 
     async def test_day_vote_resolution_runs_once(self) -> None:
-        guild = SimpleNamespace()
+        guild = SimpleNamespace(id=10)
         cog = self._cog(guild)
         state = self._state(
             phase="day",
@@ -182,6 +203,63 @@ class WerewolfGameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.phase, "resolving_day")
         self.assertTrue(state.resolving)
         cog._resolve_werewolf_day_vote.assert_awaited_once_with(guild, state)
+        self.assertNotIn(state.guild_id, cog._werewolf_timeout_tasks)
+
+    async def test_werewolf_night_timeout_resolves_partial_actions(self) -> None:
+        class FakeTextChannel:
+            def __init__(self) -> None:
+                self.send = AsyncMock()
+
+        channel = FakeTextChannel()
+        guild = SimpleNamespace(
+            id=10,
+            get_channel=lambda _channel_id: channel,
+        )
+        cog = self._cog(guild)
+        state = self._state(
+            phase="night",
+            active_wolf_action_user_ids={1},
+            active_seer_action_user_ids={2},
+            active_knight_action_user_ids={3},
+            pending_wolf_votes={1: 4},
+        )
+        cog._werewolf_states[state.guild_id] = state
+        cog._resolve_werewolf_night = AsyncMock()
+
+        with patch("src.kennybot.features.games.game_commands.discord.TextChannel", FakeTextChannel):
+            await cog._resolve_werewolf_timeout(guild, state, phase="night")
+
+        self.assertEqual(state.phase, "resolving_night")
+        self.assertTrue(state.resolving)
+        cog._resolve_werewolf_night.assert_awaited_once_with(guild, state)
+        channel.send.assert_awaited_once()
+
+    async def test_werewolf_day_timeout_resolves_partial_votes(self) -> None:
+        class FakeTextChannel:
+            def __init__(self) -> None:
+                self.send = AsyncMock()
+
+        channel = FakeTextChannel()
+        guild = SimpleNamespace(
+            id=10,
+            get_channel=lambda _channel_id: channel,
+        )
+        cog = self._cog(guild)
+        state = self._state(
+            phase="day",
+            day_vote_candidates=[1, 2, 3],
+            pending_day_votes={1: 2},
+        )
+        cog._werewolf_states[state.guild_id] = state
+        cog._resolve_werewolf_day_vote = AsyncMock()
+
+        with patch("src.kennybot.features.games.game_commands.discord.TextChannel", FakeTextChannel):
+            await cog._resolve_werewolf_timeout(guild, state, phase="day")
+
+        self.assertEqual(state.phase, "resolving_day")
+        self.assertTrue(state.resolving)
+        cog._resolve_werewolf_day_vote.assert_awaited_once_with(guild, state)
+        channel.send.assert_awaited_once()
 
     async def test_wait_for_game_start_times_out(self) -> None:
         import asyncio
