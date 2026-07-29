@@ -1066,6 +1066,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._has_recent_mention_window = lambda _msg: False
         self.logger._is_fix_request_report = lambda _text: True
         self.logger._log_fix_request = AsyncMock()
+        self.logger._is_ai_channel_rate_limited = lambda _channel_id: False
         self.logger._schedule_message_index = lambda *args, **kwargs: None
 
         author = SimpleNamespace(
@@ -1092,6 +1093,107 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         asyncio.run(self.logger.on_message(msg))
 
         self.logger._log_fix_request.assert_awaited_once_with(msg, "この説明違うから直して")
+        self.logger.bot.process_commands.assert_awaited_once_with(msg)
+
+    def test_on_message_rate_limited_fix_request_does_not_log_repair(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            guild_permissions=SimpleNamespace(kick_members=True, ban_members=True),
+        )
+        guild = SimpleNamespace(id=10, name="guild", me=bot_member)
+        self.logger.bot = SimpleNamespace(
+            user=SimpleNamespace(id=999, name="Kennybot"),
+            spam_guard=SimpleNamespace(
+                allow_message=lambda *_args, **_kwargs: True,
+                allow_ai=lambda *_args, **_kwargs: True,
+                ai_retry_after=lambda *_args, **_kwargs: 0,
+                should_warn=lambda *_args, **_kwargs: False,
+            ),
+            process_commands=AsyncMock(),
+        )
+        self.logger._cfg_int = lambda _key, default=0: default
+        self.logger._is_kenny_chat = lambda _msg: False
+        self.logger._has_recent_mention_window = lambda _msg: False
+        self.logger._is_fix_request_report = lambda _text: True
+        self.logger._log_fix_request = AsyncMock()
+        self.logger._is_ai_channel_rate_limited = lambda _channel_id: True
+        self.logger._arm_recent_mention_window = lambda _msg: None
+
+        author = SimpleNamespace(
+            id=1,
+            display_name="author",
+            name="author",
+            bot=False,
+            mention="<@1>",
+        )
+        channel = SimpleNamespace(id=20, name="channel", guild=guild, send=AsyncMock())
+        msg = SimpleNamespace(
+            id=30,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="<@999> さっきの説明違うから修正して",
+            mentions=[SimpleNamespace(id=999)],
+            webhook_id=None,
+            reference=None,
+        )
+
+        import asyncio
+
+        asyncio.run(self.logger.on_message(msg))
+
+        self.logger._log_fix_request.assert_not_awaited()
+        channel.send.assert_awaited_once()
+        self.logger.bot.process_commands.assert_awaited_once_with(msg)
+
+    def test_on_message_rate_limited_authoritative_fix_does_not_log_repair(self) -> None:
+        bot_member = SimpleNamespace(
+            id=999,
+            guild_permissions=SimpleNamespace(kick_members=True, ban_members=True),
+        )
+        guild = SimpleNamespace(id=10, name="guild", me=bot_member)
+        self.logger.bot = SimpleNamespace(
+            user=SimpleNamespace(id=999, name="Kennybot"),
+            spam_guard=SimpleNamespace(
+                allow_message=lambda *_args, **_kwargs: True,
+                allow_ai=lambda *_args, **_kwargs: True,
+            ),
+            process_commands=AsyncMock(),
+        )
+        self.logger._cfg_int = lambda _key, default=0: default
+        self.logger._cfg_int_list = lambda _key: [387651883847909376]
+        self.logger._is_kenny_chat = lambda _msg: False
+        self.logger._has_recent_mention_window = lambda _msg: False
+        self.logger._is_fix_request_report = lambda _text: True
+        self.logger._log_fix_request = AsyncMock()
+        self.logger._is_ai_channel_rate_limited = lambda _channel_id: True
+        self.logger._schedule_message_index = lambda *args, **kwargs: None
+
+        author = SimpleNamespace(
+            id=387651883847909376,
+            display_name="admin",
+            name="admin",
+            bot=False,
+            mention="<@387651883847909376>",
+        )
+        channel = SimpleNamespace(id=20, name="channel", guild=guild, send=AsyncMock())
+        msg = SimpleNamespace(
+            id=30,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="この説明違うから直して",
+            mentions=[],
+            webhook_id=None,
+            reference=None,
+        )
+
+        import asyncio
+
+        asyncio.run(self.logger.on_message(msg))
+
+        self.logger._log_fix_request.assert_not_awaited()
+        channel.send.assert_awaited_once()
         self.logger.bot.process_commands.assert_awaited_once_with(msg)
 
     def test_channel_profile_query_runs_llm_even_with_fallback_answer(self) -> None:

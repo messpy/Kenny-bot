@@ -3624,6 +3624,38 @@ class MessageLogger(BaseCog):
         self._ai_channel_last[channel_id] = now
         return False
 
+    async def _reject_if_ai_rate_limited(
+        self,
+        msg: discord.Message,
+        *,
+        spam_guard_disabled: bool,
+        should_treat_as_mention: bool = False,
+    ) -> bool:
+        guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
+        if not spam_guard_disabled and not guard.allow_ai(msg.author.id):
+            remain = max(1, int(guard.ai_retry_after(msg.author.id)) + 1)
+            if guard.should_warn(msg.author.id):
+                await self._ai_retry_countdowns.start_or_replace(
+                    key=f"ai-retry:{msg.channel.id}:{msg.author.id}",
+                    channel=msg.channel,
+                    initial_text=f"⏳ 残り {remain} 秒",
+                    total_seconds=remain,
+                    mention_user_id=msg.author.id,
+                    done_text="✅ AI 呼び出しを再開できます。",
+                )
+            if should_treat_as_mention:
+                self._arm_recent_mention_window(msg)
+            return True
+        if self._is_ai_channel_rate_limited(msg.channel.id):
+            await msg.channel.send(
+                f"{msg.author.mention}\nこのチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            if should_treat_as_mention:
+                self._arm_recent_mention_window(msg)
+            return True
+        return False
+
     async def _handle_dm_message(self, msg: discord.Message) -> None:
         author_name = (
             msg.author.display_name
@@ -5231,10 +5263,14 @@ class MessageLogger(BaseCog):
                     self._cfg_int("security.max_user_message_chars", 1200),
                 )
                 if self._is_fix_request_report(sanitized_text):
-                    try:
-                        await self._log_fix_request(msg, sanitized_text)
-                    except Exception:
-                        logger.debug("Failed to log authoritative correction", exc_info=True)
+                    if not await self._reject_if_ai_rate_limited(
+                        msg,
+                        spam_guard_disabled=spam_guard_disabled,
+                    ):
+                        try:
+                            await self._log_fix_request(msg, sanitized_text)
+                        except Exception:
+                            logger.debug("Failed to log authoritative correction", exc_info=True)
             user_name = msg.author.display_name or msg.author.name or str(msg.author.id)
             self._schedule_message_index(
                 guild_id=msg.guild.id,
@@ -5302,7 +5338,16 @@ class MessageLogger(BaseCog):
         )
 
         is_fix_request = self._is_fix_request_report(text)
+        repair_rate_limit_checked = False
         if is_fix_request:
+            if await self._reject_if_ai_rate_limited(
+                msg,
+                spam_guard_disabled=spam_guard_disabled,
+                should_treat_as_mention=should_treat_as_mention,
+            ):
+                await self.bot.process_commands(msg)
+                return
+            repair_rate_limit_checked = True
             try:
                 await self._log_fix_request(msg, text)
             except Exception:
@@ -5464,31 +5509,14 @@ class MessageLogger(BaseCog):
         )
 
         # スパム対策（AI 呼び出しレート制限）
-        guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
-        if not spam_guard_disabled and not guard.allow_ai(msg.author.id):
-            remain = max(1, int(guard.ai_retry_after(msg.author.id)) + 1)
-            if guard.should_warn(msg.author.id):
-                await self._ai_retry_countdowns.start_or_replace(
-                    key=f"ai-retry:{msg.channel.id}:{msg.author.id}",
-                    channel=msg.channel,
-                    initial_text=f"⏳ 残り {remain} 秒",
-                    total_seconds=remain,
-                    mention_user_id=msg.author.id,
-                    done_text="✅ AI 呼び出しを再開できます。",
-                )
-            if should_treat_as_mention:
-                self._arm_recent_mention_window(msg)
-            await self.bot.process_commands(msg)
-            return
-        if self._is_ai_channel_rate_limited(msg.channel.id):
-            await msg.channel.send(
-                f"{msg.author.mention}\nこのチャンネルではAI応答の間隔制限中です。数秒待ってから再実行してください。",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            if should_treat_as_mention:
-                self._arm_recent_mention_window(msg)
-            await self.bot.process_commands(msg)
-            return
+        if not repair_rate_limit_checked:
+            if await self._reject_if_ai_rate_limited(
+                msg,
+                spam_guard_disabled=spam_guard_disabled,
+                should_treat_as_mention=should_treat_as_mention,
+            ):
+                await self.bot.process_commands(msg)
+                return
 
         # =========================
         # Schedule embedding indexing
