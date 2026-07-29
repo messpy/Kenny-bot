@@ -1198,6 +1198,7 @@ async def _run_mention_preview(args: argparse.Namespace) -> int:
         print(f"mentions={[m.id for m in mentions]!r}")
         if str(getattr(args, "result_file", "") or "").strip():
             _write_text_result(str(args.result_file), result_lines)
+        await _shutdown_preview_tasks()
         return 0
 
     if args.mock_llm and args.dry_run_send and args.preset in {"channel_profile", "runtime_model", "capability"}:

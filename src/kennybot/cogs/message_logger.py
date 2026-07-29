@@ -4877,6 +4877,7 @@ class MessageLogger(BaseCog):
             block
             for block in [
                 self._build_command_catalog_context(),
+                self._get_bot_game_catalog(),
                 self._build_rag_context(
                     f"{normalized_query}\n機能一覧 できること 使い方 コマンド",
                     limit=12,

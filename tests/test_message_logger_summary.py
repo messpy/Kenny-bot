@@ -236,6 +236,155 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.assertIn(url, send_kwargs["references"])
         self.assertEqual(send_kwargs["web_queries"], [])
 
+    def test_on_message_mentioned_person_prompt_includes_person_context(self) -> None:
+        import asyncio
+
+        target = SimpleNamespace(id=387651883847909376, bot=False, display_name="Kenny", name="kenny")
+        history_context = "\n".join(
+            [
+                "[この会話で明示された人物候補]",
+                "- mentioned_1: Kenny (387651883847909376)",
+                "この質問に人物が関わるなら、上の mention 候補を author より優先して解釈すること。",
+                "",
+                "[Kenny のプロフィール]",
+                "[メンバープロフィール]",
+                "対象: Kenny (387651883847909376)",
+            ]
+        )
+        self._setup_normal_chat_logger(
+            history_context=history_context,
+            references=["source:member_profile", "source:member_history"],
+        )
+        msg = self._normal_chat_message(
+            "<@999> <@387651883847909376> この人の情報を教えて",
+            mentions=[SimpleNamespace(id=999, bot=True), target],
+        )
+
+        with patch("src.kennybot.cogs.message_logger.log_ai_output"):
+            asyncio.run(self.logger.on_message(msg))
+
+        user_prompt = self.logger._run_ollama_chat_with_tools.await_args.kwargs["messages"][1]["content"]
+        self.assertIn("[この会話で明示された人物候補]", user_prompt)
+        self.assertIn("mentioned_1: Kenny (387651883847909376)", user_prompt)
+        self.assertIn("author より優先", user_prompt)
+        self.assertIn("[メンバープロフィール]", user_prompt)
+        self.assertIn("最新メッセージ:\nこの人の情報を教えて", user_prompt)
+        self.assertNotIn("serverinfo_strict", user_prompt)
+
+    def test_on_message_web_search_prompt_includes_evidence_constraints(self) -> None:
+        import asyncio
+
+        history_context = "\n".join(
+            [
+                "[検索結果の要約]",
+                "検索結果",
+                "注意: 以下のタイトル・日付・URL・抜粋だけを根拠にし、出典にない具体事項は確認できないと扱うこと。",
+                "- 2026-07-29: Mock News",
+                "  https://example.com/news",
+                "  ローカル preview 用の抜粋です。",
+            ]
+        )
+        self._setup_normal_chat_logger(
+            history_context=history_context,
+            references=["source:web_search", "https://example.com/news"],
+            web_queries=["今日のニュース"],
+        )
+        msg = self._normal_chat_message("<@999> 今日のニュースを教えて")
+
+        with patch("src.kennybot.cogs.message_logger.log_ai_output"):
+            asyncio.run(self.logger.on_message(msg))
+
+        user_prompt = self.logger._run_ollama_chat_with_tools.await_args.kwargs["messages"][1]["content"]
+        system_prompt = self.logger._run_ollama_chat_with_tools.await_args.kwargs["messages"][0]["content"]
+        self.assertIn("外部検索結果がある場合", user_prompt)
+        self.assertIn("タイトル・日付・URL・抜粋だけを根拠", user_prompt)
+        self.assertIn("検索結果", user_prompt)
+        self.assertIn("https://example.com/news", user_prompt)
+        self.assertIn("最新メッセージ:\n今日のニュースを教えて", user_prompt)
+        self.assertIn("現在日時", system_prompt)
+        self.assertIn("確認できた日付なしに断定しない", system_prompt)
+
+    def test_capability_query_prompt_includes_full_feature_catalog(self) -> None:
+        import asyncio
+
+        ai_progress_tracker = SimpleNamespace(
+            create_ticket=AsyncMock(return_value="ticket"),
+            acquire=AsyncMock(),
+            release=AsyncMock(),
+            render=lambda *_args, **_kwargs: "progress",
+        )
+        self.logger.bot = SimpleNamespace(ai_progress_tracker=ai_progress_tracker)
+        self.logger._is_ai_channel_rate_limited = lambda _channel_id: False
+        self.logger._is_runtime_model_query = lambda _text: False
+        self.logger._build_channel_profile_block = lambda **_kwargs: "[PROFILE]\nKennybot channel"
+        self.logger._build_rag_context = lambda *args, **kwargs: (
+            "[RAG]\n追加Q&A: 追加の使い方"
+            if kwargs.get("capability_only")
+            else ""
+        )
+        self.logger._format_git_updates = lambda count=4: ""
+        self.logger._is_update_query = lambda _text: False
+        self.logger._current_chat_model_name = lambda: "gemini-2.5-flash"
+        self.logger._ai_progress_countdowns = SimpleNamespace(
+            start_countup=AsyncMock(),
+            stop=AsyncMock(),
+            get_message=lambda _key: None,
+        )
+        self.logger._run_ollama_text = AsyncMock(return_value="機能説明です。")
+        self.logger._send_ai_text_response = AsyncMock(return_value=[])
+        self.logger._log_bot_activity_event = AsyncMock()
+        channel = SimpleNamespace(id=20, guild=SimpleNamespace(id=10), send=AsyncMock())
+        source_msg = SimpleNamespace(
+            id=30,
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(id=1),
+        )
+
+        asyncio.run(
+            self.logger._answer_capability_query(
+                channel,
+                "あなたの機能を説明して",
+                mention="<@1>",
+                source_msg=source_msg,
+                channel_id=20,
+            )
+        )
+
+        prompt = self.logger._run_ollama_text.await_args.kwargs["prompt"]
+        self.assertIn("機能説明なら、資料から確認できる範囲をカテゴリごとにできるだけ漏れなく", prompt)
+        self.assertIn("確認できたものは省かず", prompt)
+        self.assertIn("[HELP / 会話機能]", prompt)
+        self.assertIn("[HELP / 案内・検索機能]", prompt)
+        self.assertIn("[HELP / 議事録機能]", prompt)
+        for command in (
+            "/help",
+            "/bot_info",
+            "/ping",
+            "/summarize_recent",
+            "/set_recent_window",
+            "/config",
+            "/model_list",
+            "/model_change",
+            "/minutes",
+            "/reaction_role_set",
+            "/reaction_role_remove",
+            "/reaction_role_list",
+            "/modpanel",
+            "/birthday",
+            "/tts",
+            "/game",
+            "/timer",
+            "/vc_control",
+            "/group_match",
+            "/vrchat_world",
+            "/vrc_user",
+        ):
+            self.assertIn(command, prompt)
+        self.assertIn("mode=ワードウルフ", prompt)
+        self.assertIn("mode=人狼役職配布", prompt)
+        self.assertIn("追加Q&A: 追加の使い方", prompt)
+        self.logger._send_ai_text_response.assert_awaited_once()
+
     def test_on_message_followup_uses_recent_mention_window_and_previous_context(self) -> None:
         import asyncio
 
