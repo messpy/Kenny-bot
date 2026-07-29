@@ -67,6 +67,11 @@ class WerewolfState:
     round_no: int = 1
     medium_result_target: int | None = None
     last_guard_target: int | None = None
+    phase: str = "night"
+    resolving: bool = False
+    active_wolf_action_user_ids: set[int] | None = None
+    active_seer_action_user_ids: set[int] | None = None
+    active_knight_action_user_ids: set[int] | None = None
 
 
 @dataclass
@@ -229,6 +234,12 @@ class GameCommands(commands.Cog):
                 ephemeral=True,
             )
             return
+        if mode.value == "werewolf" and interaction.guild.id in self._werewolf_states:
+            await interaction.response.send_message(
+                "このサーバーでは人狼ゲームが進行中です。終了後に再実行してください。",
+                ephemeral=True,
+            )
+            return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -247,8 +258,25 @@ class GameCommands(commands.Cog):
             f"募集メッセージを作成しました。参加者が揃ったら、そのメッセージに {self.START_EMOJI} を押してください。",
             ephemeral=True,
         )
-        await self._wait_for_game_start(recruit.id, interaction.user.id)
+        lobby_timeout = max(30, int(_settings.get("games.lobby_timeout_seconds", 600, guild_id=interaction.guild.id)))
+        started = await self._wait_for_game_start(
+            recruit.id,
+            interaction.user.id,
+            timeout_sec=lobby_timeout,
+        )
         self._game_lobbies.pop(recruit.id, None)
+        if not started:
+            await recruit.edit(
+                content=(
+                    f"🎲 **{mode.name}** 参加受付を終了しました。\n"
+                    "開始リアクションが押されなかったため、募集をキャンセルしました。"
+                )
+            )
+            await interaction.followup.send(
+                "開始リアクションが押されなかったため、募集をキャンセルしました。",
+                ephemeral=True,
+            )
+            return
         await recruit.edit(
             content=(
                 f"🎲 **{mode.name}** 参加受付を終了しました。\n"
@@ -364,7 +392,13 @@ class GameCommands(commands.Cog):
             ephemeral=True,
         )
 
-    async def _wait_for_game_start(self, message_id: int, host_user_id: int) -> None:
+    async def _wait_for_game_start(
+        self,
+        message_id: int,
+        host_user_id: int,
+        *,
+        timeout_sec: int = 600,
+    ) -> bool:
         def check(payload: discord.RawReactionActionEvent) -> bool:
             return (
                 payload.message_id == message_id
@@ -372,7 +406,14 @@ class GameCommands(commands.Cog):
                 and str(payload.emoji) == self.START_EMOJI
             )
 
-        await self.bot.wait_for("raw_reaction_add", check=check)
+        try:
+            await asyncio.wait_for(
+                self.bot.wait_for("raw_reaction_add", check=check),
+                timeout=max(30, int(timeout_sec)),
+            )
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     def _build_game_lobby_content(
         self,
@@ -823,6 +864,10 @@ class GameCommands(commands.Cog):
             raise ValueError("指定した役職人数の合計が参加者数を超えています。")
         if role_counts["人狼"] <= 0:
             raise ValueError("人狼は最低1人必要です。")
+        if role_counts["占い師"] > 1:
+            raise ValueError("現在の人狼進行では占い師は1人までです。")
+        if role_counts["騎士"] > 1:
+            raise ValueError("現在の人狼進行では騎士は1人までです。")
 
         roles: list[str] = []
         for role in ("人狼", "占い師", "霊媒師", "騎士", "狂人"):
@@ -908,6 +953,11 @@ class GameCommands(commands.Cog):
             round_no=1,
             medium_result_target=None,
             last_guard_target=None,
+            phase="night",
+            resolving=False,
+            active_wolf_action_user_ids=set(),
+            active_seer_action_user_ids=set(),
+            active_knight_action_user_ids=set(),
         )
         self._werewolf_states[interaction.guild.id] = state
         await interaction.channel.send(
@@ -939,6 +989,8 @@ class GameCommands(commands.Cog):
             await self._announce_werewolf_end(guild, state, end_text)
             return
 
+        state.phase = "night"
+        state.resolving = False
         state.action_message_ids.clear()
         state.pending_wolf_votes.clear()
         state.pending_guard_target = None
@@ -950,14 +1002,24 @@ class GameCommands(commands.Cog):
         state.pending_day_votes = None
         state.day_vote_runoff = False
         state.medium_result_target = None
+        state.active_wolf_action_user_ids = set()
+        state.active_seer_action_user_ids = set()
+        state.active_knight_action_user_ids = set()
 
         channel = guild.get_channel(state.channel_id)
         if isinstance(channel, discord.TextChannel):
             await channel.send(f"🌙 **夜 {state.round_no}** 各役職はDMを確認してください。")
 
         await self._send_werewolf_prompt(guild, state)
+        if self._werewolf_states.get(guild.id) is not state:
+            return
         await self._send_seer_prompt(guild, state)
+        if self._werewolf_states.get(guild.id) is not state:
+            return
         await self._send_knight_prompt(guild, state)
+        if self._werewolf_states.get(guild.id) is not state:
+            return
+        await self._maybe_resolve_werewolf_night(guild, state)
 
     async def _send_werewolf_prompt(self, guild: discord.Guild, state: WerewolfState) -> None:
         targets = self._living_nonwolves(state)
@@ -989,6 +1051,8 @@ class GameCommands(commands.Cog):
                 for emoji in emoji_to_target:
                     await msg.add_reaction(emoji)
                 state.action_message_ids[msg.id] = ("wolf", wolf_uid)
+                if state.active_wolf_action_user_ids is not None:
+                    state.active_wolf_action_user_ids.add(wolf_uid)
             except Exception:
                 continue
 
@@ -1017,6 +1081,8 @@ class GameCommands(commands.Cog):
             for emoji in emoji_to_target:
                 await msg.add_reaction(emoji)
             state.action_message_ids[msg.id] = ("seer", seers[0])
+            if state.active_seer_action_user_ids is not None:
+                state.active_seer_action_user_ids.add(seers[0])
         except Exception:
             return
 
@@ -1062,6 +1128,8 @@ class GameCommands(commands.Cog):
             for emoji in emoji_to_target:
                 await msg.add_reaction(emoji)
             state.action_message_ids[msg.id] = ("knight", knight_uid)
+            if state.active_knight_action_user_ids is not None:
+                state.active_knight_action_user_ids.add(knight_uid)
         except Exception:
             return
 
@@ -1161,6 +1229,12 @@ class GameCommands(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             return
 
+        state.phase = "day"
+        state.resolving = False
+        state.action_message_ids.clear()
+        state.active_wolf_action_user_ids = set()
+        state.active_seer_action_user_ids = set()
+        state.active_knight_action_user_ids = set()
         vote_candidates = candidates or sorted(state.alive_user_ids)
         if not vote_candidates:
             await self._announce_werewolf_end(guild, state, "投票対象がいないため終了しました。")
@@ -1286,6 +1360,8 @@ class GameCommands(commands.Cog):
         await self._begin_werewolf_round(guild, state)
 
     async def _announce_werewolf_end(self, guild: discord.Guild, state: WerewolfState, text: str) -> None:
+        state.phase = "ended"
+        state.resolving = False
         channel = guild.get_channel(state.channel_id)
         if isinstance(channel, discord.TextChannel):
             survivors = []
@@ -1312,14 +1388,17 @@ class GameCommands(commands.Cog):
         return []
 
     async def _maybe_resolve_werewolf_night(self, guild: discord.Guild, state: WerewolfState) -> None:
-        living_wolves = self._living_wolves(state)
-        seers = self._living_role_users(state, "占い師")
-        knights = self._living_role_users(state, "騎士")
-        wolves_ready = len(state.pending_wolf_votes) >= len(living_wolves)
-        seer_ready = not seers or state.pending_seer_target is not None
-        knight_targets = self._werewolf_targets_for_actor(state, "knight", knights[0]) if knights else []
-        knight_ready = not knights or state.pending_guard_target is not None or not knight_targets
+        if state.phase != "night" or state.resolving:
+            return
+        active_wolves = state.active_wolf_action_user_ids or set()
+        active_seers = state.active_seer_action_user_ids or set()
+        active_knights = state.active_knight_action_user_ids or set()
+        wolves_ready = all(uid in state.pending_wolf_votes for uid in active_wolves)
+        seer_ready = not active_seers or state.pending_seer_target is not None
+        knight_ready = not active_knights or state.pending_guard_target is not None
         if wolves_ready and seer_ready and knight_ready:
+            state.resolving = True
+            state.phase = "resolving_night"
             await self._resolve_werewolf_night(guild, state)
 
     @commands.Cog.listener()
@@ -1375,7 +1454,9 @@ class GameCommands(commands.Cog):
             day_vote_voter_uid = (state.day_vote_message_ids or {}).get(payload.message_id)
             if day_vote_voter_uid is not None:
                 if (
-                    payload.user_id != day_vote_voter_uid
+                    state.phase != "day"
+                    or state.resolving
+                    or payload.user_id != day_vote_voter_uid
                     or payload.user_id not in state.alive_user_ids
                     or state.day_vote_candidates is None
                     or state.pending_day_votes is None
@@ -1394,12 +1475,16 @@ class GameCommands(commands.Cog):
                 state.pending_day_votes[payload.user_id] = target_uid
                 delivered_voter_count = len(set((state.day_vote_message_ids or {}).values()))
                 if len(state.pending_day_votes) >= delivered_voter_count:
+                    state.resolving = True
+                    state.phase = "resolving_day"
                     await self._resolve_werewolf_day_vote(guild, state)
                 return
 
             action = state.action_message_ids.get(payload.message_id)
             if action is None:
                 continue
+            if state.phase != "night" or state.resolving:
+                return
             role, actor_uid = action
             if actor_uid != payload.user_id:
                 continue
