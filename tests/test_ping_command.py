@@ -104,6 +104,20 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
         response.send_message.assert_awaited_once_with("この操作は管理者のみ実行できます。", ephemeral=True)
         response.defer.assert_not_awaited()
 
+    async def test_set_recent_window_requires_admin(self) -> None:
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+        response = SimpleNamespace(send_message=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response,
+            user=SimpleNamespace(id=2, guild_permissions=SimpleNamespace(administrator=False)),
+            guild=SimpleNamespace(id=1),
+        )
+
+        await SlashCommands.set_recent_window.callback(cog, interaction, 50)
+
+        response.send_message.assert_awaited_once_with("この操作は管理者のみ実行できます。", ephemeral=True)
+
     async def test_export_channel_messages_sends_text_file(self) -> None:
         class FakeTextChannel:
             id = 10

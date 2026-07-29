@@ -1409,12 +1409,15 @@ class SlashCommands(commands.Cog):
         )
 
     @app_commands.command(name=SET_RECENT_WINDOW_META.name, description=SET_RECENT_WINDOW_META.description)
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(messages="既定の件数（1〜300）")
     async def set_recent_window(
         self,
         interaction: discord.Interaction,
         messages: app_commands.Range[int, 1, 300],
     ):
+        if not await self._ensure_admin_like(interaction):
+            return
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
