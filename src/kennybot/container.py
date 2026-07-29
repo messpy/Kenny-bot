@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
 import os
@@ -57,6 +58,23 @@ def resolve_ollama_host_for_runtime(host: str | None) -> str | None:
     return value
 
 
+class ClientTextRunner:
+    """Async text runner backed by OllamaClientService for Gemini/Ollama fallback."""
+
+    def __init__(self, client: OllamaClientService) -> None:
+        self.client = client
+
+    async def run_async(self, prompt: str, *, model: str) -> str:
+        result = await asyncio.to_thread(
+            self.client.chat_simple,
+            model=model,
+            prompt=prompt,
+        )
+        if not result:
+            raise RuntimeError(f"text generation returned empty response (model={model})")
+        return result
+
+
 def build_app_container() -> AppContainer:
     settings = get_settings()
     app_config = get_app_config()
@@ -93,6 +111,15 @@ def build_app_container() -> AppContainer:
         debug=False,
     )
 
+    ollama_host = resolve_ollama_host_for_runtime(os.getenv("OLLAMA_HOST"))
+    if ollama_host:
+        logger.info("Using remote Ollama: %s", ollama_host)
+        ollama_client = create_ollama_client(host=ollama_host)
+    else:
+        logger.info("Using local Ollama (http://localhost:11434)")
+        ollama_client = create_ollama_client()
+    ai_search_runner = ClientTextRunner(ollama_client)
+
     try:
         ai_search: AISearchService | None = AISearchService(
             searcher=DuckDuckGoSearch(
@@ -106,7 +133,7 @@ def build_app_container() -> AppContainer:
                 )
             ),
             summarizer=WebSummarizer(
-                runner=runner,
+                runner=ai_search_runner,
                 config=SummaryConfig(
                     mode="normal",
                     concurrency=2,
@@ -115,7 +142,7 @@ def build_app_container() -> AppContainer:
                     max_chars=400,
                 ),
             ),
-            runner=runner,
+            runner=ai_search_runner,
             final_model=ai_models.summary,
             final_fallback_models=[ai_models.default],
             debug=False,
@@ -123,14 +150,6 @@ def build_app_container() -> AppContainer:
     except Exception:
         logger.exception("Failed to initialize AI search service")
         ai_search = None
-
-    ollama_host = resolve_ollama_host_for_runtime(os.getenv("OLLAMA_HOST"))
-    if ollama_host:
-        logger.info("Using remote Ollama: %s", ollama_host)
-        ollama_client = create_ollama_client(host=ollama_host)
-    else:
-        logger.info("Using local Ollama (http://localhost:11434)")
-        ollama_client = create_ollama_client()
 
     openai_vision_client = None
     openai_image_client = None

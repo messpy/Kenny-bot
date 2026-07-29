@@ -6,7 +6,7 @@ import discord
 
 from src.kennybot.bot import MyBot
 from src.kennybot.bootstrap import create_bot
-from src.kennybot.container import AppContainer, build_app_container
+from src.kennybot.container import AppContainer, ClientTextRunner, build_app_container
 
 
 def _fake_container() -> SimpleNamespace:
@@ -41,6 +41,26 @@ class ContainerTests(TestCase):
         self.assertIsNotNone(container.ollama_client)
         self.assertIsNotNone(container.ollama_embed_client)
         self.assertTrue(container.ollama_model)
+        if container.ai_search is not None:
+            self.assertIsInstance(container.ai_search.runner, ClientTextRunner)
+            self.assertIsInstance(container.ai_search.summarizer.runner, ClientTextRunner)
+
+    def test_client_text_runner_uses_chat_simple(self) -> None:
+        import asyncio
+
+        calls = []
+
+        class FakeClient:
+            def chat_simple(self, *, model: str, prompt: str) -> str:
+                calls.append((model, prompt))
+                return "ok"
+
+        runner = ClientTextRunner(FakeClient())  # type: ignore[arg-type]
+
+        result = asyncio.run(runner.run_async("prompt", model="gemini-2.5-flash"))
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls, [("gemini-2.5-flash", "prompt")])
 
     def test_mybot_exposes_existing_attributes_from_container(self) -> None:
         container = _fake_container()
