@@ -7,7 +7,7 @@ from unittest.mock import patch
 import unittest
 
 from src.kennybot.cogs import slash_commands as slash_commands_module
-from src.kennybot.cogs.slash_commands import SlashCommands
+from src.kennybot.cogs.slash_commands import SlashCommands, VcPanelState
 
 
 class PingCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -185,6 +185,137 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("channel-user (111): channel body", text)
         self.assertIn("[thread messages] #topic-thread (20)", text)
         self.assertIn("thread-user (222): thread body", text)
+
+    async def test_raw_reaction_add_handles_vc_panel_join(self) -> None:
+        class FakeTextChannel:
+            id = 20
+
+            def __init__(self) -> None:
+                self.send = AsyncMock()
+
+        class FakeVoiceChannel:
+            id = 30
+
+        class FakeMember:
+            id = 40
+            mention = "<@40>"
+            bot = False
+
+            def __init__(self) -> None:
+                self.voice = SimpleNamespace(channel=FakeVoiceChannel())
+                self.guild_permissions = SimpleNamespace(move_members=True)
+
+        member = FakeMember()
+        guild = SimpleNamespace(
+            id=10,
+            get_member=Mock(return_value=member),
+            get_channel=Mock(return_value=FakeVoiceChannel()),
+            me=SimpleNamespace(id=999),
+        )
+        channel = FakeTextChannel()
+        bot = SimpleNamespace(
+            user=SimpleNamespace(id=999),
+            get_guild=Mock(return_value=guild),
+            get_channel=Mock(return_value=channel),
+            latency=0.1,
+        )
+        cog = SlashCommands(bot)
+        cog._vc_panels[100] = VcPanelState(
+            guild_id=10,
+            channel_id=20,
+            voice_channel_id=30,
+            host_user_id=40,
+        )
+        payload = SimpleNamespace(
+            user_id=40,
+            message_id=100,
+            channel_id=20,
+            guild_id=10,
+            emoji=cog.VC_JOIN_EMOJI,
+        )
+
+        with (
+            patch.object(slash_commands_module.discord, "Member", FakeMember),
+            patch.object(slash_commands_module.discord, "TextChannel", FakeTextChannel),
+            patch.object(slash_commands_module.discord, "VoiceChannel", FakeVoiceChannel),
+        ):
+            await cog.on_raw_reaction_add(payload)
+
+        self.assertIn(40, cog._vc_panels[100].joined_user_ids)
+        channel.send.assert_awaited_once()
+        self.assertIn("参加登録しました", channel.send.await_args.args[0])
+
+    async def test_raw_reaction_add_handles_vc_panel_mute(self) -> None:
+        class FakeRole:
+            def __ge__(self, _other):
+                return False
+
+        class FakeTextChannel:
+            id = 20
+
+            def __init__(self) -> None:
+                self.send = AsyncMock()
+
+        class FakeVoiceChannel:
+            id = 30
+
+        class FakeMember:
+            id = 40
+            mention = "<@40>"
+            bot = False
+            top_role = FakeRole()
+
+            def __init__(self) -> None:
+                self.voice = SimpleNamespace(channel=FakeVoiceChannel())
+                self.guild_permissions = SimpleNamespace(move_members=True)
+                self.edit = AsyncMock()
+
+        member = FakeMember()
+        me = SimpleNamespace(
+            id=999,
+            top_role=object(),
+            guild_permissions=SimpleNamespace(mute_members=True, deafen_members=True),
+        )
+        guild = SimpleNamespace(
+            id=10,
+            get_member=Mock(return_value=member),
+            get_channel=Mock(return_value=FakeVoiceChannel()),
+            me=me,
+        )
+        channel = FakeTextChannel()
+        bot = SimpleNamespace(
+            user=SimpleNamespace(id=999),
+            get_guild=Mock(return_value=guild),
+            get_channel=Mock(return_value=channel),
+            latency=0.1,
+        )
+        cog = SlashCommands(bot)
+        cog._vc_panels[100] = VcPanelState(
+            guild_id=10,
+            channel_id=20,
+            voice_channel_id=30,
+            host_user_id=40,
+            joined_user_ids={40},
+        )
+        payload = SimpleNamespace(
+            user_id=40,
+            message_id=100,
+            channel_id=20,
+            guild_id=10,
+            emoji=cog.VC_MUTE_ON_EMOJI,
+        )
+
+        with (
+            patch.object(slash_commands_module.discord, "Member", FakeMember),
+            patch.object(slash_commands_module.discord, "TextChannel", FakeTextChannel),
+            patch.object(slash_commands_module.discord, "VoiceChannel", FakeVoiceChannel),
+        ):
+            await cog.on_raw_reaction_add(payload)
+
+        member.edit.assert_awaited_once()
+        self.assertTrue(member.edit.await_args.kwargs["mute"])
+        channel.send.assert_awaited_once()
+        self.assertIn("成功 1 / 失敗 0", channel.send.await_args.args[0])
 
 
 if __name__ == "__main__":

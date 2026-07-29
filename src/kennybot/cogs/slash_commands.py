@@ -2420,6 +2420,117 @@ class SlashCommands(commands.Cog):
             on_done=_after_done,
         )
 
+    async def _handle_vc_panel_reaction(
+        self,
+        payload: discord.RawReactionActionEvent,
+        *,
+        emoji: str,
+    ) -> bool:
+        panel = self._vc_panels.get(payload.message_id)
+        if not panel:
+            return False
+        if emoji not in {
+            self.VC_JOIN_EMOJI,
+            self.VC_MUTE_ON_EMOJI,
+            self.VC_MUTE_OFF_EMOJI,
+            self.VC_DEAF_ON_EMOJI,
+            self.VC_DEAF_OFF_EMOJI,
+        }:
+            return False
+
+        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
+        if not guild or guild.id != panel.guild_id:
+            return True
+        member = guild.get_member(payload.user_id)
+        if not isinstance(member, discord.Member):
+            return True
+        channel = self.bot.get_channel(payload.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return True
+
+        # 参加登録
+        if emoji in reaction_aliases(self.VC_JOIN_EMOJI):
+            if not member.voice or not isinstance(member.voice.channel, discord.VoiceChannel):
+                await channel.send(f"{member.mention} VC参加中のみ登録できます。", delete_after=5)
+                return True
+            if member.voice.channel.id != panel.voice_channel_id:
+                await channel.send(f"{member.mention} 対象VCに参加してから登録してください。", delete_after=5)
+                return True
+            panel.joined_user_ids.add(member.id)
+            await channel.send(f"{member.mention} を参加登録しました。", delete_after=5)
+            return True
+
+        # 操作側の条件: 参加登録済み + 対象VCに接続中 + move_members 権限
+        if member.id not in panel.joined_user_ids:
+            await channel.send(f"{member.mention} 先に {self.VC_JOIN_EMOJI} で参加登録してください。", delete_after=5)
+            return True
+        if not member.voice or not isinstance(member.voice.channel, discord.VoiceChannel) or member.voice.channel.id != panel.voice_channel_id:
+            await channel.send(f"{member.mention} 対象VCに参加中のときのみ操作できます。", delete_after=5)
+            return True
+        if not member.guild_permissions.move_members:
+            await channel.send(f"{member.mention} この操作には『通話メンバーの移動』権限が必要です。", delete_after=5)
+            return True
+
+        me = guild.me
+        if me is None:
+            return True
+        targets = []
+        vc = guild.get_channel(panel.voice_channel_id)
+        if isinstance(vc, discord.VoiceChannel):
+            for uid in panel.joined_user_ids:
+                tm = guild.get_member(uid)
+                if isinstance(tm, discord.Member) and tm.voice and tm.voice.channel and tm.voice.channel.id == vc.id and not tm.bot:
+                    targets.append(tm)
+
+        op = None
+        if emoji in reaction_aliases(self.VC_MUTE_ON_EMOJI):
+            op = "mute_on"
+            if not me.guild_permissions.mute_members:
+                await channel.send("Botに『メンバーをミュート』権限がありません。", delete_after=5)
+                return True
+        elif emoji in reaction_aliases(self.VC_MUTE_OFF_EMOJI):
+            op = "mute_off"
+            if not me.guild_permissions.mute_members:
+                await channel.send("Botに『メンバーをミュート』権限がありません。", delete_after=5)
+                return True
+        elif emoji in reaction_aliases(self.VC_DEAF_ON_EMOJI):
+            op = "deafen_on"
+            if not me.guild_permissions.deafen_members:
+                await channel.send("Botに『メンバーをスピーカーミュート』権限がありません。", delete_after=5)
+                return True
+        elif emoji in reaction_aliases(self.VC_DEAF_OFF_EMOJI):
+            op = "deafen_off"
+            if not me.guild_permissions.deafen_members:
+                await channel.send("Botに『メンバーをスピーカーミュート』権限がありません。", delete_after=5)
+                return True
+        if op is None:
+            return True
+
+        success = 0
+        failed = 0
+        for tm in targets:
+            if tm.id == me.id or tm.top_role >= me.top_role:
+                failed += 1
+                continue
+            try:
+                if op == "mute_on":
+                    await tm.edit(mute=True, reason=f"{member} によるVCパネル操作")
+                elif op == "mute_off":
+                    await tm.edit(mute=False, reason=f"{member} によるVCパネル操作")
+                elif op == "deafen_on":
+                    await tm.edit(deafen=True, reason=f"{member} によるVCパネル操作")
+                elif op == "deafen_off":
+                    await tm.edit(deafen=False, reason=f"{member} によるVCパネル操作")
+                success += 1
+            except Exception:
+                failed += 1
+
+        await channel.send(
+            f"{member.mention} 操作を実行しました。成功 {success} / 失敗 {failed}",
+            delete_after=7,
+        )
+        return True
+
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == (self.bot.user.id if self.bot.user else 0):
@@ -2444,6 +2555,9 @@ class SlashCommands(commands.Cog):
             user_id=payload.user_id,
             emoji=emoji,
         )
+
+        if await self._handle_vc_panel_reaction(payload, emoji=emoji):
+            return
 
         if payload.message_id in self._group_matches:
             state = self._group_matches.get(payload.message_id)
@@ -2518,110 +2632,6 @@ class SlashCommands(commands.Cog):
         # the same minutes action twice for messages present in Discord's cache.
         logger.debug("reaction_add_skipped_raw_handler_is_canonical message=%s", message.id)
         return
-
-        panel = self._vc_panels.get(payload.message_id)
-        if not panel:
-            return
-        if emoji not in {
-            self.VC_JOIN_EMOJI,
-            self.VC_MUTE_ON_EMOJI,
-            self.VC_MUTE_OFF_EMOJI,
-            self.VC_DEAF_ON_EMOJI,
-            self.VC_DEAF_OFF_EMOJI,
-        }:
-            return
-
-        guild = self.bot.get_guild(payload.guild_id) if payload.guild_id else None
-        if not guild or guild.id != panel.guild_id:
-            return
-        member = guild.get_member(payload.user_id)
-        if not isinstance(member, discord.Member):
-            return
-        channel = self.bot.get_channel(payload.channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            return
-
-        # 参加登録
-        if emoji in reaction_aliases(self.VC_JOIN_EMOJI):
-            if not member.voice or not isinstance(member.voice.channel, discord.VoiceChannel):
-                await channel.send(f"{member.mention} VC参加中のみ登録できます。", delete_after=5)
-                return
-            if member.voice.channel.id != panel.voice_channel_id:
-                await channel.send(f"{member.mention} 対象VCに参加してから登録してください。", delete_after=5)
-                return
-            panel.joined_user_ids.add(member.id)
-            await channel.send(f"{member.mention} を参加登録しました。", delete_after=5)
-            return
-
-        # 操作側の条件: 参加登録済み + 対象VCに接続中 + move_members 権限
-        if member.id not in panel.joined_user_ids:
-            await channel.send(f"{member.mention} 先に {self.VC_JOIN_EMOJI} で参加登録してください。", delete_after=5)
-            return
-        if not member.voice or not isinstance(member.voice.channel, discord.VoiceChannel) or member.voice.channel.id != panel.voice_channel_id:
-            await channel.send(f"{member.mention} 対象VCに参加中のときのみ操作できます。", delete_after=5)
-            return
-        if not member.guild_permissions.move_members:
-            await channel.send(f"{member.mention} この操作には『通話メンバーの移動』権限が必要です。", delete_after=5)
-            return
-
-        me = guild.me
-        if me is None:
-            return
-        targets = []
-        vc = guild.get_channel(panel.voice_channel_id)
-        if isinstance(vc, discord.VoiceChannel):
-            for uid in panel.joined_user_ids:
-                tm = guild.get_member(uid)
-                if isinstance(tm, discord.Member) and tm.voice and tm.voice.channel and tm.voice.channel.id == vc.id and not tm.bot:
-                    targets.append(tm)
-
-        op = None
-        if emoji in reaction_aliases(self.VC_MUTE_ON_EMOJI):
-            op = "mute_on"
-            if not me.guild_permissions.mute_members:
-                await channel.send("Botに『メンバーをミュート』権限がありません。", delete_after=5)
-                return
-        elif emoji in reaction_aliases(self.VC_MUTE_OFF_EMOJI):
-            op = "mute_off"
-            if not me.guild_permissions.mute_members:
-                await channel.send("Botに『メンバーをミュート』権限がありません。", delete_after=5)
-                return
-        elif emoji in reaction_aliases(self.VC_DEAF_ON_EMOJI):
-            op = "deafen_on"
-            if not me.guild_permissions.deafen_members:
-                await channel.send("Botに『メンバーをスピーカーミュート』権限がありません。", delete_after=5)
-                return
-        elif emoji in reaction_aliases(self.VC_DEAF_OFF_EMOJI):
-            op = "deafen_off"
-            if not me.guild_permissions.deafen_members:
-                await channel.send("Botに『メンバーをスピーカーミュート』権限がありません。", delete_after=5)
-                return
-        if op is None:
-            return
-
-        success = 0
-        failed = 0
-        for tm in targets:
-            if tm.id == me.id or tm.top_role >= me.top_role:
-                failed += 1
-                continue
-            try:
-                if op == "mute_on":
-                    await tm.edit(mute=True, reason=f"{member} によるVCパネル操作")
-                elif op == "mute_off":
-                    await tm.edit(mute=False, reason=f"{member} によるVCパネル操作")
-                elif op == "deafen_on":
-                    await tm.edit(deafen=True, reason=f"{member} によるVCパネル操作")
-                elif op == "deafen_off":
-                    await tm.edit(deafen=False, reason=f"{member} によるVCパネル操作")
-                success += 1
-            except Exception:
-                failed += 1
-
-        await channel.send(
-            f"{member.mention} 操作を実行しました。成功 {success} / 失敗 {failed}",
-            delete_after=7,
-        )
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
