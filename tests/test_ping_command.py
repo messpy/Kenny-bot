@@ -142,6 +142,50 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.seen_limit, 50)
         self.assertEqual(channel.seen_oldest_first, True)
 
+    async def test_build_channel_export_text_includes_thread_messages(self) -> None:
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+
+        class FakeThread:
+            id = 20
+            name = "topic-thread"
+
+            async def history(self, *, limit=None, oldest_first=False):
+                yield SimpleNamespace(
+                    created_at=datetime(2026, 7, 29, 2, 0, 0, tzinfo=timezone.utc),
+                    author=SimpleNamespace(id=222, display_name="thread-user", name="thread-user"),
+                    content="thread body",
+                    attachments=[],
+                )
+
+        class FakeTextChannel:
+            id = 10
+            name = "general"
+
+            def __init__(self) -> None:
+                self.threads = [FakeThread()]
+
+            async def history(self, *, limit=None, oldest_first=False):
+                yield SimpleNamespace(
+                    created_at=datetime(2026, 7, 29, 1, 0, 0, tzinfo=timezone.utc),
+                    author=SimpleNamespace(id=111, display_name="channel-user", name="channel-user"),
+                    content="channel body",
+                    attachments=[],
+                )
+
+            async def archived_threads(self, *, limit=None, private=False):
+                if False:
+                    yield None
+
+        text, count, truncated = await cog._build_channel_export_text(FakeTextChannel())
+
+        self.assertEqual(count, 2)
+        self.assertFalse(truncated)
+        self.assertIn("[channel messages]", text)
+        self.assertIn("channel-user (111): channel body", text)
+        self.assertIn("[thread messages] #topic-thread (20)", text)
+        self.assertIn("thread-user (222): thread body", text)
+
 
 if __name__ == "__main__":
     unittest.main()

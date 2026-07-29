@@ -635,6 +635,46 @@ class SlashCommands(commands.Cog):
         body = body.replace("\n", "\n    ")
         return f"{time_label} | {self._message_export_author(message)}: {body}"
 
+    @staticmethod
+    def _append_export_line(
+        lines: list[str],
+        line: str,
+        *,
+        current_bytes: int,
+        max_bytes: int,
+    ) -> tuple[int, bool]:
+        added_bytes = len((line + "\n\n").encode("utf-8"))
+        if current_bytes + added_bytes > max_bytes:
+            return current_bytes, False
+        lines.append(line)
+        lines.append("")
+        return current_bytes + added_bytes, True
+
+    async def _iter_export_threads(self, channel: ReadableChannel):
+        if isinstance(channel, discord.Thread):
+            return
+
+        seen_thread_ids: set[int] = set()
+        for thread in getattr(channel, "threads", []) or []:
+            thread_id = int(getattr(thread, "id", 0) or 0)
+            if thread_id and thread_id not in seen_thread_ids:
+                seen_thread_ids.add(thread_id)
+                yield thread
+
+        archived_threads = getattr(channel, "archived_threads", None)
+        if archived_threads is None:
+            return
+
+        for private in (False, True):
+            try:
+                async for thread in archived_threads(limit=None, private=private):
+                    thread_id = int(getattr(thread, "id", 0) or 0)
+                    if thread_id and thread_id not in seen_thread_ids:
+                        seen_thread_ids.add(thread_id)
+                        yield thread
+            except (discord.Forbidden, discord.NotFound):
+                continue
+
     async def _build_channel_export_text(
         self,
         channel: ReadableChannel,
@@ -650,20 +690,60 @@ class SlashCommands(commands.Cog):
             f"channel: #{channel_name} ({channel_id})",
             f"generated_at: {generated_at}",
             "",
+            "[channel messages]",
+            "",
         ]
         current_bytes = len(("\n".join(lines) + "\n").encode("utf-8"))
         count = 0
         truncated = False
         async for message in channel.history(limit=limit, oldest_first=True):
             line = self._format_message_export_line(message)
-            added_bytes = len((line + "\n\n").encode("utf-8"))
-            if current_bytes + added_bytes > max_bytes:
+            current_bytes, appended = self._append_export_line(
+                lines,
+                line,
+                current_bytes=current_bytes,
+                max_bytes=max_bytes,
+            )
+            if not appended:
                 truncated = True
                 break
-            lines.append(line)
-            lines.append("")
-            current_bytes += added_bytes
             count += 1
+        if not truncated:
+            async for thread in self._iter_export_threads(channel):
+                thread_name = getattr(thread, "name", "unknown")
+                thread_id = int(getattr(thread, "id", 0) or 0)
+                header = f"[thread messages] #{thread_name} ({thread_id})"
+                current_bytes, appended = self._append_export_line(
+                    lines,
+                    header,
+                    current_bytes=current_bytes,
+                    max_bytes=max_bytes,
+                )
+                if not appended:
+                    truncated = True
+                    break
+                try:
+                    async for message in thread.history(limit=limit, oldest_first=True):
+                        line = self._format_message_export_line(message)
+                        current_bytes, appended = self._append_export_line(
+                            lines,
+                            line,
+                            current_bytes=current_bytes,
+                            max_bytes=max_bytes,
+                        )
+                        if not appended:
+                            truncated = True
+                            break
+                        count += 1
+                except (discord.Forbidden, discord.NotFound):
+                    current_bytes, _ = self._append_export_line(
+                        lines,
+                        "[このスレッドの履歴を取得する権限がありません]",
+                        current_bytes=current_bytes,
+                        max_bytes=max_bytes,
+                    )
+                if truncated:
+                    break
         if truncated:
             lines.append("[以降はファイルサイズ上限のため省略]")
         return "\n".join(lines).rstrip() + "\n", count, truncated
