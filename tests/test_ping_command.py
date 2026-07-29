@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 from unittest.mock import patch
 import unittest
@@ -70,6 +71,76 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
         channel.send.return_value.add_reaction.assert_any_await("🔄")
         channel.send.return_value.add_reaction.assert_any_await("📋")
         response.send_message.assert_awaited_once_with("✅ モデレーションパネルを作成しました。", ephemeral=True)
+
+    def test_format_message_export_line_includes_datetime_author_and_body(self) -> None:
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+        message = SimpleNamespace(
+            created_at=datetime(2026, 7, 29, 1, 2, 3, tzinfo=timezone.utc),
+            author=SimpleNamespace(id=123, display_name="admin", name="admin"),
+            content="hello\nworld",
+            attachments=[SimpleNamespace(url="https://example.com/a.png")],
+        )
+
+        line = cog._format_message_export_line(message)
+
+        self.assertIn("2026-07-29 10:02:03 JST", line)
+        self.assertIn("admin (123)", line)
+        self.assertIn("hello\n    world", line)
+        self.assertIn("[attachment] https://example.com/a.png", line)
+
+    async def test_export_channel_messages_requires_admin(self) -> None:
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+        response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response,
+            user=SimpleNamespace(id=2, guild_permissions=SimpleNamespace(administrator=False)),
+            channel=object(),
+        )
+
+        await SlashCommands.export_channel_messages.callback(cog, interaction)
+
+        response.send_message.assert_awaited_once_with("この操作は管理者のみ実行できます。", ephemeral=True)
+        response.defer.assert_not_awaited()
+
+    async def test_export_channel_messages_sends_text_file(self) -> None:
+        class FakeTextChannel:
+            id = 10
+            name = "general"
+
+            async def history(self, *, limit=None, oldest_first=False):
+                self.seen_limit = limit
+                self.seen_oldest_first = oldest_first
+                yield SimpleNamespace(
+                    created_at=datetime(2026, 7, 29, 1, 2, 3, tzinfo=timezone.utc),
+                    author=SimpleNamespace(id=123, display_name="admin", name="admin"),
+                    content="hello",
+                    attachments=[],
+                )
+
+        channel = FakeTextChannel()
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+        response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
+        followup = SimpleNamespace(send=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response,
+            followup=followup,
+            user=SimpleNamespace(id=2, guild_permissions=SimpleNamespace(administrator=True)),
+            channel=channel,
+        )
+
+        with patch.object(slash_commands_module.discord, "TextChannel", FakeTextChannel):
+            await SlashCommands.export_channel_messages.callback(cog, interaction, None, 50)
+
+        response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        followup.send.assert_awaited_once()
+        kwargs = followup.send.await_args.kwargs
+        self.assertIn("履歴を 1 件出力しました", kwargs["content"])
+        self.assertEqual(kwargs["file"].filename.startswith("general-messages-"), True)
+        self.assertEqual(channel.seen_limit, 50)
+        self.assertEqual(channel.seen_oldest_first, True)
 
 
 if __name__ == "__main__":

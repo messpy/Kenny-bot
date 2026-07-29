@@ -2,6 +2,7 @@
 # スラッシュコマンド集
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -53,6 +54,7 @@ VC_CONTROL_META = get_slash_command_meta("vc_control")
 BOT_INFO_META = get_slash_command_meta("bot_info")
 PING_META = get_slash_command_meta("ping")
 SUMMARIZE_RECENT_META = get_slash_command_meta("summarize_recent")
+EXPORT_CHANNEL_MESSAGES_META = get_slash_command_meta("export_channel_messages")
 SET_RECENT_WINDOW_META = get_slash_command_meta("set_recent_window")
 CONFIG_META = get_slash_command_meta("config")
 MODEL_LIST_META = get_slash_command_meta("model_list")
@@ -598,6 +600,73 @@ class SlashCommands(commands.Cog):
     def _build_ping_text(self) -> str:
         latency_ms = round(float(self.bot.latency) * 1000, 1)
         return f"Pong! {latency_ms}ms"
+
+    @staticmethod
+    def _message_export_author(message: discord.Message) -> str:
+        author = getattr(message, "author", None)
+        name = (
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or "unknown"
+        )
+        author_id = int(getattr(author, "id", 0) or 0)
+        return f"{name} ({author_id})"
+
+    @staticmethod
+    def _message_export_body(message: discord.Message) -> str:
+        parts: list[str] = []
+        content = (getattr(message, "content", "") or "").strip()
+        if content:
+            parts.append(content)
+        for attachment in getattr(message, "attachments", []) or []:
+            url = str(getattr(attachment, "url", "") or "").strip()
+            if url:
+                parts.append(f"[attachment] {url}")
+        body = "\n".join(parts).strip()
+        return body or "[本文なし]"
+
+    def _format_message_export_line(self, message: discord.Message) -> str:
+        created_at = getattr(message, "created_at", None)
+        if created_at is not None:
+            time_label = created_at.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S JST")
+        else:
+            time_label = "日時不明"
+        body = self._message_export_body(message).replace("\r\n", "\n").replace("\r", "\n")
+        body = body.replace("\n", "\n    ")
+        return f"{time_label} | {self._message_export_author(message)}: {body}"
+
+    async def _build_channel_export_text(
+        self,
+        channel: ReadableChannel,
+        *,
+        limit: int | None = None,
+        max_bytes: int = 23_000_000,
+    ) -> tuple[str, int, bool]:
+        channel_name = getattr(channel, "name", "unknown")
+        channel_id = int(getattr(channel, "id", 0) or 0)
+        generated_at = now_jst().strftime("%Y-%m-%d %H:%M:%S JST")
+        lines = [
+            "# Kenny Bot channel message export",
+            f"channel: #{channel_name} ({channel_id})",
+            f"generated_at: {generated_at}",
+            "",
+        ]
+        current_bytes = len(("\n".join(lines) + "\n").encode("utf-8"))
+        count = 0
+        truncated = False
+        async for message in channel.history(limit=limit, oldest_first=True):
+            line = self._format_message_export_line(message)
+            added_bytes = len((line + "\n\n").encode("utf-8"))
+            if current_bytes + added_bytes > max_bytes:
+                truncated = True
+                break
+            lines.append(line)
+            lines.append("")
+            current_bytes += added_bytes
+            count += 1
+        if truncated:
+            lines.append("[以降はファイルサイズ上限のため省略]")
+        return "\n".join(lines).rstrip() + "\n", count, truncated
 
     def _build_bot_info_embed(self) -> discord.Embed:
         now = discord.utils.utcnow()
@@ -1211,6 +1280,53 @@ class SlashCommands(commands.Cog):
             footer_bits.append(f"要望: {request_text[:30]}")
         embed.set_footer(text=" / ".join(footer_bits))
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name=EXPORT_CHANNEL_MESSAGES_META.name, description=EXPORT_CHANNEL_MESSAGES_META.description)
+    @app_commands.checks.cooldown(1, 60.0)
+    @app_commands.describe(
+        channel="取得するチャンネル（省略時はこのチャンネル）",
+        limit="最大取得件数（省略時は取得可能な全履歴）",
+    )
+    async def export_channel_messages(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | discord.Thread | None = None,
+        limit: app_commands.Range[int, 1, 100000] | None = None,
+    ):
+        if not await self._ensure_admin_like(interaction):
+            return
+        target = channel or interaction.channel
+        if not self._is_readable_channel(target):
+            await interaction.response.send_message("このチャンネルの履歴は取得できません。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            text, count, truncated = await self._build_channel_export_text(
+                target,
+                limit=int(limit) if limit is not None else None,
+            )
+        except (discord.Forbidden, discord.NotFound):
+            await interaction.followup.send("チャンネル履歴を取得する権限がありません。", ephemeral=True)
+            return
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                f"チャンネル履歴の取得に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
+                ephemeral=True,
+            )
+            return
+
+        channel_name = re.sub(r"[^0-9A-Za-z_.-]+", "-", str(getattr(target, "name", "channel"))).strip("-")
+        if not channel_name:
+            channel_name = "channel"
+        filename = f"{channel_name}-messages-{now_jst().strftime('%Y%m%d-%H%M%S')}.txt"
+        file = discord.File(io.BytesIO(text.encode("utf-8")), filename=filename)
+        suffix = "（サイズ上限で一部省略）" if truncated else ""
+        await interaction.followup.send(
+            content=f"#{getattr(target, 'name', 'channel')} の履歴を {count} 件出力しました。{suffix}",
+            file=file,
+            ephemeral=True,
+        )
 
     @app_commands.command(name=SET_RECENT_WINDOW_META.name, description=SET_RECENT_WINDOW_META.description)
     @app_commands.describe(messages="既定の件数（1〜300）")

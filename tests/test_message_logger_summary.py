@@ -361,6 +361,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
             "/bot_info",
             "/ping",
             "/summarize_recent",
+            "/export_channel_messages",
             "/set_recent_window",
             "/config",
             "/model_list",

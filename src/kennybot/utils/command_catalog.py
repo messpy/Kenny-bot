@@ -122,6 +122,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         description="このチャンネルの直近メッセージをAI要約",
         category="要約・設定",
     ),
+    "export_channel_messages": SlashCommandMeta(
+        name="export_channel_messages",
+        description="チャンネル履歴を日時・投稿者・内容つきテキストで出力",
+        category="要約・設定",
+    ),
     "set_recent_window": SlashCommandMeta(
         name="set_recent_window",
         description="チャット要約の既定件数を設定",
