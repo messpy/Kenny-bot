@@ -55,6 +55,12 @@ class BirthdayReminderStore:
     def _sql(self, sql: str) -> str:
         return sql_placeholders(sql, self._db)
 
+    @staticmethod
+    def _column_name_from_row(row: Any) -> str:
+        if isinstance(row, dict):
+            return str(row.get("COLUMN_NAME") or row.get("column_name") or row.get("name") or "")
+        return str(row[0])
+
     def _ensure_schema(self) -> None:
         with closing(self._connect()) as conn:
             if self._db.backend == "sqlite":
@@ -117,7 +123,7 @@ class BirthdayReminderStore:
                           AND TABLE_NAME = 'birthday_reminders'
                         """
                     )
-                    columns = {str(row[0]) for row in cur.fetchall()}
+                    columns = {self._column_name_from_row(row) for row in cur.fetchall()}
                     if "notify_time" not in columns:
                         cur.execute(
                             "ALTER TABLE birthday_reminders ADD COLUMN notify_time VARCHAR(5) NOT NULL DEFAULT '12:00'"

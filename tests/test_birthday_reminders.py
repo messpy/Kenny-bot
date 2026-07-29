@@ -40,6 +40,9 @@ class BirthdayReminderStoreTest(unittest.TestCase):
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0].last_notified_year, 2026)
 
+    def test_column_name_from_row_accepts_dict_and_tuple_rows(self) -> None:
+        self.assertEqual(BirthdayReminderStore._column_name_from_row({"COLUMN_NAME": "notify_time"}), "notify_time")
+        self.assertEqual(BirthdayReminderStore._column_name_from_row(("notify_time",)), "notify_time")
 
     def test_fallback_hour_is_enabled(self) -> None:
         self.assertTrue(_should_process_now(12))
