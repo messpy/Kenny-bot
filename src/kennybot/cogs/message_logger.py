@@ -2312,10 +2312,39 @@ class MessageLogger(BaseCog):
 
     def _is_person_lookup_query(self, text: str) -> bool:
         normalized = normalize_keyword_match_text(text or "")
-        keywords = (
+        place_subject_terms = (
+            "サーバー",
+            "さーばー",
+            "サーバ",
+            "さーば",
+            "チャンネル",
+            "ワールド",
+            "ここ",
+            "この場所",
+        )
+        if any(term in normalized for term in place_subject_terms) and "この人" not in normalized:
+            return False
+        person_subject_terms = (
+            "この人",
+            "この方",
+            "この子",
+            "このメンバー",
+            "このユーザー",
+            "あの人",
+            "あの方",
+            "<@",
+        )
+        person_specific_terms = (
             "どんな人",
             "どんなやつ",
             "どんな子",
+            "何者",
+            "誰",
+            "性格",
+            "特徴",
+            "紹介",
+        )
+        activity_terms = (
             "最後の投稿",
             "最後の発言",
             "最後に投稿",
@@ -2324,18 +2353,17 @@ class MessageLogger(BaseCog):
             "最新の発言",
             "最近の投稿",
             "最近の発言",
-            "プロフィール",
-            "情報",
-            "何者",
-            "誰",
             "投稿ある",
             "発言ある",
-            "性格",
-            "特徴",
-            "教えて",
-            "紹介",
         )
-        return any(keyword in normalized for keyword in keywords)
+        profile_terms = ("プロフィール", "ぷろふぃーる", "情報")
+        if any(term in normalized for term in person_specific_terms):
+            return True
+        if any(term in normalized for term in activity_terms):
+            return True
+        if any(term in normalized for term in profile_terms):
+            return any(term in normalized for term in person_subject_terms)
+        return False
 
     def _is_mentioned_person_lookup_query(self, msg: discord.Message, text: str) -> bool:
         if not self._is_person_lookup_query(text):

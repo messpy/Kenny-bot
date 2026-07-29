@@ -493,13 +493,13 @@ def _preview_mention_route(text: str, cog: Any) -> str:
         return "runtime_model"
     if cog._is_capability_query(text):
         return "capability"
-    if cog._is_channel_profile_query(text):
-        return "channel_profile"
-    if cog._is_local_activity_query(text):
-        return "local_activity"
     if cog._is_person_lookup_query(text):
         return "person_lookup"
-    if message_logger_module.is_current_info_intent(text) or message_logger_module.is_search_intent(text):
+    if cog._is_local_activity_query(text):
+        return "local_activity"
+    if cog._is_channel_profile_query(text):
+        return "channel_profile"
+    if cog._needs_web_search_for_accuracy(text):
         return "web_search"
     if cog._is_bot_capability_or_game_query(text):
         return "capability_grounded_chat"

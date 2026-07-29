@@ -366,7 +366,11 @@ class MessageLoggerSummaryTests(unittest.TestCase):
 
     def test_person_lookup_query_detection(self) -> None:
         self.assertTrue(self.logger._is_person_lookup_query("この人のプロフィールを教えて"))
+        self.assertTrue(self.logger._is_person_lookup_query("<@123> の情報を教えて"))
+        self.assertTrue(self.logger._is_person_lookup_query("最後の投稿ある？"))
         self.assertFalse(self.logger._is_person_lookup_query("このサーバーはなにするところ？"))
+        self.assertFalse(self.logger._is_person_lookup_query("今日のニュースを教えて"))
+        self.assertFalse(self.logger._is_person_lookup_query("使い方を教えて"))
 
     def test_mentioned_person_lookup_query_detection(self) -> None:
         self.logger.bot = SimpleNamespace(user=SimpleNamespace(id=999))
