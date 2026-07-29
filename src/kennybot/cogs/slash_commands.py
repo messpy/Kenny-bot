@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import re
 import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,10 +17,10 @@ from typing import List
 
 import discord
 from discord import app_commands
-from discord.app_commands import checks
 from discord.ext import commands
 
 from src.kennybot.utils.build_info import load_build_info
+from src.kennybot.utils.app_constants import MOD_PANEL_CHANNEL_ID
 from src.kennybot.utils.command_catalog import (
     COMMAND_CATEGORY_ORDER,
     HELP_SECTIONS,
@@ -30,8 +31,16 @@ from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.message_logger import log_system_event, log_codex_repair_mode
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.config import get_app_config
+from src.kennybot.utils.reactions import get_reaction_emoji, reaction_aliases
 from src.kennybot.utils.runtime_settings import get_settings
+from src.kennybot.utils.text import sanitize_user_visible_error
 from src.kennybot.utils.time import JST, now_jst
+from src.kennybot.utils.vrchat_user import (
+    VRChatAuthError,
+    VRChatTwoFactorRequired,
+    format_vrchat_user,
+    get_vrchat_user_from_url,
+)
 from src.kennybot.utils.vrchat_world import format_vrchat_world_lines, search_vrchat_worlds
 from src.kennybot.ai.client import create_ollama_client
 from src.kennybot.utils.prompts import get_prompt
@@ -42,21 +51,21 @@ ReadableChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChan
 HELP_META = get_slash_command_meta("help")
 VC_CONTROL_META = get_slash_command_meta("vc_control")
 BOT_INFO_META = get_slash_command_meta("bot_info")
+PING_META = get_slash_command_meta("ping")
 SUMMARIZE_RECENT_META = get_slash_command_meta("summarize_recent")
 SET_RECENT_WINDOW_META = get_slash_command_meta("set_recent_window")
-CONFIG_SHOW_META = get_slash_command_meta("config_show")
-CONFIG_SET_META = get_slash_command_meta("config_set")
+CONFIG_META = get_slash_command_meta("config")
 MODEL_LIST_META = get_slash_command_meta("model_list")
 MODEL_CHANGE_META = get_slash_command_meta("model_change")
 REACTION_ROLE_SET_META = get_slash_command_meta("reaction_role_set")
 REACTION_ROLE_REMOVE_META = get_slash_command_meta("reaction_role_remove")
 REACTION_ROLE_LIST_META = get_slash_command_meta("reaction_role_list")
-MINUTES_START_META = get_slash_command_meta("minutes_start")
-MINUTES_STOP_META = get_slash_command_meta("minutes_stop")
-MINUTES_STATUS_META = get_slash_command_meta("minutes_status")
+MINUTES_META = get_slash_command_meta("minutes")
 TIMER_META = get_slash_command_meta("timer")
 GROUP_MATCH_META = get_slash_command_meta("group_match")
+MOD_PANEL_META = get_slash_command_meta("modpanel")
 VRCHAT_WORLD_META = get_slash_command_meta("vrchat_world")
+VRC_USER_META = get_slash_command_meta("vrc_user")
 
 
 @dataclass
@@ -109,6 +118,40 @@ class SlashCommands(commands.Cog):
             if state.guild_id == guild_id:
                 self._minutes_panels.pop(message_id, None)
 
+    def _cfg_int_list(self, path: str) -> list[int]:
+        raw = _settings.get(path, [])
+        if isinstance(raw, (list, tuple, set)):
+            values = raw
+        elif isinstance(raw, str):
+            values = re.split(r"[\s,]+", raw.strip()) if raw.strip() else []
+        else:
+            values = []
+        out: list[int] = []
+        for value in values:
+            try:
+                out.append(int(value))
+            except Exception:
+                continue
+        return out
+
+    def _is_configured_admin_user(self, user_id: int) -> bool:
+        return user_id in set(self._cfg_int_list("admin.authoritative_correction_user_ids"))
+
+    def _is_admin_like(self, interaction: discord.Interaction) -> bool:
+        user = getattr(interaction, "user", None)
+        if user is None:
+            return False
+        if self._is_configured_admin_user(int(getattr(user, "id", 0) or 0)):
+            return True
+        permissions = getattr(user, "guild_permissions", None)
+        return bool(getattr(permissions, "administrator", False))
+
+    async def _ensure_admin_like(self, interaction: discord.Interaction) -> bool:
+        if self._is_admin_like(interaction):
+            return True
+        await interaction.response.send_message("この操作は管理者のみ実行できます。", ephemeral=True)
+        return False
+
     async def _set_minutes_status_ended(self, guild: discord.Guild) -> None:
         for panel in list(self._minutes_panels.values()):
             if panel.guild_id != guild.id:
@@ -148,13 +191,53 @@ class SlashCommands(commands.Cog):
                 continue
         return None
 
-    VC_JOIN_EMOJI = "✅"
-    VC_MUTE_ON_EMOJI = "🔇"
-    VC_MUTE_OFF_EMOJI = "🎤"
-    VC_DEAF_ON_EMOJI = "🙉"
-    VC_DEAF_OFF_EMOJI = "🙊"
-    GROUP_MATCH_EMOJI = "🤝"
-    GROUP_MATCH_START_EMOJI = "▶️"
+    @property
+    def VC_JOIN_EMOJI(self) -> str:
+        return get_reaction_emoji("vc.join")
+
+    @property
+    def VC_MUTE_ON_EMOJI(self) -> str:
+        return get_reaction_emoji("vc.mute_on")
+
+    @property
+    def VC_MUTE_OFF_EMOJI(self) -> str:
+        return get_reaction_emoji("vc.mute_off")
+
+    @property
+    def VC_DEAF_ON_EMOJI(self) -> str:
+        return get_reaction_emoji("vc.deaf_on")
+
+    @property
+    def VC_DEAF_OFF_EMOJI(self) -> str:
+        return get_reaction_emoji("vc.deaf_off")
+
+    @property
+    def GROUP_MATCH_EMOJI(self) -> str:
+        return get_reaction_emoji("group_match.join")
+
+    @property
+    def GROUP_MATCH_START_EMOJI(self) -> str:
+        return get_reaction_emoji("group_match.start")
+
+    @property
+    def MINUTES_SUMMARY_EMOJI(self) -> str:
+        return get_reaction_emoji("minutes.summary")
+
+    @property
+    def MINUTES_STOP_EMOJI(self) -> str:
+        return get_reaction_emoji("minutes.stop")
+
+    @property
+    def MINUTES_PLAYBACK_EMOJI(self) -> str:
+        return get_reaction_emoji("minutes.playback")
+
+    @property
+    def MINUTES_REALTIME_EMOJI(self) -> str:
+        return get_reaction_emoji("minutes.realtime")
+
+    @property
+    def TIMER_RESTART_EMOJI(self) -> str:
+        return get_reaction_emoji("timer.restart")
     _CONFIG_CHOICES = [
         app_commands.Choice(name="会話履歴の参照行数", value="chat.history_lines"),
         app_commands.Choice(name="本人履歴の参照行数", value="chat.user_history_lines"),
@@ -176,6 +259,7 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="議事録リアルタイム翻訳", value="meeting.realtime_translation_enabled"),
         app_commands.Choice(name="議事録文字起こしプロバイダ", value="meeting.transcription_provider"),
         app_commands.Choice(name="Google STT 言語コード", value="meeting.google_language_code"),
+        app_commands.Choice(name="管理者訂正ユーザーID一覧", value="admin.authoritative_correction_user_ids"),
         app_commands.Choice(name="同時実行数", value="security.ai_max_concurrency"),
         app_commands.Choice(name="チャンネル間隔秒", value="security.ai_channel_cooldown_seconds"),
         app_commands.Choice(name="入力最大文字数", value="security.max_user_message_chars"),
@@ -214,6 +298,9 @@ class SlashCommands(commands.Cog):
         "spam.dup_window_seconds",
         "spam.warn_cooldown_seconds",
     }
+    _INT_LIST_KEYS = {
+        "admin.authoritative_correction_user_ids",
+    }
     _BOOL_KEYS = {
         "kenny_chat.block_invite_and_mass_mention",
         "meeting.realtime_translation_enabled",
@@ -242,6 +329,15 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="embedding", value="embedding"),
     ]
 
+    def _autocomplete_config_keys(self, current: str) -> list[app_commands.Choice[str]]:
+        query = (current or "").strip().lower()
+        matches: list[app_commands.Choice[str]] = []
+        for choice in self._CONFIG_CHOICES:
+            haystack = f"{choice.name} {choice.value}".lower()
+            if not query or query in haystack:
+                matches.append(choice)
+        return matches[:25]
+
     @staticmethod
     def _is_readable_channel(channel: object) -> bool:
         return isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread))
@@ -264,9 +360,55 @@ class SlashCommands(commands.Cog):
         user_id: int,
         emoji: str,
     ) -> bool:
+        logger.info(
+            "minutes_reaction_handle_start message=%s channel=%s guild=%s user=%s emoji=%s channel_type=%s panel_registered=%s",
+            message_id,
+            channel_id,
+            guild_id,
+            user_id,
+            emoji,
+            type(channel).__name__ if channel is not None else "None",
+            message_id in self._minutes_panels,
+        )
+        realtime_emojis = reaction_aliases(self.MINUTES_REALTIME_EMOJI)
+        summary_emojis = reaction_aliases(self.MINUTES_SUMMARY_EMOJI)
+        stop_emojis = reaction_aliases(self.MINUTES_STOP_EMOJI)
+        playback_emojis = reaction_aliases(self.MINUTES_PLAYBACK_EMOJI)
+        progress_text = {
+            **{item: "リアル文字起こしを切り替えています..." for item in realtime_emojis},
+            **{item: "途中要約中..." for item in summary_emojis},
+            **{item: "録音を停止して文字起こし・要約中..." for item in stop_emojis},
+            **{item: "文字起こし・要約を破棄して録音再生を準備中..." for item in playback_emojis},
+        }.get(emoji)
+        if progress_text is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            logger.info(
+                "minutes_reaction_ignored message=%s emoji_supported=%s channel_supported=%s",
+                message_id,
+                progress_text is not None,
+                isinstance(channel, (discord.TextChannel, discord.Thread)),
+            )
+            return False
+
         minutes_panel = self._minutes_panels.get(message_id)
         if not minutes_panel:
-            return False
+            try:
+                source_message = await channel.fetch_message(message_id)
+                is_minutes_panel = bool(
+                    self.bot.user
+                    and source_message.author.id == self.bot.user.id
+                    and "議事録を開始しました" in source_message.content
+                )
+            except Exception:
+                is_minutes_panel = False
+            if not is_minutes_panel:
+                logger.info("minutes_reaction_not_panel message=%s", message_id)
+                return False
+            progress_message = await channel.send("議事録操作を受け付けました...")
+            await progress_message.edit(
+                content="この議事録操作パネルは無効です。Bot再起動後は `/minutes` で開始し直してください。"
+            )
+            asyncio.create_task(progress_message.delete(delay=10))
+            return True
         logger.info(
             "minutes_panel_hit message=%s expected_channel=%s expected_guild=%s emoji=%s",
             message_id,
@@ -274,6 +416,22 @@ class SlashCommands(commands.Cog):
             minutes_panel.guild_id,
             emoji,
         )
+        progress_message: discord.Message | None = None
+        try:
+            progress_message = await asyncio.wait_for(
+                channel.send("議事録操作を受け付けました..."),
+                timeout=3,
+            )
+            logger.info(
+                "minutes_progress_sent message=%s progress_message=%s",
+                message_id,
+                progress_message.id,
+            )
+        except Exception:
+            logger.exception(
+                "minutes_progress_send_failed message=%s; continuing operation",
+                message_id,
+            )
         if guild_id != minutes_panel.guild_id or channel_id != minutes_panel.channel_id:
             logger.info(
                 "minutes_panel_mismatch message=%s payload_channel=%s payload_guild=%s",
@@ -281,9 +439,15 @@ class SlashCommands(commands.Cog):
                 channel_id,
                 guild_id,
             )
+            if progress_message is not None:
+                await progress_message.edit(content="このチャンネルでは議事録を操作できません。")
+                asyncio.create_task(progress_message.delete(delay=10))
             return True
         if guild is None:
             logger.info("minutes_panel_missing_guild message=%s guild=%s", message_id, guild_id)
+            if progress_message is not None:
+                await progress_message.edit(content="サーバー情報を取得できませんでした。もう一度試してください。")
+                asyncio.create_task(progress_message.delete(delay=10))
             return True
         member = guild.get_member(user_id)
         if member is None:
@@ -291,9 +455,15 @@ class SlashCommands(commands.Cog):
                 member = await guild.fetch_member(user_id)
             except Exception:
                 logger.info("minutes_panel_missing_member message=%s user=%s", message_id, user_id)
+                if progress_message is not None:
+                    await progress_message.edit(content="操作したユーザー情報を取得できませんでした。")
+                    asyncio.create_task(progress_message.delete(delay=10))
                 return True
         if not isinstance(member, discord.Member):
             logger.info("minutes_panel_invalid_member message=%s user=%s", message_id, user_id)
+            if progress_message is not None:
+                await progress_message.edit(content="操作したユーザー情報が不正です。")
+                asyncio.create_task(progress_message.delete(delay=10))
             return True
         if member.id != minutes_panel.owner_user_id and not member.guild_permissions.manage_guild:
             logger.info(
@@ -302,21 +472,25 @@ class SlashCommands(commands.Cog):
                 user_id,
                 minutes_panel.owner_user_id,
             )
+            if progress_message is not None:
+                await progress_message.edit(
+                    content=f"{member.mention} この議事録を操作できるのは開始者またはサーバー管理者です。"
+                )
+                asyncio.create_task(progress_message.delete(delay=10))
             return True
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            logger.info("minutes_panel_invalid_channel message=%s channel=%s", message_id, channel_id)
-            return True
-
         try:
-            if emoji in {"▶️", "▶"}:
+            if progress_message is not None:
+                await progress_message.edit(content=f"{member.mention} {progress_text}")
+            logger.info("minutes_reaction_dispatch message=%s emoji=%s", message_id, emoji)
+            if emoji in realtime_emojis:
                 text = await self._toggle_minutes_realtime_mode(guild, member, minutes_panel)
                 await channel.send(text, delete_after=10)
                 return True
-            if emoji in {"⏯️", "⏯"}:
+            if emoji in summary_emojis:
                 text = await self._send_minutes_interim_summary(guild, channel)
                 await channel.send(text, delete_after=10)
                 return True
-            if emoji in {"⏹️", "⏹"}:
+            if emoji in stop_emojis:
                 text = await self._stop_minutes_session_from_panel(
                     guild,
                     channel,
@@ -326,7 +500,7 @@ class SlashCommands(commands.Cog):
                 )
                 await channel.send(text, delete_after=10)
                 return True
-            if emoji in {"🎶"}:
+            if emoji in playback_emojis:
                 text = await self._stop_minutes_session_from_panel(
                     guild,
                     channel,
@@ -337,9 +511,22 @@ class SlashCommands(commands.Cog):
                 await channel.send(text, delete_after=10)
                 return True
         except Exception as e:
-            await channel.send(f"議事録操作に失敗しました: {e}", delete_after=10)
+            logger.exception("Meeting minutes panel operation failed")
+            await channel.send(
+                f"議事録操作に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
+                delete_after=10,
+            )
             return True
-        return False
+        finally:
+            if progress_message is not None:
+                try:
+                    await progress_message.delete()
+                except Exception:
+                    logger.info(
+                        "minutes_progress_delete_failed message=%s progress_message=%s",
+                        message_id,
+                        progress_message.id,
+                    )
 
     @staticmethod
     def _write_pcm_wav(path: Path, pcm: bytes, sample_rate: int = 48000, channels: int = 2, sample_width: int = 2) -> None:
@@ -356,6 +543,14 @@ class SlashCommands(commands.Cog):
         voice_channel: discord.VoiceChannel | discord.StageChannel,
         wav_path: Path,
     ) -> str | None:
+        logger.info(
+            "minutes_playback_prepare guild=%s channel=%s path=%s exists=%s size=%s",
+            guild.id,
+            voice_channel.id,
+            wav_path,
+            wav_path.exists(),
+            wav_path.stat().st_size if wav_path.exists() else 0,
+        )
         existing_vc = guild.voice_client
         if existing_vc and existing_vc.is_connected():
             current = getattr(existing_vc, "channel", None)
@@ -371,6 +566,7 @@ class SlashCommands(commands.Cog):
         source = discord.FFmpegPCMAudio(str(wav_path))
 
         def _after_playback(error: Exception | None) -> None:
+            logger.info("minutes_playback_finished guild=%s error=%r", guild.id, error)
             if error:
                 return
             fut = vc.disconnect(force=True)
@@ -378,6 +574,7 @@ class SlashCommands(commands.Cog):
                 asyncio.run_coroutine_threadsafe(fut, self.bot.loop)
 
         vc.play(source, after=_after_playback)
+        logger.info("minutes_playback_started guild=%s channel=%s path=%s", guild.id, voice_channel.id, wav_path)
         return None
 
     def _build_help_text(self) -> str:
@@ -397,6 +594,44 @@ class SlashCommands(commands.Cog):
                 lines.append(f"[コマンド: {category}]")
                 lines.extend(lines_for_category)
         return "\n".join(lines)
+
+    def _build_ping_text(self) -> str:
+        latency_ms = round(float(self.bot.latency) * 1000, 1)
+        return f"Pong! {latency_ms}ms"
+
+    def _build_bot_info_embed(self) -> discord.Embed:
+        now = discord.utils.utcnow()
+        uptime = now - self._started_at
+        total_seconds = int(max(0, uptime.total_seconds()))
+        h = total_seconds // 3600
+        m = (total_seconds % 3600) // 60
+        s = total_seconds % 60
+
+        guild_count = len(self.bot.guilds)
+        member_count = 0
+        for g in self.bot.guilds:
+            if g.member_count:
+                member_count += int(g.member_count)
+
+        ping_ms = round(self.bot.latency * 1000, 1)
+        commit = self._git_short_commit()
+        version = self._git_version()
+        ai_model = self._display_model_name(get_app_config().ai_models().default)
+
+        embed = discord.Embed(
+            title="Kenny Bot 情報",
+            color=discord.Color.green(),
+            timestamp=now_jst(),
+        )
+        embed.add_field(name="疎通", value="🏓 Pong / 正常", inline=True)
+        embed.add_field(name="Ping", value=f"{ping_ms} ms", inline=True)
+        embed.add_field(name="稼働時間", value=f"{h}h {m}m {s}s", inline=True)
+        embed.add_field(name="参加サーバー", value=str(guild_count), inline=True)
+        embed.add_field(name="総メンバー数(概算)", value=str(member_count), inline=True)
+        embed.add_field(name="会話モデル", value=f"`{ai_model}`", inline=True)
+        embed.add_field(name="Version", value=f"`{version}`", inline=True)
+        embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
+        return embed
 
     @staticmethod
     def _split_text(text: str, limit: int = 1900) -> list[str]:
@@ -462,6 +697,10 @@ class SlashCommands(commands.Cog):
     @commands.command(name=HELP_META.name)
     async def prefix_help(self, ctx: commands.Context):
         await self._send_help_text(ctx)
+
+    @app_commands.command(name=PING_META.name, description=PING_META.description)
+    async def slash_ping(self, interaction: discord.Interaction):
+        await interaction.response.send_message(self._build_ping_text(), ephemeral=True)
 
     def _git_short_commit(self) -> str:
         build_info = load_build_info()
@@ -567,7 +806,7 @@ class SlashCommands(commands.Cog):
         participants: list[discord.Member],
     ) -> str:
         title = state.title.strip() if state.title else ""
-        header = f"🤝 **{state.group_size}人組 自動マッチング**"
+        header = f"{self.GROUP_MATCH_EMOJI} **{state.group_size}人組 自動マッチング**"
         if title:
             header += f" | {title}"
 
@@ -594,7 +833,7 @@ class SlashCommands(commands.Cog):
         participants: list[discord.Member],
     ) -> str:
         title = state.title.strip() if state.title else ""
-        header = f"🤝 **{state.group_size}人組 シャッフル結果**"
+        header = f"{self.GROUP_MATCH_EMOJI} **{state.group_size}人組 シャッフル結果**"
         if title:
             header += f" | {title}"
 
@@ -626,7 +865,7 @@ class SlashCommands(commands.Cog):
     ) -> list[discord.Member]:
         users: list[discord.Member] = []
         for reaction in message.reactions:
-            if str(reaction.emoji) != self.GROUP_MATCH_EMOJI:
+            if str(reaction.emoji) not in reaction_aliases(self.GROUP_MATCH_EMOJI):
                 continue
             async for user in reaction.users():
                 if not isinstance(user, discord.Member):
@@ -717,6 +956,8 @@ class SlashCommands(commands.Cog):
         count="取得件数",
         author="作者名で部分一致フィルタ",
         tag="タグで絞り込み",
+        totp_code="TOTP 2FA コード（管理者のみ、必要時だけ）",
+        email_code="Email 2FA コード（管理者のみ、必要時だけ）",
     )
     async def vrchat_world(
         self,
@@ -725,13 +966,22 @@ class SlashCommands(commands.Cog):
         count: app_commands.Range[int, 1, 10] | None = None,
         author: str | None = None,
         tag: str | None = None,
+        totp_code: str | None = None,
+        email_code: str | None = None,
     ):
         search_keyword = keyword.strip()
         if not search_keyword:
             await interaction.response.send_message("検索キーワードを指定してください。", ephemeral=True)
             return
+        has_2fa_code = bool((totp_code or "").strip() or (email_code or "").strip())
+        if has_2fa_code and not self._is_admin_like(interaction):
+            await interaction.response.send_message(
+                "2FA コードを使った VRChat 認証は管理者のみ実行できます。",
+                ephemeral=True,
+            )
+            return
 
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=has_2fa_code)
 
         try:
             formatter, worlds = await asyncio.to_thread(
@@ -740,11 +990,21 @@ class SlashCommands(commands.Cog):
                 int(count or 5),
                 author.strip() if author else None,
                 tag.strip() if tag else None,
+                totp_code=totp_code,
+                email_code=email_code,
             )
+        except VRChatTwoFactorRequired as exc:
+            logger.info("VRChat world search requires 2FA")
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except VRChatAuthError as exc:
+            logger.warning("VRChat auth setup failed: %s", exc)
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
         except Exception as e:
             logger.exception("VRChat world search failed")
             await interaction.followup.send(
-                f"VRChat ワールド検索に失敗しました: {str(e)[:300]}",
+                f"VRChat ワールド検索に失敗しました: {sanitize_user_visible_error(e, max_chars=300)}",
                 ephemeral=True,
             )
             return
@@ -755,45 +1015,76 @@ class SlashCommands(commands.Cog):
 
         lines = format_vrchat_world_lines(formatter, worlds)
         message = "\n".join(lines)
+        if has_2fa_code:
+            message = "VRChat 認証 cookie を保存しました。\n\n" + message
         if len(message) > 1900:
             message = message[:1900] + "\n..."
-        await interaction.followup.send(message)
+        await interaction.followup.send(message, ephemeral=has_2fa_code)
+
+    @app_commands.command(name=VRC_USER_META.name, description=VRC_USER_META.description)
+    @app_commands.checks.cooldown(1, 10.0)
+    @app_commands.describe(
+        url="VRChat ユーザーURLまたは usr_ から始まるユーザーID",
+        totp_code="TOTP 2FA コード（管理者のみ、必要時だけ）",
+        email_code="Email 2FA コード（管理者のみ、必要時だけ）",
+    )
+    async def vrc_user(
+        self,
+        interaction: discord.Interaction,
+        url: str,
+        totp_code: str | None = None,
+        email_code: str | None = None,
+    ):
+        has_2fa_code = bool((totp_code or "").strip() or (email_code or "").strip())
+        if has_2fa_code and not self._is_admin_like(interaction):
+            await interaction.response.send_message(
+                "2FA コードを使った VRChat 認証は管理者のみ実行できます。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=has_2fa_code)
+        try:
+            lookup = await asyncio.to_thread(
+                get_vrchat_user_from_url,
+                url.strip(),
+                totp_code=totp_code,
+                email_code=email_code,
+            )
+        except VRChatTwoFactorRequired as exc:
+            logger.info("VRChat user lookup requires 2FA")
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except VRChatAuthError as exc:
+            logger.warning("VRChat auth setup failed: %s", exc)
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except Exception as exc:
+            logger.exception("VRChat user lookup failed")
+            await interaction.followup.send(
+                f"VRChat ユーザー取得に失敗しました: {sanitize_user_visible_error(exc, max_chars=300)}",
+                ephemeral=True,
+            )
+            return
+
+        message = format_vrchat_user(lookup.user)
+        if lookup.cookie_saved and has_2fa_code:
+            message = "VRChat 認証 cookie を保存しました。\n\n" + message
+        if len(message) > 1900:
+            message = message[:1900] + "\n..."
+        await interaction.followup.send(message, ephemeral=has_2fa_code)
 
     @app_commands.command(name=BOT_INFO_META.name, description=BOT_INFO_META.description)
     async def slash_bot_info(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=False)
-        now = discord.utils.utcnow()
-        uptime = now - self._started_at
-        total_seconds = int(max(0, uptime.total_seconds()))
-        h = total_seconds // 3600
-        m = (total_seconds % 3600) // 60
-        s = total_seconds % 60
+        await interaction.followup.send(embed=self._build_bot_info_embed(), ephemeral=True)
 
-        guild_count = len(self.bot.guilds)
-        member_count = 0
-        for g in self.bot.guilds:
-            if g.member_count:
-                member_count += int(g.member_count)
-
-        ping_ms = round(self.bot.latency * 1000, 1)
-        commit = self._git_short_commit()
-        version = self._git_version()
-        ai_model = self._display_model_name(get_app_config().ai_models().default)
-
-        embed = discord.Embed(
-            title="Kenny Bot 情報",
-            color=discord.Color.green(),
-            timestamp=now_jst(),
-        )
-        embed.add_field(name="疎通", value="🏓 Pong / 正常", inline=True)
-        embed.add_field(name="Ping", value=f"{ping_ms} ms", inline=True)
-        embed.add_field(name="稼働時間", value=f"{h}h {m}m {s}s", inline=True)
-        embed.add_field(name="参加サーバー", value=str(guild_count), inline=True)
-        embed.add_field(name="総メンバー数(概算)", value=str(member_count), inline=True)
-        embed.add_field(name="会話モデル", value=f"`{ai_model}`", inline=True)
-        embed.add_field(name="Version", value=f"`{version}`", inline=True)
-        embed.add_field(name="Commit", value=f"`{commit}`", inline=True)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+    @commands.command(name=BOT_INFO_META.name)
+    async def prefix_bot_info(self, ctx: commands.Context):
+        await ctx.send(embed=self._build_bot_info_embed())
 
     @app_commands.command(name=SUMMARIZE_RECENT_META.name, description=SUMMARIZE_RECENT_META.description)
     @app_commands.checks.cooldown(1, 20.0)
@@ -899,7 +1190,7 @@ class SlashCommands(commands.Cog):
             summary = (summary or "").strip() or "要約結果が空でした。"
         except Exception as e:
             await interaction.followup.send(
-                f"要約に失敗しました: {str(e)[:180]}",
+                f"要約に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
                 ephemeral=True,
             )
             return
@@ -938,60 +1229,79 @@ class SlashCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name=CONFIG_SHOW_META.name, description=CONFIG_SHOW_META.description)
-    @app_commands.describe(key="表示する設定キー")
-    @app_commands.choices(key=_CONFIG_CHOICES)
-    @checks.has_permissions(administrator=True)
-    async def config_show(self, interaction: discord.Interaction, key: app_commands.Choice[str]):
-        gid = interaction.guild.id if interaction.guild else None
-        value = _settings.get(key.value, None, guild_id=gid)
-        await interaction.response.send_message(
-            f"`{key.value}` = `{value}`",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name=CONFIG_SET_META.name, description=CONFIG_SET_META.description)
+    @app_commands.command(name=CONFIG_META.name, description=CONFIG_META.description)
     @app_commands.describe(
-        key="更新する設定キー",
-        value="新しい値（数値キーは数字、モデルは文字列）",
+        action="操作",
+        key="設定キー",
+        value="新しい値（set のときだけ使用）",
         scope="global:全体 / guild:このサーバーのみ",
     )
     @app_commands.choices(
-        key=_CONFIG_CHOICES,
+        action=[
+            app_commands.Choice(name="表示", value="show"),
+            app_commands.Choice(name="更新", value="set"),
+        ],
         scope=[
             app_commands.Choice(name="global", value="global"),
             app_commands.Choice(name="guild", value="guild"),
         ],
     )
-    @checks.has_permissions(administrator=True)
-    async def config_set(
+    async def config(
         self,
         interaction: discord.Interaction,
-        key: app_commands.Choice[str],
-        value: str,
+        action: app_commands.Choice[str],
+        key: str,
+        value: str | None = None,
         scope: app_commands.Choice[str] | None = None,
     ):
+        if not await self._ensure_admin_like(interaction):
+            return
+        key_name = key.strip()
+        valid_keys = {choice.value for choice in self._CONFIG_CHOICES}
+        if key_name not in valid_keys:
+            await interaction.response.send_message("未対応の設定キーです。", ephemeral=True)
+            return
+        action_name = (action.value or "").strip().lower()
+        gid = interaction.guild.id if interaction.guild else None
+        if action_name == "show":
+            value_now = _settings.get(key_name, None, guild_id=gid)
+            await interaction.response.send_message(
+                f"`{key_name}` = `{value_now}`",
+                ephemeral=True,
+            )
+            return
+
+        if action_name != "set":
+            await interaction.response.send_message("action は `show` / `set` から選んでください。", ephemeral=True)
+            return
+
+        if value is None:
+            await interaction.response.send_message("更新には `value` が必要です。", ephemeral=True)
+            return
+
         sc = scope.value if scope else "global"
         guild_id = interaction.guild.id if (sc == "guild" and interaction.guild) else None
         if sc == "guild" and guild_id is None:
             await interaction.response.send_message("guild スコープはサーバー内で実行してください。", ephemeral=True)
             return
         if sc == "global":
-            if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
+            if not interaction.guild or (
+                interaction.user.id != interaction.guild.owner_id and not self._is_configured_admin_user(interaction.user.id)
+            ):
                 await interaction.response.send_message(
-                    "global スコープはサーバーオーナーのみ変更できます。",
+                    "global スコープはサーバーオーナーまたは設定済み管理者のみ変更できます。",
                     ephemeral=True,
                 )
                 return
 
         parsed: object
-        if key.value in self._INT_KEYS:
+        if key_name in self._INT_KEYS:
             try:
                 parsed = int(value)
             except Exception:
                 await interaction.response.send_message("このキーは整数で指定してください。", ephemeral=True)
                 return
-        elif key.value in self._BOOL_KEYS:
+        elif key_name in self._BOOL_KEYS:
             v = value.strip().lower()
             if v in {"1", "true", "on", "yes", "有効"}:
                 parsed = True
@@ -1000,18 +1310,42 @@ class SlashCommands(commands.Cog):
             else:
                 await interaction.response.send_message("このキーは true/false で指定してください。", ephemeral=True)
                 return
+        elif key_name in self._INT_LIST_KEYS:
+            parts = re.split(r"[\s,]+", value.strip()) if value.strip() else []
+            parsed_ids: list[int] = []
+            for part in parts:
+                try:
+                    parsed_ids.append(int(part))
+                except Exception:
+                    await interaction.response.send_message(
+                        "このキーはユーザーIDをカンマまたは空白区切りで指定してください。",
+                        ephemeral=True,
+                    )
+                    return
+            if not parsed_ids:
+                await interaction.response.send_message("少なくとも1件のユーザーIDを指定してください。", ephemeral=True)
+                return
+            parsed = parsed_ids
         else:
             parsed = value.strip()
             if not parsed:
                 await interaction.response.send_message("空文字は設定できません。", ephemeral=True)
                 return
 
-        _settings.set(key.value, parsed, guild_id=guild_id)
+        _settings.set(key_name, parsed, guild_id=guild_id)
         note = "（一部設定は再起動後に完全反映）"
         await interaction.response.send_message(
-            f"設定を更新しました: `{key.value}` = `{parsed}` / scope=`{sc}` {note}",
+            f"設定を更新しました: `{key_name}` = `{parsed}` / scope=`{sc}` {note}",
             ephemeral=True,
         )
+
+    @config.autocomplete("key")
+    async def config_key_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        return self._autocomplete_config_keys(current)
 
     def _ollama_model_key(self, target: str) -> str:
         mapping = {
@@ -1118,11 +1452,12 @@ class SlashCommands(commands.Cog):
         return sorted(set(names))
 
     @app_commands.command(name=MODEL_LIST_META.name, description=MODEL_LIST_META.description)
-    @checks.has_permissions(administrator=True)
     async def model_list(
         self,
         interaction: discord.Interaction,
     ):
+        if not await self._ensure_admin_like(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         local_host = "http://127.0.0.1:11434"
         remote_host = os.getenv("OLLAMA_HOST")
@@ -1132,7 +1467,7 @@ class SlashCommands(commands.Cog):
             local_names = await asyncio.to_thread(self._list_local_models)
             local_body = "\n".join(f"- `{name}`" for name in local_names[:30]) if local_names else "0件"
         except Exception as e:
-            local_body = f"取得失敗: `{str(e)[:200]}`"
+            local_body = f"取得失敗: `{sanitize_user_visible_error(e, max_chars=200)}`"
         sections.append(f"ローカル:\n{local_body}")
 
         if remote_host and remote_host != local_host:
@@ -1140,7 +1475,7 @@ class SlashCommands(commands.Cog):
                 remote_names = await asyncio.to_thread(self._list_remote_models_via_tags_api, remote_host)
                 remote_body = "\n".join(f"- `{name}`" for name in remote_names[:30]) if remote_names else "0件"
             except Exception as e:
-                remote_body = f"取得失敗: `{str(e)[:200]}`"
+                remote_body = f"取得失敗: `{sanitize_user_visible_error(e, max_chars=200)}`"
             sections.append(f"リモート ({remote_host}):\n{remote_body}")
 
         await interaction.followup.send("\n\n".join(sections), ephemeral=True)
@@ -1151,13 +1486,14 @@ class SlashCommands(commands.Cog):
         model="設定するモデル名",
     )
     @app_commands.choices(target=_OLLAMA_MODEL_TARGET_CHOICES)
-    @checks.has_permissions(administrator=True)
     async def model_change(
         self,
         interaction: discord.Interaction,
         target: app_commands.Choice[str],
         model: str,
     ):
+        if not await self._ensure_admin_like(interaction):
+            return
         raw_model_name = model.strip()
         model_name = self._normalize_model_name_for_target(target.value, raw_model_name)
         if not model_name:
@@ -1196,7 +1532,6 @@ class SlashCommands(commands.Cog):
         )
 
     @app_commands.command(name=REACTION_ROLE_SET_META.name, description=REACTION_ROLE_SET_META.description)
-    @checks.has_permissions(administrator=True)
     @app_commands.describe(
         message_id="対象メッセージID",
         emoji="対象リアクション",
@@ -1209,6 +1544,8 @@ class SlashCommands(commands.Cog):
         emoji: str,
         role: discord.Role,
     ):
+        if not await self._ensure_admin_like(interaction):
+            return
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
@@ -1265,7 +1602,6 @@ class SlashCommands(commands.Cog):
         )
 
     @app_commands.command(name=REACTION_ROLE_REMOVE_META.name, description=REACTION_ROLE_REMOVE_META.description)
-    @checks.has_permissions(administrator=True)
     @app_commands.describe(
         message_id="対象メッセージID",
         emoji="解除するリアクション",
@@ -1276,6 +1612,8 @@ class SlashCommands(commands.Cog):
         message_id: str,
         emoji: str,
     ):
+        if not await self._ensure_admin_like(interaction):
+            return
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
@@ -1306,8 +1644,9 @@ class SlashCommands(commands.Cog):
         )
 
     @app_commands.command(name=REACTION_ROLE_LIST_META.name, description=REACTION_ROLE_LIST_META.description)
-    @checks.has_permissions(administrator=True)
     async def reaction_role_list(self, interaction: discord.Interaction):
+        if not await self._ensure_admin_like(interaction):
+            return
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
@@ -1332,15 +1671,75 @@ class SlashCommands(commands.Cog):
 
         await interaction.response.send_message("\n".join(lines[:30]), ephemeral=True)
 
-    @app_commands.command(name=MINUTES_START_META.name, description=MINUTES_START_META.description)
-    @app_commands.checks.cooldown(1, 10.0)
-    @app_commands.describe(model="文字起こしモデル。Whisper 系または Moonshine を選択")
-    @app_commands.choices(model=_WHISPER_MODEL_CHOICES)
-    async def minutes_start(
+    @app_commands.command(name=MOD_PANEL_META.name, description=MOD_PANEL_META.description)
+    async def modpanel(self, interaction: discord.Interaction):
+        if not await self._ensure_admin_like(interaction):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
+            return
+
+        channel = self.bot.get_channel(MOD_PANEL_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("モデレーションパネルチャンネルが見つかりません。", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🛡️ スパム管理パネル",
+            description=(
+                "このパネルを使用してスパムユーザーを管理できます。\n\n"
+                "**使い方：**\n"
+                "1. ユーザーIDを記載したメッセージにリアクションを追加\n"
+                f"2. {get_reaction_emoji('mod_reset')} を押すとリセット\n"
+                f"3. {get_reaction_emoji('mod_list')} を押すと違反一覧表示\n\n"
+                "**例:**\n"
+                "`ユーザーID: 123456789`\n"
+                "`レベル: mute`\n"
+                "`違反回数: 3`"
+            ),
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="mod_panel")
+
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction(get_reaction_emoji("mod_reset"))
+        await msg.add_reaction(get_reaction_emoji("mod_list"))
+        await interaction.response.send_message("✅ モデレーションパネルを作成しました。", ephemeral=True)
+
+    @app_commands.command(name=MINUTES_META.name, description=MINUTES_META.description)
+    @app_commands.describe(
+        action="操作",
+        model="文字起こしモデル。Whisper 系または Moonshine を選択",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="開始", value="start"),
+            app_commands.Choice(name="停止", value="stop"),
+            app_commands.Choice(name="状態", value="status"),
+        ],
+        model=_WHISPER_MODEL_CHOICES,
+    )
+    async def minutes(
         self,
         interaction: discord.Interaction,
+        action: app_commands.Choice[str],
         model: app_commands.Choice[str] | None = None,
     ):
+        action_name = (action.value or "").strip().lower()
+        if action_name == "stop":
+            await self.minutes_stop(interaction)
+            return
+        if action_name == "status":
+            await self.minutes_status(interaction)
+            return
+
+        logger.info(
+            "minutes_start_requested guild=%s channel=%s user=%s model=%s",
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
+            model.value if model else "default",
+        )
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
@@ -1353,17 +1752,41 @@ class SlashCommands(commands.Cog):
         voice_channel_name = voice_channel.name
 
         existing_vc = interaction.guild.voice_client
+        switched_from_tts = False
         if existing_vc and existing_vc.is_connected():
             current = getattr(existing_vc, "channel", None)
             current_name = current.name if isinstance(current, (discord.VoiceChannel, discord.StageChannel)) else "不明"
-            await interaction.response.send_message(
-                f"Bot はすでに VC `{current_name}` に接続中です。"
-                " 先に `/tts_leave` または議事録停止を実行してから再試行してください。",
-                ephemeral=True,
-            )
-            return
+            tts_reader = self.bot.get_cog("TTSReader")
+            tts_state = tts_reader._get_state(interaction.guild.id) if tts_reader is not None else None
+            same_channel = getattr(current, "id", None) == voice_channel.id
+            if same_channel and tts_state is not None and hasattr(tts_reader, "stop_for_minutes"):
+                await interaction.response.defer(ephemeral=True, thinking=True)
+                try:
+                    await tts_reader.stop_for_minutes(interaction.guild)
+                    switched_from_tts = True
+                    logger.info(
+                        "minutes_start_stopped_tts guild=%s voice_channel=%s",
+                        interaction.guild.id,
+                        voice_channel.id,
+                    )
+                except Exception as e:
+                    logger.exception("minutes_start failed to stop TTS")
+                    await interaction.followup.send(
+                        f"読み上げ停止に失敗したため議事録を開始できません: "
+                        f"{sanitize_user_visible_error(e, max_chars=180)}",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                await interaction.response.send_message(
+                    f"Bot はすでに VC `{current_name}` に接続中です。"
+                    " 別用途の接続を停止してから再試行してください。",
+                    ephemeral=True,
+                )
+                return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
         selected_model = model.value if model else None
         provider = None
         backend_model = None
@@ -1387,6 +1810,15 @@ class SlashCommands(commands.Cog):
             transcription_provider=provider,
             whisper_model=backend_model,
         )
+        if switched_from_tts:
+            msg += "\n読み上げを停止して議事録モードへ切り替えました。"
+        logger.info(
+            "minutes_start_result guild=%s user=%s ok=%s message=%s",
+            interaction.guild.id,
+            interaction.user.id,
+            ok,
+            msg.replace("\n", " / ")[:500],
+        )
         await interaction.followup.send(msg, ephemeral=True)
         if ok:
             out = self.bot.meeting_minutes.resolve_announce_channel(
@@ -1396,19 +1828,22 @@ class SlashCommands(commands.Cog):
                 allow_fallback=False,
             )
             if out:
+                session = self.bot.meeting_minutes.get_session(interaction.guild.id)
+                runtime = getattr(session, "runtime", None)
+                supports_realtime = getattr(runtime, "voice_client", None) is not None
+                mode_line = "リアル文字起こし: 開始中" if supports_realtime else "録音方式: 外部レコーダー（停止時に要約）"
                 start_message = await out.send(
                     "\n".join(
                         [
                             f"{interaction.user.mention} 議事録を開始しました。（VC: {voice_channel_name}）",
-                            "リアル文字起こし: ON",
-                            "▶️ リアル文字起こしの開始/停止",
-                            "⏯️ 途中要約",
-                            "⏹️ 停止して要約",
-                            "🎶 停止して録音を再生",
+                            "リアル文字起こしの投稿は行いません。",
+                            f"{self.MINUTES_SUMMARY_EMOJI} 途中要約",
+                            f"{self.MINUTES_STOP_EMOJI} 停止して要約",
+                            f"{self.MINUTES_PLAYBACK_EMOJI} 停止して録音を再生",
                         ]
                     )
                 )
-                for emoji in ("▶️", "⏯️", "⏹️", "🎶"):
+                for emoji in (self.MINUTES_SUMMARY_EMOJI, self.MINUTES_STOP_EMOJI, self.MINUTES_PLAYBACK_EMOJI):
                     try:
                         await start_message.add_reaction(emoji)
                     except Exception:
@@ -1481,7 +1916,7 @@ class SlashCommands(commands.Cog):
             return "\n".join(
                 [
                     "音声認識ステータス: 終了",
-                    "文字起こしステータス: 終了",
+                    "要約ステータス: 終了",
                     "音声認識と文字起こしは停止しました。",
                 ]
             )
@@ -1490,17 +1925,22 @@ class SlashCommands(commands.Cog):
         voice_channel_name = voice_channel.name if isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)) else f"ID:{voice_channel_id}"
         runtime = getattr(session, "runtime", None)
         voice_client = getattr(runtime, "voice_client", None)
-        phrase_flush_tasks = getattr(runtime, "phrase_flush_tasks", {}) or {}
-        phrase_queue = getattr(runtime, "phrase_queue", None)
-        transcription_active = bool(getattr(runtime, "realtime_live_enabled", False)) or bool(phrase_flush_tasks) or (
-            phrase_queue is not None and not phrase_queue.empty()
-        )
-        recognition_state = "認識中" if voice_client is not None else "停止中"
-        transcription_state = "文字起こし中" if transcription_active else "待機中"
+        recorder_process = getattr(runtime, "recorder_process", None)
+        received_packets = int(getattr(runtime, "received_packets", 0) or 0)
+        received_pcm_bytes = int(getattr(runtime, "received_pcm_bytes", 0) or 0)
+        if recorder_process is not None:
+            recognition_state = "録音中"
+        elif voice_client is None:
+            recognition_state = "停止中"
+        elif received_packets > 0:
+            recognition_state = "音声受信中"
+        else:
+            recognition_state = "接続済み・音声待機中"
         return "\n".join(
             [
                 f"音声認識ステータス: {recognition_state}",
-                f"文字起こし投稿ステータス: {transcription_state}",
+                "要約ステータス: 停止時に実行",
+                f"受信音声: {received_packets} packets / {received_pcm_bytes / (1024 * 1024):.2f} MiB",
                 f"対象VC: {voice_channel_name}",
             ]
         )
@@ -1542,6 +1982,20 @@ class SlashCommands(commands.Cog):
             return "途中要約を送信しました。"
         return str(payload)
 
+    @staticmethod
+    async def _ensure_minutes_voice_disconnected(guild: discord.Guild) -> str:
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            return " / BotはVCから退出しました"
+        try:
+            if vc.is_playing():
+                vc.stop()
+            await vc.disconnect(force=True)
+            return " / BotはVCから退出しました"
+        except Exception as e:
+            logger.exception("Failed to disconnect minutes voice client")
+            return f" / VC退出失敗: {sanitize_user_visible_error(e, max_chars=120)}"
+
     async def _stop_minutes_session_from_panel(
         self,
         guild: discord.Guild,
@@ -1551,6 +2005,34 @@ class SlashCommands(commands.Cog):
         playback: bool,
         action: str,
     ) -> str:
+        logger.info(
+            "minutes_stop_panel_start guild=%s user=%s playback=%s",
+            guild.id,
+            member.id,
+            playback,
+        )
+        if playback:
+            stopped = await self.bot.meeting_minutes.stop_session_for_playback(guild)
+            logger.info("minutes_stop_playback_recording_result guild=%s found=%s", guild.id, stopped is not None)
+            if stopped is None:
+                return "現在、進行中の議事録はありません。"
+            session, audio_path, warning = stopped
+            voice_channel = guild.get_channel(session.voice_channel_id)
+            playback_note = ""
+            if audio_path is None:
+                playback_note = f"録音再生なし: {warning or '再生できる録音がありません。'}"
+            elif not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+                playback_note = "録音再生なし: 対象VCが見つかりません。"
+            else:
+                try:
+                    playback_error = await self._play_wav_in_voice_channel(guild, voice_channel, audio_path)
+                    playback_note = f"録音再生なし: {playback_error}" if playback_error else "録音MP3をVCで再生中"
+                except Exception as e:
+                    playback_note = f"録音再生失敗: {sanitize_user_visible_error(e, max_chars=180)}"
+            await self._set_minutes_status_ended(guild)
+            self._clear_minutes_panels(guild.id)
+            return f"文字起こし・要約を破棄して議事録を停止しました。{playback_note}"
+
         result = await self.bot.meeting_minutes.stop_session(
             bot=self.bot,
             guild=guild,
@@ -1560,27 +2042,7 @@ class SlashCommands(commands.Cog):
         if not result:
             return "現在、進行中の議事録はありません。"
 
-        playback_note = ""
-        if playback:
-            voice_channel = guild.get_channel(result.session.voice_channel_id)
-            wav_path = None
-            if result.audio_debug_paths:
-                for candidate in result.audio_debug_paths:
-                    path = Path(candidate)
-                    if path.suffix.lower() == ".wav":
-                        wav_path = path
-                        break
-                if wav_path is None:
-                    wav_path = Path(result.audio_debug_paths[0])
-            if wav_path and wav_path.exists() and isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
-                try:
-                    playback_error = await self._play_wav_in_voice_channel(guild, voice_channel, wav_path)
-                    if playback_error:
-                        playback_note = f" / 録音再生なし: {playback_error}"
-                    else:
-                        playback_note = " / 録音をVCで再生中"
-                except Exception as e:
-                    playback_note = f" / 録音再生失敗: {e}"
+        playback_note = await self._ensure_minutes_voice_disconnected(guild)
 
         await self.bot.meeting_minutes.deliver_stop_result(
             self.bot,
@@ -1594,8 +2056,6 @@ class SlashCommands(commands.Cog):
         self._clear_minutes_panels(guild.id)
         return "議事録を停止し、要約を作成しました。" + playback_note
 
-    @app_commands.command(name=MINUTES_STOP_META.name, description=MINUTES_STOP_META.description)
-    @app_commands.checks.cooldown(1, 15.0)
     async def minutes_stop(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
@@ -1609,7 +2069,6 @@ class SlashCommands(commands.Cog):
         )
         await interaction.followup.send(text if ok else text, ephemeral=True)
 
-    @app_commands.command(name=MINUTES_STATUS_META.name, description=MINUTES_STATUS_META.description)
     async def minutes_status(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
@@ -1667,6 +2126,8 @@ class SlashCommands(commands.Cog):
                         playback_note = " / 録音をVCで再生中"
                 except Exception as e:
                     playback_note = f" / 録音再生失敗: {e}"
+        else:
+            playback_note = await self._ensure_minutes_voice_disconnected(interaction.guild)
 
         await self.bot.meeting_minutes.deliver_stop_result(
             self.bot,
@@ -1743,12 +2204,12 @@ class SlashCommands(commands.Cog):
         async def _after_done(countdown_msg: discord.Message) -> None:
             try:
                 await countdown_msg.edit(
-                    content=f"<@{mention_user_id}> ⏰ {done_text}\n🔁 を押すと同じ設定で再スタート"
+                    content=f"<@{mention_user_id}> ⏰ {done_text}\n{self.TIMER_RESTART_EMOJI} を押すと同じ設定で再スタート"
                 )
             except Exception:
                 return
             try:
-                await countdown_msg.add_reaction("🔁")
+                await countdown_msg.add_reaction(self.TIMER_RESTART_EMOJI)
             except Exception:
                 pass
             self._timer_restart_templates[countdown_msg.id] = (int(total_seconds), done_text)
@@ -1792,10 +2253,10 @@ class SlashCommands(commands.Cog):
             state = self._group_matches.get(payload.message_id)
             if not state:
                 return
-            if emoji == self.GROUP_MATCH_EMOJI:
+            if emoji in reaction_aliases(self.GROUP_MATCH_EMOJI):
                 await self._refresh_group_match(payload.message_id)
                 return
-            if emoji == self.GROUP_MATCH_START_EMOJI and payload.user_id == state.host_user_id:
+            if emoji in reaction_aliases(self.GROUP_MATCH_START_EMOJI) and payload.user_id == state.host_user_id:
                 guild = self.bot.get_guild(state.guild_id)
                 channel = self.bot.get_channel(state.channel_id)
                 if not guild or not isinstance(channel, discord.TextChannel):
@@ -1815,7 +2276,7 @@ class SlashCommands(commands.Cog):
                             await member.send(result_text)
                         except Exception:
                             failures.append(member.mention)
-                    notice = "🤝 組み分け結果を参加者へDMしました。"
+                    notice = f"{self.GROUP_MATCH_EMOJI} 組み分け結果を参加者へDMしました。"
                     if failures:
                         notice += "\nDM失敗: " + ", ".join(failures[:5])
                     await message.edit(content=notice)
@@ -1825,7 +2286,7 @@ class SlashCommands(commands.Cog):
                 return
 
         # タイマー再スタート
-        if emoji == "🔁":
+        if emoji in reaction_aliases(self.TIMER_RESTART_EMOJI):
             tpl = self._timer_restart_templates.get(payload.message_id)
             if not tpl:
                 return
@@ -1857,16 +2318,9 @@ class SlashCommands(commands.Cog):
             user.id,
             emoji,
         )
-        guild = message.guild if isinstance(message.guild, discord.Guild) else None
-        await self._handle_minutes_reaction(
-            guild=guild,
-            channel=message.channel,
-            message_id=message.id,
-            channel_id=message.channel.id,
-            guild_id=getattr(message.guild, "id", None),
-            user_id=user.id,
-            emoji=emoji,
-        )
+        # Raw reaction events are the canonical path. Handling both events runs
+        # the same minutes action twice for messages present in Discord's cache.
+        logger.debug("reaction_add_skipped_raw_handler_is_canonical message=%s", message.id)
         return
 
         panel = self._vc_panels.get(payload.message_id)
@@ -1892,7 +2346,7 @@ class SlashCommands(commands.Cog):
             return
 
         # 参加登録
-        if emoji == self.VC_JOIN_EMOJI:
+        if emoji in reaction_aliases(self.VC_JOIN_EMOJI):
             if not member.voice or not isinstance(member.voice.channel, discord.VoiceChannel):
                 await channel.send(f"{member.mention} VC参加中のみ登録できます。", delete_after=5)
                 return
@@ -1926,22 +2380,22 @@ class SlashCommands(commands.Cog):
                     targets.append(tm)
 
         op = None
-        if emoji == self.VC_MUTE_ON_EMOJI:
+        if emoji in reaction_aliases(self.VC_MUTE_ON_EMOJI):
             op = "mute_on"
             if not me.guild_permissions.mute_members:
                 await channel.send("Botに『メンバーをミュート』権限がありません。", delete_after=5)
                 return
-        elif emoji == self.VC_MUTE_OFF_EMOJI:
+        elif emoji in reaction_aliases(self.VC_MUTE_OFF_EMOJI):
             op = "mute_off"
             if not me.guild_permissions.mute_members:
                 await channel.send("Botに『メンバーをミュート』権限がありません。", delete_after=5)
                 return
-        elif emoji == self.VC_DEAF_ON_EMOJI:
+        elif emoji in reaction_aliases(self.VC_DEAF_ON_EMOJI):
             op = "deafen_on"
             if not me.guild_permissions.deafen_members:
                 await channel.send("Botに『メンバーをスピーカーミュート』権限がありません。", delete_after=5)
                 return
-        elif emoji == self.VC_DEAF_OFF_EMOJI:
+        elif emoji in reaction_aliases(self.VC_DEAF_OFF_EMOJI):
             op = "deafen_off"
             if not me.guild_permissions.deafen_members:
                 await channel.send("Botに『メンバーをスピーカーミュート』権限がありません。", delete_after=5)
@@ -1977,7 +2431,7 @@ class SlashCommands(commands.Cog):
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == (self.bot.user.id if self.bot.user else 0):
             return
-        if str(payload.emoji) != self.GROUP_MATCH_EMOJI:
+        if str(payload.emoji) not in reaction_aliases(self.GROUP_MATCH_EMOJI):
             return
         if payload.message_id not in self._group_matches:
             return
@@ -1992,6 +2446,7 @@ class SlashCommands(commands.Cog):
                 await interaction.response.send_message(text, ephemeral=True)
             return
         logger.exception("Slash command failed", exc_info=error)
+        safe_error = sanitize_user_visible_error(error, max_chars=1000)
         interaction_message = getattr(interaction, "message", None)
         log_codex_repair_mode(
             msg=interaction_message,
@@ -2009,7 +2464,7 @@ class SlashCommands(commands.Cog):
                 "command": interaction.command.qualified_name if interaction.command else "unknown",
                 "user_id": getattr(interaction.user, "id", 0),
                 "channel_id": interaction.channel_id,
-                "error": str(error)[:1000],
+                "error": safe_error,
                 "handled_by": "cog_app_command_error",
             },
         )
@@ -2023,7 +2478,7 @@ class SlashCommands(commands.Cog):
                 ("コマンド", interaction.command.qualified_name if interaction.command else "unknown", True),
                 ("ユーザー", f"{interaction.user} ({interaction.user.id})", False),
                 ("チャンネル", str(interaction.channel_id), True),
-                ("エラー", str(error)[:1000], False),
+                ("エラー", safe_error, False),
             ],
             source_channel_id=interaction.channel_id,
         )

@@ -19,14 +19,12 @@ from discord.ext import commands
 
 from src.kennybot.utils.command_catalog import get_slash_command_meta
 from src.kennybot.utils.runtime_settings import get_settings
+from src.kennybot.utils.text import sanitize_user_visible_error
 
 logger = logging.getLogger(__name__)
 _settings = get_settings()
 ReadableChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
-TTS_JOIN_META = get_slash_command_meta("tts_join")
-TTS_LEAVE_META = get_slash_command_meta("tts_leave")
-TTS_VOICE_META = get_slash_command_meta("tts_voice")
-TTS_STATUS_META = get_slash_command_meta("tts_status")
+TTS_META = get_slash_command_meta("tts")
 
 
 @dataclass
@@ -59,6 +57,16 @@ class TTSReader(commands.Cog):
 
     def _get_state(self, guild_id: int) -> GuildTtsState | None:
         return self._states.get(guild_id)
+
+    async def stop_for_minutes(self, guild: discord.Guild) -> None:
+        """Stop TTS so the guild voice connection can be reused for minutes."""
+        self._states.pop(guild.id, None)
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            return
+        if vc.is_playing():
+            vc.stop()
+        await vc.disconnect(force=True)
 
     def _is_supported_channel(self, channel: object) -> bool:
         return isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread))
@@ -162,16 +170,59 @@ class TTSReader(commands.Cog):
                     pass
             logger.exception("Failed to synthesize or play TTS audio")
 
-    @app_commands.command(name=TTS_JOIN_META.name, description=TTS_JOIN_META.description)
-    @app_commands.describe(speaker="読み上げ話者")
+    @app_commands.command(name=TTS_META.name, description=TTS_META.description)
+    @app_commands.describe(
+        action="操作",
+        speaker="読み上げ話者",
+    )
     @app_commands.choices(speaker=_SPEAKER_CHOICES)
-    async def tts_join(self, interaction: discord.Interaction, speaker: app_commands.Choice[int] | None = None):
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="開始", value="join"),
+            app_commands.Choice(name="停止", value="leave"),
+            app_commands.Choice(name="話者変更", value="voice"),
+        ],
+    )
+    async def tts(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        speaker: app_commands.Choice[int] | None = None,
+    ):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
             return
         if not self._is_supported_channel(interaction.channel):
             await interaction.response.send_message("このチャンネルでは読み上げを開始できません。", ephemeral=True)
             return
+        action_name = (action.value or "").strip().lower()
+        if action_name == "leave":
+            try:
+                await self.stop_for_minutes(interaction.guild)
+            except Exception as e:
+                await interaction.response.send_message(
+                    f"VC切断に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message("読み上げを停止しました。", ephemeral=True)
+            return
+
+        if action_name == "voice":
+            if speaker is None:
+                await interaction.response.send_message("話者変更には speaker を指定してください。", ephemeral=True)
+                return
+            speaker_id = int(speaker.value)
+            _settings.set("tts.speaker_id", speaker_id, guild_id=interaction.guild.id)
+            state = self._states.get(interaction.guild.id)
+            if state:
+                state.speaker_id = speaker_id
+            await interaction.response.send_message(
+                f"読み上げ話者を `{speaker.name}` に設定しました。",
+                ephemeral=True,
+            )
+            return
+
         target_channel = interaction.channel
 
         voice = interaction.user.voice
@@ -199,7 +250,10 @@ class TTSReader(commands.Cog):
             try:
                 await voice_channel.connect(self_deaf=True, reconnect=False)
             except Exception as e:
-                await interaction.followup.send(f"VC接続に失敗しました: {e}", ephemeral=True)
+                await interaction.followup.send(
+                    f"VC接続に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
+                    ephemeral=True,
+                )
                 return
 
         state = GuildTtsState(
@@ -210,56 +264,6 @@ class TTSReader(commands.Cog):
         await interaction.followup.send(
             f"読み上げを開始しました。対象チャンネル: {target_channel.mention} / "
             f"対象VC: `{voice_channel.name}` / 話者: `{self._speaker_label(state.speaker_id)}`",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name=TTS_LEAVE_META.name, description=TTS_LEAVE_META.description)
-    async def tts_leave(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
-            return
-        self._states.pop(interaction.guild.id, None)
-        vc = interaction.guild.voice_client
-        if vc and vc.is_connected():
-            try:
-                await vc.disconnect(force=True)
-            except Exception as e:
-                await interaction.response.send_message(f"VC切断に失敗しました: {e}", ephemeral=True)
-                return
-        await interaction.response.send_message("読み上げを停止しました。", ephemeral=True)
-
-    @app_commands.command(name=TTS_VOICE_META.name, description=TTS_VOICE_META.description)
-    @app_commands.describe(speaker="読み上げ話者")
-    @app_commands.choices(speaker=_SPEAKER_CHOICES)
-    async def tts_voice(self, interaction: discord.Interaction, speaker: app_commands.Choice[int]):
-        if not interaction.guild:
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
-            return
-        speaker_id = int(speaker.value)
-        _settings.set("tts.speaker_id", speaker_id, guild_id=interaction.guild.id)
-        state = self._states.get(interaction.guild.id)
-        if state:
-            state.speaker_id = speaker_id
-        await interaction.response.send_message(
-            f"読み上げ話者を `{speaker.name}` に設定しました。",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name=TTS_STATUS_META.name, description=TTS_STATUS_META.description)
-    async def tts_status(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            await interaction.response.send_message("サーバー内で実行してください。", ephemeral=True)
-            return
-        state = self._get_state(interaction.guild.id)
-        if not state:
-            await interaction.response.send_message("読み上げは停止中です。", ephemeral=True)
-            return
-        channel = interaction.guild.get_channel(state.channel_id)
-        vc = interaction.guild.voice_client
-        text_name = channel.mention if self._is_supported_channel(channel) else f"`{state.channel_id}`"
-        vc_name = vc.channel.name if vc and vc.channel else "未接続"
-        await interaction.response.send_message(
-            f"読み上げ中です。\n対象チャンネル: {text_name}\nVC: `{vc_name}`\n話者: `{self._speaker_label(state.speaker_id)}`\n待機キュー: {len(state.queue)}件",
             ephemeral=True,
         )
 

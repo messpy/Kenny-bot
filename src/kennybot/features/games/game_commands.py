@@ -16,8 +16,9 @@ from discord.ext import commands
 
 from src.kennybot.utils.command_catalog import get_slash_command_meta
 from src.kennybot.utils.config import get_app_config
+from src.kennybot.utils.reactions import get_reaction_emoji, get_reaction_emojis, reaction_aliases
 from src.kennybot.utils.runtime_settings import get_settings
-from src.kennybot.utils.text import strip_ansi_and_ctrl
+from src.kennybot.utils.text import sanitize_user_visible_error, strip_ansi_and_ctrl
 from src.kennybot.utils.prompts import get_prompt
 
 _settings = get_settings()
@@ -104,12 +105,7 @@ class WerewolfRoleOptions:
 class GameCommands(commands.Cog):
     """ミニゲームコマンド"""
 
-    JOIN_EMOJI = "🎮"
-    START_EMOJI = "▶️"
-    WORDWOLF_END_EMOJI = "⏹️"
-    WORDWOLF_REPEAT_EMOJI = "🔁"
     WORDWOLF_PAIRS_PATH = Path("data") / "wordwolf_pairs.json"
-    WEREWOLF_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     WEREWOLF_DEBUG_NAMES = ["田中", "佐藤", "鈴木"]
     AIUEO_ROWS = [
         "あいうえお",
@@ -133,6 +129,26 @@ class GameCommands(commands.Cog):
         self._game_lobbies: dict[int, GameLobbyState] = {}
         self._recent_wordwolf_pairs: list[tuple[str, str]] = []
         self._saved_wordwolf_pairs: list[tuple[str, str]] = self._load_saved_wordwolf_pairs()
+
+    @property
+    def JOIN_EMOJI(self) -> str:
+        return get_reaction_emoji("game.join")
+
+    @property
+    def START_EMOJI(self) -> str:
+        return get_reaction_emoji("game.start")
+
+    @property
+    def WORDWOLF_END_EMOJI(self) -> str:
+        return get_reaction_emoji("wordwolf.end")
+
+    @property
+    def WORDWOLF_REPEAT_EMOJI(self) -> str:
+        return get_reaction_emoji("wordwolf.repeat")
+
+    @property
+    def WEREWOLF_EMOJIS(self) -> list[str]:
+        return get_reaction_emojis("werewolf.votes")
 
     @app_commands.command(name=GAME_META.name, description=GAME_META.description)
     @app_commands.checks.cooldown(1, 20.0)
@@ -322,7 +338,10 @@ class GameCommands(commands.Cog):
         try:
             roles = self._build_werewolf_roles(len(names), role_options)
         except ValueError as exc:
-            await interaction.followup.send(f"人狼デバッグモードを開始できません: {exc}", ephemeral=True)
+            await interaction.followup.send(
+                f"人狼デバッグモードを開始できません: {sanitize_user_visible_error(exc, max_chars=180)}",
+                ephemeral=True,
+            )
             return
         random.shuffle(roles)
         lines = [
@@ -459,7 +478,7 @@ class GameCommands(commands.Cog):
         users: list[discord.Member] = []
         seen: set[int] = set()
         for reaction in message.reactions:
-            if str(reaction.emoji) != self.JOIN_EMOJI:
+            if str(reaction.emoji) not in reaction_aliases(self.JOIN_EMOJI):
                 continue
             async for u in reaction.users():
                 if u.bot or u.id in seen:
@@ -634,7 +653,7 @@ class GameCommands(commands.Cog):
                     "進行の目安:",
                     "・単語を直接言わずにヒントを出す",
                     "・全員が1回ずつ話したあとで投票する",
-                    "・主催者が ⏹️ を押すと結果を公開する",
+                    f"・主催者が {self.WORDWOLF_END_EMOJI} を押すと結果を公開する",
                 ]
             )
             if session.debug_enabled:
@@ -724,7 +743,9 @@ class GameCommands(commands.Cog):
             roles = self._build_werewolf_roles(len(active_members), role_options)
         except ValueError as exc:
             if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
-                await interaction.channel.send(f"❌ 人狼を開始できません。{exc}")
+                await interaction.channel.send(
+                    f"❌ 人狼を開始できません。{sanitize_user_visible_error(exc, max_chars=180)}"
+                )
             return out
         random.shuffle(roles)
         member_map = {m.id: m for m in active_members}
@@ -750,7 +771,9 @@ class GameCommands(commands.Cog):
                 roles = self._build_werewolf_roles(len(started_members), role_options)
             except ValueError as exc:
                 if interaction.channel and isinstance(interaction.channel, discord.TextChannel):
-                    await interaction.channel.send(f"❌ 人狼を続行できません。{exc}")
+                    await interaction.channel.send(
+                        f"❌ 人狼を続行できません。{sanitize_user_visible_error(exc, max_chars=180)}"
+                    )
                 return out
             random.shuffle(roles)
             active_role_map = {m.id: role for m, role in zip(started_members, roles)}
@@ -1307,10 +1330,10 @@ class GameCommands(commands.Cog):
 
         lobby = self._game_lobbies.get(payload.message_id)
         if lobby is not None:
-            if emoji == self.JOIN_EMOJI:
+            if emoji in reaction_aliases(self.JOIN_EMOJI):
                 await self._refresh_game_lobby(payload.message_id)
                 return
-            if emoji == self.START_EMOJI and payload.user_id == lobby.host_user_id:
+            if emoji in reaction_aliases(self.START_EMOJI) and payload.user_id == lobby.host_user_id:
                 return
 
         session = self._wordwolf_sessions.get(payload.message_id)
@@ -1326,16 +1349,16 @@ class GameCommands(commands.Cog):
             except Exception:
                 return
 
-            if emoji == self.WORDWOLF_END_EMOJI and session.active:
+            if emoji in reaction_aliases(self.WORDWOLF_END_EMOJI) and session.active:
                 session.active = False
                 await message.edit(content=self._build_wordwolf_result_text(session, guild))
                 return
-            if emoji == self.WORDWOLF_REPEAT_EMOJI and not session.active:
+            if emoji in reaction_aliases(self.WORDWOLF_REPEAT_EMOJI) and not session.active:
                 results = await self._run_wordwolf_round(guild, session)
                 await message.edit(content=self._build_wordwolf_control_text(session, guild))
                 ok_count = sum(1 for result in results if result.success)
                 ng = [f"{result.user.mention} ({result.reason})" for result in results if not result.success]
-                notice = f"🔁 同じメンバーでワードウルフを再配布しました。DM成功 {ok_count}/{len(results)}"
+                notice = f"{self.WORDWOLF_REPEAT_EMOJI} 同じメンバーでワードウルフを再配布しました。DM成功 {ok_count}/{len(results)}"
                 if ng:
                     notice += "\nDM失敗: " + ", ".join(ng[:5])
                 await channel.send(notice, delete_after=15)
@@ -1420,7 +1443,7 @@ class GameCommands(commands.Cog):
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.bot.user.id:
             return
-        if str(payload.emoji) != self.JOIN_EMOJI:
+        if str(payload.emoji) not in reaction_aliases(self.JOIN_EMOJI):
             return
         if payload.message_id not in self._game_lobbies:
             return

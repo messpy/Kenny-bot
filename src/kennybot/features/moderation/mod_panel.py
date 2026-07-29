@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from src.kennybot.features.spam import SpamGuard
 from src.kennybot.utils.app_constants import MOD_PANEL_CHANNEL_ID
+from src.kennybot.utils.reactions import get_reaction_emoji, reaction_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,14 @@ class ModPanel(commands.Cog):
         if not guild:
             return
 
-        # 🔄 リアクション（どのチャンネルでも対応）
         emoji = str(reaction.emoji)
-        if emoji == "🔄":
+        reset_emoji = get_reaction_emoji("mod_reset", guild_id=guild.id)
+        list_emoji = get_reaction_emoji("mod_list", guild_id=guild.id)
+        if emoji in reaction_aliases(reset_emoji):
             # スパムログ Embed か mod_panel メッセージか判定
             if self._is_spam_log(reaction.message) or self._is_mod_panel_message(reaction.message):
                 await self._handle_reset(reaction, user, guild)
-        # 📋 → 違反一覧を表示（mod_panel のみ）
-        elif emoji == "📋":
+        elif emoji in reaction_aliases(list_emoji):
             if reaction.message.channel.id == MOD_PANEL_CHANNEL_ID and self._is_mod_panel_message(reaction.message):
                 await self._handle_list_violations(reaction, user, guild)
 
@@ -50,8 +51,12 @@ class ModPanel(commands.Cog):
 
     def _is_mod_panel_message(self, message: discord.Message) -> bool:
         """モデレーションパネルメッセージか判定"""
-        # 例：特定の絵文字やテキストを含むメッセージ
-        return "🔄 リセット" in message.content or "mod_panel" in message.content
+        if "mod_panel" in message.content:
+            return True
+        if not message.embeds:
+            return False
+        footer = getattr(message.embeds[0], "footer", None)
+        return getattr(footer, "text", "") == "mod_panel"
 
     async def _handle_reset(self, reaction: discord.Reaction, user: discord.User, guild: discord.Guild):
         """違反をリセット"""
@@ -107,6 +112,7 @@ class ModPanel(commands.Cog):
         """違反ユーザー一覧を表示"""
         spam_guard: SpamGuard = self.bot.spam_guard  # type: ignore[attr-defined]
         violations = spam_guard.get_all_violations()
+        list_emoji = get_reaction_emoji("mod_list", guild_id=guild.id)
 
         # ギルド内の違反のみフィルタ
         guild_violations = {
@@ -115,12 +121,12 @@ class ModPanel(commands.Cog):
 
         if not guild_violations:
             await reaction.message.channel.send(
-                "📋 違反ユーザーはいません。",
+                f"{list_emoji} 違反ユーザーはいません。",
                 delete_after=10
             )
             return
 
-        lines = ["📋 **違反ユーザー一覧**"]
+        lines = [f"{list_emoji} **違反ユーザー一覧**"]
         for (uid, gid), violation in guild_violations.items():
             level = violation.get_level()
             count = violation.violation_count
@@ -149,8 +155,8 @@ class ModPanel(commands.Cog):
                 "このパネルを使用してスパムユーザーを管理できます。\n\n"
                 "**使い方：**\n"
                 "1. ユーザーIDを記載したメッセージにリアクションを追加\n"
-                "2. 🔄 を押すとリセット\n"
-                "3. 📋 を押すと違反一覧表示\n\n"
+                f"2. {get_reaction_emoji('mod_reset')} を押すとリセット\n"
+                f"3. {get_reaction_emoji('mod_list')} を押すと違反一覧表示\n\n"
                 "**例:**\n"
                 "`ユーザーID: 123456789`\n"
                 "`レベル: mute`\n"
@@ -161,8 +167,8 @@ class ModPanel(commands.Cog):
         embed.set_footer(text="mod_panel")
 
         msg = await channel.send(embed=embed)
-        await msg.add_reaction("🔄")
-        await msg.add_reaction("📋")
+        await msg.add_reaction(get_reaction_emoji("mod_reset"))
+        await msg.add_reaction(get_reaction_emoji("mod_list"))
 
         await ctx.send(f"✅ モデレーションパネルを作成しました。")
 

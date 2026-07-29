@@ -53,9 +53,11 @@ from src.kennybot.utils.text import (
     strip_ansi_and_ctrl,
 )
 from src.kennybot.utils.prompts import get_prompt
+from src.kennybot.utils.reactions import get_keyword_reactions, get_reaction_emoji
 from src.kennybot.features.search import build_tool_response
 from src.kennybot.utils.codex_jobs import CodexJobHandle, CodexJobManager
 from src.kennybot.ai.gemini_vision import GeminiVisionError
+from src.kennybot.ai.gemini_images import GeminiImageRateLimitError
 from src.kennybot.ai.openai_vision import OpenAIVisionError, detect_image_mime_type
 from src.kennybot.utils.vrchat_world import format_vrchat_world_text, search_vrchat_worlds
 from src.kennybot.utils.tool_planner import (
@@ -65,7 +67,7 @@ from src.kennybot.utils.tool_planner import (
 )
 from src.kennybot.utils.time import JST, now_jst
 from src.kennybot.features.moderation import ModActions
-from src.kennybot.features.spam import EveryoneCrossChannelViolation, SpamGuard
+from src.kennybot.features.spam import EveryoneMentionViolation, SpamGuard
 
 
 logger = logging.getLogger(__name__)
@@ -75,7 +77,25 @@ if hasattr(discord, "AllowedMentions") and not hasattr(discord.AllowedMentions, 
 
 URL_RE = re.compile(r"https?://[^\s)>\"]+")
 RAG_HEADER_RE = re.compile(r"^\[([^\]]+)\]")
-AI_REVIEW_EMOJI = "🤔"
+IMAGE_GENERATION_RE = re.compile(
+    r"(画像|絵|イラスト|picture|image|art).{0,18}(生成|作成|作って|つくって|描いて|書いて|generate|create|draw)"
+    r"|"
+    r"(生成|作成|作って|つくって|描いて|書いて|generate|create|draw).{0,18}(画像|絵|イラスト|picture|image|art)",
+    re.IGNORECASE,
+)
+IMAGE_SUBJECT_RE = re.compile(
+    r"(猫|ねこ|ネコ|犬|いぬ|キャラ|キャラクター|人物|女の子|男の子|風景|背景|壁紙|アイコン|ロゴ|写真|"
+    r"cat|dog|character|person|girl|boy|landscape|background|wallpaper|icon|logo|photo)",
+    re.IGNORECASE,
+)
+IMAGE_ACTION_RE = re.compile(r"(生成|作成|作って|つくって|描いて|書いて|generate|create|draw)", re.IGNORECASE)
+IMAGE_REQUEST_RE = re.compile(r"(お願い|ください|please)", re.IGNORECASE)
+IMAGE_GENERATION_CLEAN_RE = re.compile(
+    r"(AI)?画像(を)?(生成|作成)(して|しろ|お願い)?|画像(を)?作って|絵(を)?描いて|イラスト(を)?描いて|"
+    r"generate (an? )?image|create (an? )?image|draw",
+    re.IGNORECASE,
+)
+AI_REVIEW_EMOJI = "ai_review"
 
 import random
 
@@ -112,6 +132,34 @@ def get_user_display_name(
         if random.random() < 0.3:
             return nicknames[user_id], True
     return user_name, False
+
+
+def _looks_like_image_generation_request(text: str) -> bool:
+    normalized = normalize_user_text(text)
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if any(word in lowered for word in ("説明", "解析", "分析", "describe", "analyze")):
+        return False
+    if IMAGE_GENERATION_RE.search(normalized):
+        return True
+    if "描いて" in normalized or "draw" in lowered:
+        return True
+    if ("画像" in normalized or "絵" in normalized or "イラスト" in normalized) and IMAGE_REQUEST_RE.search(normalized):
+        return True
+    return bool(IMAGE_ACTION_RE.search(normalized) and IMAGE_SUBJECT_RE.search(normalized))
+
+
+def _extract_image_generation_prompt(text: str, *, bot_user_id: int | None = None) -> str:
+    prompt = normalize_user_text(text)
+    if bot_user_id is not None:
+        prompt = re.sub(rf"<@!?{bot_user_id}>", "", prompt)
+    prompt = IMAGE_GENERATION_CLEAN_RE.sub("", prompt)
+    prompt = re.sub(r"^[\s:：,，。.!！?？「『]*(で|を|の|して|お願いします|ください)*", "", prompt)
+    prompt = re.sub(r"[\s。.!！?？]*(お願いします|ください|して|しますね|してね)$", "", prompt)
+    prompt = re.sub(r"(を)?(生成|作成|作って|つくって|描いて|書いて)$", "", prompt)
+    prompt = re.sub(r"の$", "", prompt)
+    return " ".join(prompt.split()).strip()
 
 
 class MessageLogger(BaseCog):
@@ -189,6 +237,145 @@ class MessageLogger(BaseCog):
             images.append((data, detect_image_mime_type(data, fallback=fallback_mime)))
             labels.append(str(getattr(attachment, "filename", "") or "image"))
         return images, labels
+
+    async def _handle_image_generation_request(self, msg: discord.Message, text: str) -> bool:
+        if not bool(_settings.get("image_generation.enabled", True)):
+            await msg.channel.send(
+                f"{msg.author.mention}\n画像生成は現在無効です。",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        provider = str(_settings.get("image_generation.provider", "gemini") or "gemini").strip().lower()
+        client = (
+            getattr(self.bot, "gemini_image_client", None)
+            if provider == "gemini"
+            else getattr(self.bot, "openai_image_client", None)
+        )
+        if client is None and provider == "openai":
+            client = getattr(self.bot, "gemini_image_client", None)
+            provider = "gemini"
+        if client is None and provider == "gemini":
+            client = getattr(self.bot, "openai_image_client", None)
+            provider = "openai"
+        if client is None:
+            await msg.channel.send(
+                f"{msg.author.mention}\n画像生成用の API キーが設定されていません。",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+
+        bot_user_id = self.bot.user.id if self.bot.user else None
+        prompt = _extract_image_generation_prompt(text, bot_user_id=bot_user_id)
+        if not prompt:
+            await msg.channel.send(
+                f"{msg.author.mention}\n生成したい画像の内容も一緒に書いてください。",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+
+        size = str(_settings.get("image_generation.size", "1024x1024") or "1024x1024")
+        progress_key = f"image-generation:{msg.channel.id}:{msg.author.id}"
+        ticket = await self.bot.ai_progress_tracker.create_ticket()
+        model_name = str(_settings.get("image_generation.model", getattr(client, "model", "gpt-image-1")))
+        try:
+            await self._ai_progress_countdowns.start_countup(
+                key=progress_key,
+                channel=msg.channel,
+                mention_user_id=msg.author.id,
+                text_factory=lambda elapsed, model=model_name: self.bot.ai_progress_tracker.render(
+                    ticket, elapsed, model
+                ),
+            )
+            await self.bot.ai_progress_tracker.acquire(ticket)
+            try:
+                if provider == "gemini":
+                    result = await asyncio.to_thread(
+                        client.generate_image,
+                        prompt=prompt,
+                        model=model_name,
+                    )
+                    image_bytes = result.data
+                    filename = result.filename
+                else:
+                    image_bytes = await asyncio.to_thread(
+                        client.generate_png,
+                        prompt=prompt,
+                        size=size,
+                        model=model_name,
+                    )
+                    filename = "ai-generated.png"
+            finally:
+                await self.bot.ai_progress_tracker.release(ticket)
+
+            fp = io.BytesIO(image_bytes)
+            fp.seek(0)
+            await msg.channel.send(
+                content=f"{msg.author.mention}\n生成しました。",
+                file=discord.File(fp, filename=filename),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await self._log_bot_activity_event(
+                msg,
+                kind="メンション",
+                processing="画像生成",
+                input_text=text,
+                output_text=f"[image: {filename}]",
+                model_name=model_name,
+                title="Bot 管理ログ",
+                description="メンションから AI 画像を生成して送信しました。",
+            )
+            return True
+        except Exception as exc:
+            logger.exception("Image generation failed")
+            await self._log_bot_activity_event(
+                msg,
+                kind="メンション",
+                processing="画像生成",
+                level="error",
+                title="Bot 管理ログ",
+                description="AI 画像生成に失敗しました。",
+                input_text=text,
+                error_text=str(exc),
+                model_name=model_name,
+            )
+            if isinstance(exc, GeminiImageRateLimitError):
+                text_out = "画像生成APIがレート制限またはクォータ上限に達しています。時間を置いて再試行してください。"
+            else:
+                text_out = "画像生成に失敗しました。プロンプトを変えてもう一度試してください。"
+            await msg.channel.send(
+                f"{msg.author.mention}\n{text_out}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        finally:
+            await self._ai_progress_countdowns.stop(progress_key, delete_message=True)
+
+    async def _build_image_generation_fallback_reply(self, *, prompt: str, rate_limited: bool) -> str:
+        reason = (
+            "画像生成APIがレート制限またはクォータ上限に達しています。"
+            if rate_limited
+            else "画像生成APIでエラーが発生しました。"
+        )
+        fallback_prompt = (
+            "Discordのユーザーに返す短い日本語メッセージを作ってください。\n"
+            f"状況: {reason}\n"
+            f"本来生成したかった画像: {prompt}\n\n"
+            "条件:\n"
+            "- 画像そのものは生成できていないと明確に伝える\n"
+            "- 代わりに、完成イメージの説明を2〜4文で返す\n"
+            "- 最後に再利用できる画像生成プロンプトを1行で付ける\n"
+            "- 余計な前置きや謝罪の連発はしない\n"
+        )
+        try:
+            answer = await self._run_ollama_text(
+                model=self._current_chat_model_name(),
+                prompt=fallback_prompt,
+                timeout_sec=45,
+            )
+        except Exception:
+            logger.exception("Image generation fallback text failed")
+            return ""
+        return self._sanitize_user_visible_answer(answer or "")
 
     def _build_image_analysis_prompt(self, text: str, user_display: str) -> str:
         request = (text or "").strip()
@@ -353,8 +540,23 @@ class MessageLogger(BaseCog):
             return ""
         return "\n\n".join(parts) + "\n\n"
 
+    def _stale_date_notice(self, text: str) -> str:
+        current_year = now_jst().year
+        years: list[int] = []
+        for match in re.findall(r"20\d{2}", text or ""):
+            try:
+                years.append(int(match))
+            except Exception:
+                continue
+        if any(year < current_year for year in years):
+            return f"注意: 検索結果には現在（{current_year}年）より古い日付の情報が含まれます。最新条件は公式情報で確認してください。"
+        return ""
+
     def _build_direct_web_search_answer(self, body: str) -> str:
         lines: list[str] = ["検索結果で確認できた範囲です。"]
+        stale_notice = self._stale_date_notice(body)
+        if stale_notice:
+            lines.append(stale_notice)
         for raw_line in (body or "").splitlines():
             line = strip_ansi_and_ctrl(raw_line).strip()
             if not line:
@@ -367,6 +569,9 @@ class MessageLogger(BaseCog):
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
+
+    def _has_web_search_context(self, references: list[str]) -> bool:
+        return any(ref.startswith("source:web_search") for ref in references)
 
     def _extract_urls(self, text: str) -> list[str]:
         seen: set[str] = set()
@@ -486,6 +691,20 @@ class MessageLogger(BaseCog):
             "価格",
             "値段",
             "相場",
+            "料金",
+            "費用",
+            "基本料金",
+            "従量",
+            "契約",
+            "見積",
+            "見積もり",
+            "供給",
+            "供給エリア",
+            "lpガス",
+            "プロパン",
+            "都市ガス",
+            "ガス会社",
+            "ガス事業者",
             "在庫",
             "売ってる",
             "販売",
@@ -1688,8 +1907,6 @@ class MessageLogger(BaseCog):
                 references.extend(web_refs)
                 title = "検索結果の要約"
                 web_queries.extend([q for q in search_queries if q])
-                if body and not direct_web_answer:
-                    direct_web_answer = self._build_direct_web_search_answer(body)
                 _append_reference_detail(
                     "web_search",
                     f"query={query or text or ''}",
@@ -1891,6 +2108,24 @@ class MessageLogger(BaseCog):
     def _cfg_map(self, path: str) -> dict:
         v = _settings.get(path, {})
         return v if isinstance(v, dict) else {}
+
+    def _cfg_int_list(self, path: str) -> list[int]:
+        raw = _settings.get(path, [])
+        values = raw if isinstance(raw, (list, tuple, set)) else []
+        out: list[int] = []
+        for value in values:
+            try:
+                out.append(int(value))
+            except Exception:
+                continue
+        return out
+
+    def _is_authoritative_correction_author(self, author: object) -> bool:
+        try:
+            author_id = int(getattr(author, "id", 0) or 0)
+        except Exception:
+            return False
+        return author_id in set(self._cfg_int_list("admin.authoritative_correction_user_ids"))
 
     def _cfg_ai_model(self, target: str) -> str:
         models = get_app_config().ai_models()
@@ -2380,6 +2615,8 @@ class MessageLogger(BaseCog):
             answer_lines.append(f"直前の質問: {previous_prompt.strip()}")
         if previous_response.strip():
             answer_lines.append(f"直前の応答: {previous_response.strip()}")
+        if self._is_authoritative_correction_author(author):
+            answer_lines.append("このメモは管理者の訂正として扱い、後続応答で優先参照する。")
         answer = "\n".join(answer_lines)
         metadata = {
             "source": "user_fix_request",
@@ -2389,8 +2626,11 @@ class MessageLogger(BaseCog):
             "channel_id": getattr(channel, "id", None),
             "guild_id": getattr(guild, "id", None),
             "target_area": target_area.strip() or "一般的な応答品質",
+            "authoritative_correction": self._is_authoritative_correction_author(author),
         }
         tags = ["user_fix_request", "user_report", "repair_request"]
+        if self._is_authoritative_correction_author(author):
+            tags.append("authoritative_correction")
 
         stored_paths: list[str] = []
         try:
@@ -2406,7 +2646,7 @@ class MessageLogger(BaseCog):
         except Exception:
             logger.exception("Failed to append fix request to channel RAG")
 
-        if self._should_mirror_fix_request_to_guild_rag(issue, target_area):
+        if self._is_authoritative_correction_author(author) or self._should_mirror_fix_request_to_guild_rag(issue, target_area):
             try:
                 path = self._local_rag.append_guild_qa(
                     guild_id=int(guild.id),
@@ -3075,7 +3315,6 @@ class MessageLogger(BaseCog):
                     references.extend(self._collect_reference_labels(body))
                     web_queries.extend([q for q in search_queries if q])
                     references.append("source:web_search")
-                    direct_web_answer = self._build_direct_web_search_answer(body)
                 else:
                     details.append("web_search_result=empty")
             else:
@@ -3438,6 +3677,16 @@ class MessageLogger(BaseCog):
                 web_queries=web_queries,
             )
             return
+        if self._needs_web_search_for_accuracy(text) and not self._has_web_search_context(references):
+            await self._handle_current_info_search_failure(
+                msg.channel,
+                mention=msg.author.mention,
+                query=text,
+                source_msg=msg,
+                model_name="web_search",
+                references=references,
+            )
+            return
         progress_key = f"ai-progress:{msg.channel.id}:{msg.author.id}"
         model_name = self._current_chat_model_name()
         ticket = await self.bot.ai_progress_tracker.create_ticket()
@@ -3667,15 +3916,16 @@ class MessageLogger(BaseCog):
 
     @staticmethod
     def _is_everyone_mention(msg: discord.Message, content: str) -> bool:
+        lowered = content.lower()
         return bool(
             getattr(msg, "mention_everyone", False)
-            and "@everyone" in content.lower()
+            and ("@everyone" in lowered or "@here" in lowered)
         )
 
     async def _delete_everyone_violation_messages(
         self,
         msg: discord.Message,
-        violation: EveryoneCrossChannelViolation,
+        violation: EveryoneMentionViolation,
     ) -> int:
         deleted = 0
         seen: set[tuple[int, int]] = set()
@@ -3756,10 +4006,10 @@ class MessageLogger(BaseCog):
                 )
         return deleted
 
-    async def _handle_everyone_cross_channel_violation(
+    async def _handle_everyone_mention_violation(
         self,
         msg: discord.Message,
-        violation: EveryoneCrossChannelViolation,
+        violation: EveryoneMentionViolation,
     ) -> None:
         deleted_count = await self._delete_everyone_violation_messages(msg, violation)
 
@@ -3795,8 +4045,8 @@ class MessageLogger(BaseCog):
             self.bot,
             guild=msg.guild,
             level="error",
-            title="🚨 クロスチャンネル @everyone 検出",
-            description=f"{msg.author.mention} が1秒以内に複数チャンネルで @everyone を投稿しました。",
+            title="🚨 @everyone/@here スパム検出",
+            description=f"{msg.author.mention} が2秒以内に @everyone / @here を複数回投稿しました。",
             fields=[
                 ("ユーザー", f"{msg.author} ({msg.author.id})", False),
                 ("対象チャンネル", channels[:1000] or "-", False),
@@ -4330,7 +4580,7 @@ class MessageLogger(BaseCog):
 
     async def _add_ai_review_reaction(self, message: discord.Message) -> None:
         try:
-            await message.add_reaction(AI_REVIEW_EMOJI)
+            await message.add_reaction(get_reaction_emoji(AI_REVIEW_EMOJI))
         except Exception:
             logger.debug("Failed to add AI review reaction", exc_info=True)
 
@@ -4712,6 +4962,15 @@ class MessageLogger(BaseCog):
                     targets.append(ch)
         return targets
 
+    def _kenny_chat_delete_mirrors_on_source_delete(self) -> bool:
+        return bool(_settings.get("kenny_chat.delete_mirrors_on_source_delete", False))
+
+    def _forget_kenny_chat_mirrors(self, message_id: int) -> list[tuple[int, int]]:
+        mirrors = self._kenny_chat_mirrors.pop(message_id, [])
+        for _ch_id, mirror_id in mirrors:
+            self._kenny_chat_reverse.pop(mirror_id, None)
+        return mirrors
+
     async def _handle_kenny_chat_bridge(self, msg: discord.Message) -> bool:
         # クロスサーバーコラー生 成 成 を無効化（セキュリティのため）
         if not bool(_settings.get("kenny_chat.cross_server_bridge", False)):
@@ -4780,7 +5039,7 @@ class MessageLogger(BaseCog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        if str(payload.emoji) != AI_REVIEW_EMOJI:
+        if str(payload.emoji) != get_reaction_emoji(AI_REVIEW_EMOJI):
             return
         if payload.user_id == (self.bot.user.id if self.bot.user else 0):
             return
@@ -4795,7 +5054,10 @@ class MessageLogger(BaseCog):
         if msg.author.bot or not self._is_kenny_chat(msg):
             return
 
-        mirrors = self._kenny_chat_mirrors.pop(msg.id, [])
+        mirrors = self._forget_kenny_chat_mirrors(msg.id)
+        if not self._kenny_chat_delete_mirrors_on_source_delete():
+            return
+
         for ch_id, m_id in mirrors:
             ch = self.bot.get_channel(ch_id)
             if isinstance(ch, discord.TextChannel):
@@ -4803,12 +5065,14 @@ class MessageLogger(BaseCog):
                     await ch.get_partial_message(m_id).delete()
                 except Exception:
                     pass
-            self._kenny_chat_reverse.pop(m_id, None)
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """キャッシュ外削除でも中継先を削除"""
-        mirrors = self._kenny_chat_mirrors.pop(payload.message_id, [])
+        mirrors = self._forget_kenny_chat_mirrors(payload.message_id)
+        if not self._kenny_chat_delete_mirrors_on_source_delete():
+            return
+
         for ch_id, m_id in mirrors:
             ch = self.bot.get_channel(ch_id)
             if isinstance(ch, discord.TextChannel):
@@ -4816,7 +5080,6 @@ class MessageLogger(BaseCog):
                     await ch.get_partial_message(m_id).delete()
                 except Exception:
                     pass
-            self._kenny_chat_reverse.pop(m_id, None)
 
     @commands.Cog.listener()
     async def on_message(self, msg: discord.Message):
@@ -4862,7 +5125,7 @@ class MessageLogger(BaseCog):
                 message_id=msg.id,
             )
             if violation is not None:
-                await self._handle_everyone_cross_channel_violation(msg, violation)
+                await self._handle_everyone_mention_violation(msg, violation)
                 await self.bot.process_commands(msg)
                 return
 
@@ -4905,6 +5168,17 @@ class MessageLogger(BaseCog):
 
         # メンション / リプライがない場合はリアクションのみ
         if not should_treat_as_mention:
+            normalized_text = normalize_user_text(content)
+            if normalized_text and self._is_authoritative_correction_author(getattr(msg, "author", None)):
+                sanitized_text = self._sanitize_for_prompt(
+                    normalized_text,
+                    self._cfg_int("security.max_user_message_chars", 1200),
+                )
+                if self._is_fix_request_report(sanitized_text):
+                    try:
+                        await self._log_fix_request(msg, sanitized_text)
+                    except Exception:
+                        logger.debug("Failed to log authoritative correction", exc_info=True)
             user_name = msg.author.display_name or msg.author.name or str(msg.author.id)
             self._schedule_message_index(
                 guild_id=msg.guild.id,
@@ -4917,7 +5191,7 @@ class MessageLogger(BaseCog):
 
             # キーワード -> 絵文字 の対応（config から取得）
             normalized_content = normalize_keyword_match_text(content)
-            for keyword, emoji in self._cfg_map("keyword_reactions").items():
+            for keyword, emoji in get_keyword_reactions(guild_id=msg.guild.id).items():
                 if normalize_keyword_match_text(str(keyword)) in normalized_content:
                     try:
                         await msg.add_reaction(emoji)
@@ -5104,7 +5378,7 @@ class MessageLogger(BaseCog):
             await self.bot.process_commands(msg)
             return
 
-        if self._is_channel_profile_query(text):
+        if not image_attachments and self._is_channel_profile_query(text):
             await self._answer_channel_profile_query(
                 msg.channel,
                 text,
@@ -5112,6 +5386,12 @@ class MessageLogger(BaseCog):
                 source_msg=msg,
                 channel_id=msg.channel.id,
             )
+            self._arm_recent_mention_window(msg)
+            await self.bot.process_commands(msg)
+            return
+
+        if _looks_like_image_generation_request(text):
+            await self._handle_image_generation_request(msg, text)
             self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)
             return
@@ -5207,6 +5487,22 @@ class MessageLogger(BaseCog):
                 references=references,
                 reference_details=reference_details,
                 web_queries=web_queries,
+            )
+            self._arm_recent_mention_window(msg)
+            await self.bot.process_commands(msg)
+            return
+        if (
+            self._needs_web_search_for_accuracy(text)
+            and not image_attachments
+            and not self._has_web_search_context(references)
+        ):
+            await self._handle_current_info_search_failure(
+                msg.channel,
+                mention=msg.author.mention,
+                query=text,
+                source_msg=msg,
+                model_name="web_search",
+                references=references,
             )
             self._arm_recent_mention_window(msg)
             await self.bot.process_commands(msg)

@@ -118,7 +118,7 @@ class VoiceLoggerTests(unittest.TestCase):
 
         send_event_log_mock.assert_awaited_once()
 
-    def test_voice_join_does_not_send_to_discord_admin_log(self) -> None:
+    def test_voice_join_skips_discord_management_log(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -134,9 +134,10 @@ class VoiceLoggerTests(unittest.TestCase):
         finally:
             module.send_event_log = original
 
-        self.assertEqual(send_event_log_mock.await_args.kwargs["send_discord"], False)
+        self.assertEqual(send_event_log_mock.await_args.kwargs["channel_kind"], "voice")
+        self.assertIs(send_event_log_mock.await_args.kwargs["send_discord"], False)
 
-    def test_voice_leave_does_not_send_to_discord_admin_log(self) -> None:
+    def test_voice_leave_skips_discord_management_log(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -153,7 +154,8 @@ class VoiceLoggerTests(unittest.TestCase):
         finally:
             module.send_event_log = original
 
-        self.assertEqual(send_event_log_mock.await_args.kwargs["send_discord"], False)
+        self.assertEqual(send_event_log_mock.await_args.kwargs["channel_kind"], "voice")
+        self.assertIs(send_event_log_mock.await_args.kwargs["send_discord"], False)
 
 
 if __name__ == "__main__":

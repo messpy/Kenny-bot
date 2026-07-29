@@ -167,10 +167,27 @@ README は利用者向け概要であり、会話用 RAG の一次ソースと�
   - タグ
   - VRChat のワールド URL
 - 補足:
-  - `api/vrchat/getVrcWorld.py` の既存実装を利用
-  - 認証は `api/vrchat` 側の既存 `.env` と保存済み cookie を前提にする
+  - 認証情報は `.env` の `VRCHAT_USERNAME` / `VRCHAT_PASSWORD` を使う
+  - `/vrc_user` と同じ `runtime/state/vrchat/auth_cookies.txt` の auth cookie を保存・再利用する
+  - cookie が切れて 2FA が必要な場合は管理者が `totp_code` または `email_code` 付きで再実行する
   - スラッシュコマンドでは通常投稿で返す
   - 会話中でも必要なら AI tool として検索できる
+
+### `/vrc_user`
+- 使い方: `/vrc_user url:<VRChatユーザーURLまたはusr_ユーザーID>`
+- 任意引数:
+  - `totp_code`: TOTP 2FA コード（管理者のみ、必要時だけ）
+  - `email_code`: Email 2FA コード（管理者のみ、必要時だけ）
+- 返る内容:
+  - 表示名
+  - ユーザーID
+  - VRChat ユーザー URL
+  - ステータス
+  - 自己紹介など取得できる公開プロフィール情報
+- 補足:
+  - 認証情報は `.env` の `VRCHAT_USERNAME` / `VRCHAT_PASSWORD` を使う
+  - 2FA 成功後の auth cookie は `runtime/state/vrchat/auth_cookies.txt` に保存し、次回以降再利用する
+  - cookie が切れて 2FA が必要な場合は管理者がコード付きで再実行する
 
 ## 招待URL
 Kenny Bot の招待 URL を聞かれたら、以下を案内してよい。

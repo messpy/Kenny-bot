@@ -10,7 +10,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 if "discord" not in sys.modules:
-    discord = types.ModuleType("discord")
+    class _DiscordModule(types.ModuleType):
+        def __getattr__(self, name):
+            placeholder = type(name, (), {})
+            setattr(self, name, placeholder)
+            return placeholder
+
+    discord = _DiscordModule("discord")
     discord.__path__ = []
     discord.abc = types.ModuleType("discord.abc")
     discord.abc.__path__ = []
@@ -27,16 +33,25 @@ if "discord" not in sys.modules:
     commands = types.ModuleType("discord.ext.commands")
 
     class _Cog:
-        pass
+        @classmethod
+        def listener(cls, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
 
     commands.Cog = _Cog
     commands.Bot = object
     ext.commands = commands
     discord.ext = ext
+    utils = types.ModuleType("discord.utils")
+    utils.get = lambda *args, **kwargs: None
+    discord.utils = utils
     sys.modules["discord"] = discord
     sys.modules["discord.abc"] = discord.abc
     sys.modules["discord.ext"] = ext
     sys.modules["discord.ext.commands"] = commands
+    sys.modules["discord.utils"] = utils
 
 from src.kennybot.cogs.weekly_ai_posts import WeeklyAiPosts, _due_marker, _is_daily_schedule, _parse_hhmm, _parse_weekday, _reaction_emojis, _safe_post_text
 
@@ -96,6 +111,12 @@ class WeeklyAiPostsTests(unittest.TestCase):
                     }
                 }
             ),
+            ["✋", "👀", "✅", "⚠️"],
+        )
+
+    def test_reaction_emojis_can_use_global_defaults(self) -> None:
+        self.assertEqual(
+            _reaction_emojis({"today_language": {"reactions": {"enabled": True}}}),
             ["✋", "👀", "✅", "⚠️"],
         )
 

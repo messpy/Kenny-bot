@@ -7,10 +7,12 @@ import asyncio
 import importlib
 import io
 import json
+import logging
 import os
 import re
 import subprocess
 import tempfile
+import time
 import wave
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -30,6 +32,7 @@ from src.kennybot.utils.prompts import get_prompt
 from src.kennybot.utils.time import JST, now_jst
 
 _settings = get_settings()
+logger = logging.getLogger(__name__)
 ABS_PATH_RE = re.compile(r"/[^\s`'\"<>]+")
 VoiceLikeChannel = discord.VoiceChannel | discord.StageChannel
 AnnounceChannel = discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
@@ -55,6 +58,8 @@ class _RecordingRuntime:
     dropped: bool = False
     realtime_task: asyncio.Task | None = None
     realtime_live_enabled: bool = False
+    received_packets: int = 0
+    received_pcm_bytes: int = 0
 
 
 @dataclass
@@ -184,6 +189,19 @@ class MeetingMinutesManager:
     @staticmethod
     def _recorder_start_confirm_timeout_seconds(guild_id: int) -> int:
         return max(5, int(_settings.get("recorder.start_confirm_timeout_seconds", 30, guild_id=guild_id)))
+
+    @staticmethod
+    def _recording_backend(guild_id: int) -> str:
+        backend = str(_settings.get("meeting.recording_backend", "internal", guild_id=guild_id)).strip().lower()
+        if backend in {"auto", "external", "recorder", "internal", "voice_recv"}:
+            return backend
+        return "auto"
+
+    @staticmethod
+    def _runtime_recording_started(runtime: _RecordingRuntime) -> bool:
+        proc = runtime.recorder_process
+        recorder_running = proc is not None and getattr(proc, "returncode", None) is None
+        return runtime.voice_client is not None or recorder_running
 
     @staticmethod
     def _redact_paths(text: str) -> str:
@@ -517,12 +535,31 @@ class MeetingMinutesManager:
     def _normalize_filter_text(text: str) -> str:
         return "".join(ch for ch in (text or "").lower() if ch.isalnum() or "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff")
 
+    @staticmethod
+    def _has_repeated_substring(text: str) -> bool:
+        normalized = MeetingMinutesManager._normalize_filter_text(text)
+        if len(normalized) < 16:
+            return False
+        for unit_size in range(2, min(9, len(normalized) // 3 + 1)):
+            for start in range(min(unit_size, len(normalized) - unit_size)):
+                unit = normalized[start : start + unit_size]
+                repeats = 1
+                pos = start + unit_size
+                while normalized[pos : pos + unit_size] == unit:
+                    repeats += 1
+                    pos += unit_size
+                if repeats >= 3 and repeats * unit_size >= len(normalized) * 0.6:
+                    return True
+        return False
+
     def _sanitize_transcript_text(self, text: str) -> str:
         cleaned = (text or "").strip()
         if not cleaned:
             return ""
         normalized = self._normalize_filter_text(cleaned)
         if any(self._normalize_filter_text(word) in normalized for word in self._BANNED_TRANSCRIPT_WORDS):
+            return ""
+        if self._has_repeated_substring(cleaned):
             return ""
         compact = "".join(ch for ch in cleaned if not ch.isspace())
         if len(compact) >= 12 and len(set(compact)) <= 2:
@@ -707,6 +744,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 detail = log_path.read_text(encoding="utf-8", errors="ignore").strip()[-500:]
         except Exception:
             detail = ""
+        runtime.recorder_process = None
         runtime.warning = f"外部録音の準備が完了しませんでした。{self._redact_paths(detail)}".strip()
         return runtime
 
@@ -718,9 +756,36 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         whisper_model: str | None = None,
     ) -> list[str]:
         with wave.open(str(wav_path), "rb") as wf:
+            sample_rate = wf.getframerate()
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
             pcm = wf.readframes(wf.getnframes())
         if not pcm:
             return []
+        if (sample_rate, channels, sample_width) != (48000, 2, 2):
+            try:
+                completed = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        str(wav_path),
+                        "-ar",
+                        "48000",
+                        "-ac",
+                        "2",
+                        "-f",
+                        "s16le",
+                        "pipe:1",
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                pcm = completed.stdout
+            except Exception as e:
+                raise RuntimeError(f"WAV音声の正規化に失敗しました: {e}") from e
         return self._transcribe_chunk_map({0: pcm}, guild_id, provider_override, whisper_model)
 
     def warmup_transcriber(
@@ -735,6 +800,14 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         if provider == "moonshine":
             self._get_moonshine_python()
             return f"Moonshine を使用 ({whisper_model or 'moonshine/tiny-ja'})"
+
+        if provider in {"google_web", "webspeech", "speech_recognition"}:
+            try:
+                importlib.import_module("speech_recognition")
+                fallback_name = self._resolve_whisper_model_name(guild_id, whisper_model)
+                return f"Google Web Speech を使用（APIキー不要） / Whisper fallback: {fallback_name}"
+            except Exception as e:
+                notes.append(f"Google Web Speech を使用できないため Whisper にフォールバック: {e}")
 
         if provider == "google":
             try:
@@ -771,7 +844,38 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         requested = (override or "").strip().lower()
         if requested:
             return requested
-        return str(_settings.get("meeting.transcription_provider", "google", guild_id=guild_id)).strip().lower()
+        return str(_settings.get("meeting.transcription_provider", "google_web", guild_id=guild_id)).strip().lower()
+
+    def _transcribe_chunk_map_with_google_web(self, chunk_map: dict[int, bytes], guild_id: int) -> list[str]:
+        try:
+            sr = importlib.import_module("speech_recognition")
+        except Exception as e:
+            raise RuntimeError("SpeechRecognition が未導入です。") from e
+
+        language = str(_settings.get("meeting.google_language_code", "ja-JP", guild_id=guild_id)).strip() or "ja-JP"
+        timeout_sec = max(5, int(_settings.get("meeting.google_timeout_sec", 90, guild_id=guild_id)))
+        recognizer = sr.Recognizer()
+        recognizer.operation_timeout = timeout_sec
+        lines: list[str] = []
+        for uid, pcm in chunk_map.items():
+            if not pcm:
+                continue
+            processed_pcm, sample_rate_hz, channels = self._preprocess_pcm_for_stt(
+                pcm,
+                sample_rate_hz=48000,
+                channels=2,
+            )
+            audio = sr.AudioData(processed_pcm, sample_rate_hz, 2)
+            try:
+                raw_text = recognizer.recognize_google(audio, language=language)
+            except sr.UnknownValueError:
+                continue
+            except sr.RequestError as e:
+                raise RuntimeError(f"Google Web Speech リクエスト失敗: {e}") from e
+            text = self._sanitize_transcript_text(str(raw_text))
+            if text:
+                lines.append(f"user:{uid} {text}")
+        return lines
 
     def _transcribe_chunk_map_with_google(self, chunk_map: dict[int, bytes], guild_id: int) -> list[str]:
         client = self._get_google_client(guild_id)
@@ -797,13 +901,26 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         guild_id: int,
         provider_override: str | None = None,
         whisper_model: str | None = None,
+        fast: bool = False,
     ) -> list[str]:
         provider = self._resolve_transcription_provider(guild_id, provider_override)
         google_error = ""
 
+        if provider in {"google_web", "webspeech", "speech_recognition"}:
+            try:
+                web_lines = self._transcribe_chunk_map_with_google_web(chunk_map, guild_id)
+                if web_lines:
+                    return web_lines
+                google_error = "Google Web Speech の認識結果が空でした。"
+            except Exception as e:
+                google_error = str(e)
+
         if provider == "google":
             try:
-                return self._transcribe_chunk_map_with_google(chunk_map, guild_id)
+                cloud_lines = self._transcribe_chunk_map_with_google(chunk_map, guild_id)
+                if cloud_lines:
+                    return cloud_lines
+                google_error = "Google Speech-to-Text の認識結果が空でした。"
             except Exception as e:
                 google_error = str(e)
 
@@ -826,8 +943,8 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                     io.BytesIO(wav_bytes),
                     language="ja",
                     task="transcribe",
-                    beam_size=8,
-                    best_of=8,
+                    beam_size=1 if fast else 8,
+                    best_of=1 if fast else 8,
                     temperature=0.0,
                     compression_ratio_threshold=2.0,
                     log_prob_threshold=-0.8,
@@ -854,7 +971,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         if google_error:
             if lines:
                 return lines
-            raise RuntimeError(f"Google Speech-to-Text に失敗し、Whisper フォールバックも空でした: {google_error}")
+            raise RuntimeError(f"Google 音声認識に失敗し、Whisper フォールバックも空でした: {google_error}")
         return lines
 
     def _maybe_translate_text(self, bot: commands.Bot, guild_id: int, text: str) -> tuple[str, bool]:
@@ -891,16 +1008,39 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 raise
 
             try:
+                started_at = time.monotonic()
+                realtime_model = str(
+                    _settings.get("meeting.realtime_whisper_model", "tiny", guild_id=guild_id)
+                ).strip() or "tiny"
                 lines = await asyncio.to_thread(
                     self._transcribe_chunk_map,
                     {uid: pcm},
                     guild_id,
                     session.transcription_provider,
-                    session.whisper_model,
+                    realtime_model,
+                    True,
                 )
             except Exception as e:
                 session.runtime.warning = str(e)
+                logger.warning(
+                    "realtime_transcription_failed guild=%s user=%s elapsed=%.2fs error=%s",
+                    guild_id,
+                    uid,
+                    time.monotonic() - started_at,
+                    self._redact_paths(str(e)),
+                )
                 continue
+            logger.info(
+                "realtime_transcription_done guild=%s user=%s elapsed=%.2fs audio=%.2fs lines=%s provider=%s fallback_model=%s text=%s",
+                guild_id,
+                uid,
+                time.monotonic() - started_at,
+                self._pcm_duration_seconds(pcm, 48000, 2),
+                len(lines),
+                session.transcription_provider,
+                realtime_model,
+                self._redact_paths(" ".join(lines))[:200],
+            )
             if not lines:
                 continue
 
@@ -926,6 +1066,12 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             try:
                 await out_ch.send(content)
             except Exception:
+                logger.exception(
+                    "realtime_transcription_send_failed guild=%s channel=%s user=%s",
+                    guild_id,
+                    getattr(out_ch, "id", None),
+                    uid,
+                )
                 continue
 
     async def _flush_realtime_phrase_after_silence(
@@ -954,8 +1100,39 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             return
         try:
             bot.loop.call_soon_threadsafe(runtime.phrase_queue.put_nowait, (uid, bytes(phrase)))
+            logger.info(
+                "realtime_phrase_queued guild=%s user=%s bytes=%s audio=%.2fs",
+                guild_id,
+                uid,
+                len(phrase),
+                self._pcm_duration_seconds(bytes(phrase), 48000, 2),
+            )
         except Exception:
+            logger.exception("realtime_phrase_queue_failed guild=%s user=%s", guild_id, uid)
             return
+
+    def _schedule_realtime_phrase_flush(
+        self,
+        bot: commands.Bot,
+        guild_id: int,
+        uid: int,
+        runtime: _RecordingRuntime,
+        delay_seconds: float,
+    ) -> asyncio.Task:
+        current = runtime.phrase_flush_tasks.get(uid)
+        if current is not None and not current.done():
+            current.cancel()
+        task = bot.loop.create_task(
+            self._flush_realtime_phrase_after_silence(bot, guild_id, uid, delay_seconds)
+        )
+        runtime.phrase_flush_tasks[uid] = task
+
+        def _cleanup(_task: asyncio.Task) -> None:
+            if runtime.phrase_flush_tasks.get(uid) is task:
+                runtime.phrase_flush_tasks.pop(uid, None)
+
+        task.add_done_callback(_cleanup)
+        return task
 
     def _read_recorder_reason(self, runtime: _RecordingRuntime) -> str:
         path = runtime.recorder_reason_path
@@ -1055,10 +1232,10 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             return False, f"文字起こしエンジンの初期化に失敗しました: {e}"
 
         runtime = await self._start_recording(bot, voice_channel)
-        if runtime.voice_client is None and runtime.warning:
+        if not self._runtime_recording_started(runtime) and runtime.warning:
             return False, runtime.warning
 
-        self._sessions[guild.id] = MeetingSession(
+        session = MeetingSession(
             guild_id=guild.id,
             voice_channel_id=voice_channel.id,
             started_by_id=started_by_id,
@@ -1068,15 +1245,16 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             whisper_model=(whisper_model or "").strip() or None,
             runtime=runtime,
         )
-        if runtime.voice_client is not None:
-            runtime.phrase_queue = asyncio.Queue()
-            runtime.realtime_live_enabled = False
-            runtime.realtime_task = asyncio.create_task(self._run_realtime_updates(bot, guild.id))
+        self._sessions[guild.id] = session
+        if runtime.recorder_process is not None and self._runtime_recording_started(runtime):
+            runtime.recorder_watch_task = asyncio.create_task(self._watch_external_recorder(bot, guild.id))
 
         msg = f"議事録を開始しました。対象VC: {voice_channel.name}"
+        if runtime.recorder_process is not None:
+            msg += "\n録音: 外部レコーダー"
         if warmup_note:
             msg += f"\n文字起こし: {warmup_note}"
-        msg += "\nリアル文字起こし投稿: 待機中（▶️で開始）"
+        msg += "\n停止時に文字起こし・要約します。"
         if runtime.warning:
             msg += f"\n注意: {runtime.warning}"
         return True, msg
@@ -1179,6 +1357,139 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             audio_debug_paths=audio_debug_paths,
         )
 
+    async def stop_session_for_playback(
+        self,
+        guild: discord.Guild,
+    ) -> tuple[MeetingSession, Path | None, str] | None:
+        """Stop recording immediately and build playback audio without STT or summary."""
+        started = time.monotonic()
+        logger.info("playback_stop_start guild=%s", guild.id)
+        session = self._sessions.pop(guild.id, None)
+        if session is None:
+            logger.info("playback_stop_no_session guild=%s", guild.id)
+            return None
+
+        runtime = session.runtime
+        runtime.realtime_live_enabled = False
+        realtime_task = runtime.realtime_task
+        if realtime_task is not None:
+            realtime_task.cancel()
+            try:
+                await realtime_task
+            except asyncio.CancelledError:
+                pass
+        for task in list(runtime.phrase_flush_tasks.values()):
+            task.cancel()
+        runtime.phrase_flush_tasks.clear()
+        runtime.phrase_chunks.clear()
+        runtime.phrase_queue = None
+
+        watch_task = runtime.recorder_watch_task
+        current_task = asyncio.current_task()
+        if watch_task is not None and watch_task is not current_task:
+            watch_task.cancel()
+            try:
+                await watch_task
+            except asyncio.CancelledError:
+                pass
+
+        source_path: Path | None = None
+        warning = runtime.warning
+        proc = runtime.recorder_process
+        if proc is not None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.write(b"stop\n")
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if runtime.recorder_wav_path and runtime.recorder_wav_path.exists():
+                source_path = runtime.recorder_wav_path
+        else:
+            vc = runtime.voice_client
+            if vc is not None:
+                try:
+                    stop = getattr(vc, "stop_listening", None)
+                    if callable(stop):
+                        stop()
+                except Exception:
+                    pass
+                try:
+                    disconnect = getattr(vc, "disconnect", None)
+                    if callable(disconnect):
+                        result = disconnect(force=True)
+                        if hasattr(result, "__await__"):
+                            await result
+                except Exception as e:
+                    warning = f"{warning} VC切断失敗: {e}".strip()
+
+            chunk_map = {uid: bytes(pcm) for uid, pcm in runtime.chunks.items() if pcm}
+            logger.info(
+                "playback_stop_chunks guild=%s users=%s total_bytes=%s",
+                guild.id,
+                len(chunk_map),
+                sum(len(pcm) for pcm in chunk_map.values()),
+            )
+            if chunk_map:
+                wav_paths = await asyncio.to_thread(self._dump_debug_audio, chunk_map, guild.id)
+                candidates = [Path(path) for path in wav_paths if Path(path).exists()]
+                if candidates:
+                    source_path = max(candidates, key=lambda path: path.stat().st_size)
+
+        if source_path is None:
+            logger.warning(
+                "playback_stop_no_audio guild=%s elapsed=%.2fs warning=%s",
+                guild.id,
+                time.monotonic() - started,
+                warning,
+            )
+            return session, None, (warning + " 再生できる録音がありません。").strip()
+
+        mp3_path = source_path.with_suffix(".mp3")
+        logger.info(
+            "playback_mp3_convert_start guild=%s source=%s size=%s target=%s",
+            guild.id,
+            source_path,
+            source_path.stat().st_size,
+            mp3_path,
+        )
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source_path),
+                    "-codec:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "4",
+                    str(mp3_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            logger.info(
+                "playback_mp3_convert_done guild=%s path=%s size=%s elapsed=%.2fs",
+                guild.id,
+                mp3_path,
+                mp3_path.stat().st_size,
+                time.monotonic() - started,
+            )
+            return session, mp3_path, warning
+        except Exception as e:
+            logger.exception("playback_mp3_convert_failed guild=%s source=%s", guild.id, source_path)
+            return session, source_path, f"{warning} MP3変換失敗のため元音声を再生: {e}".strip()
+
     @staticmethod
     def is_human_empty(channel: discord.VoiceChannel) -> bool:
         humans = [m for m in channel.members if not m.bot]
@@ -1252,6 +1563,22 @@ print(json.dumps({"text": text}, ensure_ascii=False))
         return embed
 
     async def _start_recording(self, bot: commands.Bot, voice_channel: VoiceLikeChannel) -> _RecordingRuntime:
+        backend = self._recording_backend(voice_channel.guild.id)
+        if backend in {"external", "recorder"}:
+            return await self._start_external_recorder(bot, voice_channel)
+        if backend == "auto":
+            external = await self._start_external_recorder(bot, voice_channel)
+            if self._runtime_recording_started(external):
+                return external
+            internal = await self._start_internal_recording(bot, voice_channel)
+            if internal.warning and external.warning:
+                internal.warning = f"{internal.warning} / 外部録音も失敗: {external.warning}"
+            elif external.warning and not internal.warning:
+                internal.warning = f"外部録音は使えませんでした: {external.warning}"
+            return internal
+        return await self._start_internal_recording(bot, voice_channel)
+
+    async def _start_internal_recording(self, bot: commands.Bot, voice_channel: VoiceLikeChannel) -> _RecordingRuntime:
         runtime = _RecordingRuntime()
 
         try:
@@ -1267,6 +1594,7 @@ print(json.dumps({"text": text}, ensure_ascii=False))
             return runtime
 
         chunks = runtime.chunks
+        manager = self
         max_total_mb = int(_settings.get("meeting.audio_max_total_mb", 0))
         max_user_mb = int(_settings.get("meeting.audio_max_user_mb", 0))
         runtime.max_total_bytes = max(0, max_total_mb) * 1024 * 1024
@@ -1295,6 +1623,27 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 if not pcm:
                     return
 
+                runtime.received_packets += 1
+                runtime.received_pcm_bytes += len(pcm)
+                if runtime.received_packets == 1 or runtime.received_packets % 250 == 0:
+                    samples = np.frombuffer(pcm, dtype=np.int16)
+                    if samples.size:
+                        float_samples = samples.astype(np.float32)
+                        rms = float(np.sqrt(np.mean(float_samples * float_samples)))
+                        peak = int(np.max(np.abs(float_samples)))
+                    else:
+                        rms = 0.0
+                        peak = 0
+                    logger.info(
+                        "minutes_audio_received guild=%s user=%s packets=%s pcm_bytes=%s latest_rms=%.1f latest_peak=%s",
+                        voice_channel.guild.id,
+                        uid,
+                        runtime.received_packets,
+                        runtime.received_pcm_bytes,
+                        rms,
+                        peak,
+                    )
+
                 # 必要な場合だけメモリ上限を適用する。0 は無制限。
                 total = sum(len(v) for v in chunks.values())
                 cur_user = len(chunks.get(uid, b""))
@@ -1321,28 +1670,17 @@ print(json.dumps({"text": text}, ensure_ascii=False))
                 runtime.phrase_chunks[uid].extend(pcm)
 
                 def schedule_flush() -> None:
-                    old_task = runtime.phrase_flush_tasks.pop(uid, None)
-                    if old_task is not None:
-                        old_task.cancel()
                     delay_seconds = max(
                         1.0,
                         min(5.0, MeetingMinutesManager._realtime_interval_seconds(voice_channel.guild.id) / 10.0),
                     )
-                    task = bot.loop.create_task(
-                        self._flush_realtime_phrase_after_silence(
-                            bot,
-                            voice_channel.guild.id,
-                            uid,
-                            delay_seconds,
-                        )
+                    manager._schedule_realtime_phrase_flush(
+                        bot,
+                        voice_channel.guild.id,
+                        uid,
+                        runtime,
+                        delay_seconds,
                     )
-                    runtime.phrase_flush_tasks[uid] = task
-
-                    def _cleanup(_task: asyncio.Task) -> None:
-                        if runtime.phrase_flush_tasks.get(uid) is task:
-                            runtime.phrase_flush_tasks.pop(uid, None)
-
-                    task.add_done_callback(_cleanup)
 
                 bot.loop.call_soon_threadsafe(schedule_flush)
 

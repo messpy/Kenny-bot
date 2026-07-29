@@ -257,7 +257,7 @@ class WebSummarizer:
             for model_name in self._candidate_models():
                 try:
                     out = await self.runner.run_async(prompt, model=model_name)
-                    out = (out or "").strip()
+                    out = strip_ansi_and_ctrl(out or "").strip()
                     if len(out) > self.config.max_chars:
                         out = out[:self.config.max_chars] + "..."
                     if out:
@@ -675,7 +675,7 @@ class AISearchService:
         for model_name in self._candidate_final_models():
             try:
                 answer_text = await self.runner.run_async(prompt, model=model_name)
-                return (answer_text or "").strip()
+                return strip_ansi_and_ctrl(answer_text or "").strip()
             except Exception as e:
                 last_error = e
                 logger.warning(

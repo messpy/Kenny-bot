@@ -7,7 +7,7 @@ Wants=kennybot-voicevox.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/kennypi/work/Kenny-bot
+WorkingDirectory=/home/kennypi/deploy/Kenny-bot
 Environment=HOME=/home/kennypi
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/home/kennypi/work/Kenny-bot/.env

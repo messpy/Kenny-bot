@@ -1,10 +1,12 @@
 global:
   ai:
     models:
-      default: gpt-oss:120b
-      chat: gpt-oss:120b
-      summary: gpt-oss:120b
+      default: gemini-2.5-flash
+      chat: gemini-2.5-flash
+      summary: gemini-2.5-flash
       embedding: embeddinggemma
+      fallback:
+      - qwen3.5:122b
     timeout_sec: 180
   chat:
     history_lines: 100
@@ -15,6 +17,7 @@ global:
     history_retention_days: 30
     max_response_length: 1800
     max_response_length_prompt: 1800
+    free_talk_channel_ids: []
   summarize_recent_default_messages: 30
   summarize_recent:
     history_fetch_limit: 300
@@ -23,6 +26,80 @@ global:
   kenny_chat:
     cooldown_seconds: 12
     block_invite_and_mass_mention: true
+    delete_mirrors_on_source_delete: false
+  weekly_ai_posts:
+    enabled: true
+    poll_seconds: 60
+    items:
+    - id: daily_world_trivia
+      enabled: true
+      channel_id: 1518267649786908743
+      weekday: 毎日
+      time: '12:00'
+      timezone: Asia/Tokyo
+      model: gemini-2.5-flash
+      today_language:
+        enabled: true
+        reactions:
+          enabled: true
+          unknown_emoji: ✋
+          known_emoji: 👀
+          learned_emoji: ✅
+          issue_emoji: ⚠️
+      prompt: 'Discordの管理チャンネルに投稿する短い海外の豆知識を1つ作ってください。
+
+        条件:
+
+        - 日本語で2〜4文
+
+        - 毎回ランダムに世界のエリアを1つ選ぶ
+
+        - エリア例: アジア、ヨーロッパ、北米、南米、アフリカ、中東、オセアニア、北欧、東南アジア、中央アジア
+
+        - 選んだエリアの文化、地理、歴史、生活習慣のどれかに関する意外な豆知識
+
+        - 最初に「【海外豆知識】~○○編~」と付ける
+
+        - 誤情報を避け、断定しすぎない
+
+        '
+    - id: weekly_world_trivia_1493246078357606430
+      enabled: true
+      channel_id: 1493246078357606430
+      weekday: 日曜
+      time: '12:00'
+      timezone: Asia/Tokyo
+      model: gemini-2.5-flash
+      today_language:
+        enabled: true
+        reactions:
+          enabled: true
+          unknown_emoji: ✋
+          known_emoji: 👀
+          learned_emoji: ✅
+          issue_emoji: ⚠️
+      prompt: 'Discordの管理チャンネルに投稿する短い海外の豆知識を1つ作ってください。
+
+        条件:
+
+        - 日本語で2〜4文
+
+        - 毎回ランダムに世界のエリアを1つ選ぶ
+
+        - エリア例: アジア、ヨーロッパ、北米、南米、アフリカ、中東、オセアニア、北欧、東南アジア、中央アジア
+
+        - 選んだエリアの文化、地理、歴史、生活習慣のどれかに関する意外な豆知識
+
+        - 最初に「【海外豆知識】~○○編~」と付ける
+
+        - 誤情報を避け、断定しすぎない
+
+        '
+  image_generation:
+    enabled: true
+    provider: gemini
+    model: gemini-2.5-flash-image
+    size: 1024x1024
   security:
     ai_max_concurrency: 2
     ai_channel_cooldown_seconds: 4
@@ -34,25 +111,41 @@ global:
     ai_per_seconds: 20.0
     dup_window_seconds: 12.0
     warn_cooldown_seconds: 20.0
+    enabled: true
+    max_action: ban
   meeting:
     max_minutes: 90
     audio_max_total_mb: 0
     audio_max_user_mb: 0
-    transcription_provider: google
+    transcription_provider: google_web
     google_language_code: ja-JP
     google_chunk_seconds: 20
     google_timeout_sec: 90
     google_model: ''
     whisper_model: base
+    realtime_whisper_model: tiny
     realtime_translation_enabled: true
     translation_target_language: ja
-    realtime_translation_interval_sec: 20
+    realtime_translation_interval_sec: 15
     realtime_translation_min_audio_bytes: 24000
+    recording_backend: internal
   voice:
     log_private_channels: false
+    assistant_enabled_on_tts_join: true
+    assistant_reply_cooldown_sec: 2.0
+    assistant_min_chars: 2
+    assistant_max_reply_chars: 90
+    assistant_transcription_provider: google
+    assistant_realtime_interval_sec: 4.0
+    assistant_realtime_min_audio_bytes: 6000
+    assistant_phrase_silence_sec: 0.6
+    assistant_whisper_vad_enabled: false
   logging:
-    event_channel_id: 1005826751391342663
+    event_channel_id: 1518267649786908743
     event_channel_name: kennybot-log
+  admin:
+    authoritative_correction_user_ids:
+    - 387651883847909376
   keyword_reactions:
     いいね: 👍
     ミュ: 🐈
@@ -62,6 +155,49 @@ global:
     おはよう: ☀
     おやすみ: 🌙
     天使: て、て、て、天使の羽👼
+  reactions:
+    ai_review: 🤔
+    weekly_today_language:
+      unknown: ✋
+      known: 👀
+      learned: ✅
+      issue: ⚠️
+    mod_reset: 🔄
+    mod_list: 📋
+    vc:
+      join: ✅
+      mute_on: 🔇
+      mute_off: 🎤
+      deaf_on: 🙉
+      deaf_off: 🙊
+    group_match:
+      join: 🤝
+      start: ▶️
+    minutes:
+      summary: ⏯️
+      stop: ⏹️
+      playback: 🎶
+      realtime: ▶️
+    timer:
+      restart: 🔁
+    game:
+      join: 🎮
+      start: ▶️
+    wordwolf:
+      end: ⏹️
+      repeat: 🔁
+    werewolf:
+      votes:
+      - 1️⃣
+      - 2️⃣
+      - 3️⃣
+      - 4️⃣
+      - 5️⃣
+      - 6️⃣
+      - 7️⃣
+      - 8️⃣
+      - 9️⃣
+      - 🔟
   reaction_roles:
     bindings: {}
   tts:

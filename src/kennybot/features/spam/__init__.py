@@ -3,6 +3,7 @@
 from .guard import (
     EveryoneCrossChannelViolation,
     EveryoneMentionEvent,
+    EveryoneMentionViolation,
     SpamGuard,
     SpamPolicy,
     UserViolationLevel,
@@ -11,6 +12,7 @@ from .guard import (
 __all__ = [
     "EveryoneCrossChannelViolation",
     "EveryoneMentionEvent",
+    "EveryoneMentionViolation",
     "SpamGuard",
     "SpamPolicy",
     "UserViolationLevel",

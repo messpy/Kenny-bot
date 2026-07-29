@@ -16,7 +16,8 @@ class SpamPolicy:
     ai_per_seconds: float = 20.0
     dup_window_seconds: float = 12.0
     warn_cooldown_seconds: float = 20.0
-    everyone_cross_channel_window_seconds: float = 1.0
+    everyone_mention_window_seconds: float = 2.0
+    everyone_mention_trigger_count: int = 3
 
 
 @dataclass
@@ -51,10 +52,13 @@ class EveryoneMentionEvent:
 
 
 @dataclass(frozen=True)
-class EveryoneCrossChannelViolation:
+class EveryoneMentionViolation:
     guild_id: int
     user_id: int
     events: tuple[EveryoneMentionEvent, ...]
+
+
+EveryoneCrossChannelViolation = EveryoneMentionViolation
 
 
 class SpamGuard:
@@ -116,9 +120,10 @@ class SpamGuard:
         channel_id: int,
         message_id: int,
         now: float | None = None,
-    ) -> EveryoneCrossChannelViolation | None:
+    ) -> EveryoneMentionViolation | None:
         timestamp = time.time() if now is None else now
-        window = self.p.everyone_cross_channel_window_seconds
+        window = self.p.everyone_mention_window_seconds
+        trigger_count = self.p.everyone_mention_trigger_count
         key = (guild_id, user_id)
         dq = self._everyone_mentions.get(key)
         if dq is None:
@@ -137,13 +142,12 @@ class SpamGuard:
         )
         dq.append(event)
 
-        channels = {item.channel_id for item in dq}
-        if len(channels) < 2:
+        if len(dq) < trigger_count:
             return None
 
         events = tuple(dq)
         dq.clear()
-        return EveryoneCrossChannelViolation(
+        return EveryoneMentionViolation(
             guild_id=guild_id,
             user_id=user_id,
             events=events,

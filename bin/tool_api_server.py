@@ -22,6 +22,7 @@ from src.kennybot.features.search import (
     list_tool_menu,
     parse_json_payload,
 )
+from src.kennybot.utils.text import sanitize_user_visible_error
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ def dispatch_tool_api_request(
     try:
         payload = parse_json_payload(raw_body)
     except json.JSONDecodeError as exc:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_json", "detail": str(exc)}
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_json", "detail": sanitize_user_visible_error(exc)}
     tool_name = normalized_path.rsplit("/", 1)[-1]
     try:
         response = build_tool_response(
@@ -64,7 +65,8 @@ def dispatch_tool_api_request(
             live_info=live_info,
         )
     except Exception as exc:  # pragma: no cover - defensive server boundary
-        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal_error", "detail": str(exc)}
+        logger.exception("Tool API request failed")
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal_error", "detail": sanitize_user_visible_error(exc)}
     return HTTPStatus.OK, response
 
 

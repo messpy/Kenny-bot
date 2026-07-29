@@ -34,7 +34,7 @@ def _level_color(level: str) -> discord.Color:
 async def resolve_event_log_channel(
     bot: discord.Client,
     guild: discord.Guild | None = None,
-) -> discord.TextChannel | None:
+) -> discord.TextChannel | discord.Thread | None:
     channel_id = 0
     if guild is not None:
         channel_id = _as_int(_settings.get("logging.event_channel_id", 0, guild_id=guild.id))
@@ -51,9 +51,9 @@ async def resolve_event_log_channel(
             except Exception:
                 logger.exception("Failed to fetch event log channel: %s", channel_id)
                 channel = None
-        if isinstance(channel, discord.TextChannel):
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
             return channel
-        logger.warning("Configured event log channel is not a text channel: %s", channel_id)
+        logger.warning("Configured event log channel is not a text channel or thread: %s", channel_id)
 
     if guild is None:
         return None

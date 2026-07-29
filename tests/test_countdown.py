@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import sys
 import types
 import unittest
@@ -25,6 +26,7 @@ if "discord" not in sys.modules:
             return placeholder
 
     discord = _DiscordModule("discord")
+    discord.__path__ = []
 
     class _AllowedMentions:
         @staticmethod
@@ -33,9 +35,15 @@ if "discord" not in sys.modules:
 
     discord.AllowedMentions = _AllowedMentions
     discord.abc = _DiscordSubmodule("discord.abc")
+    discord.abc.__path__ = []
     discord.abc.Messageable = object
+    utils = _DiscordSubmodule("discord.utils")
+    utils.get = lambda *args, **kwargs: None
+    utils.utcnow = lambda: datetime.now(timezone.utc)
+    discord.utils = utils
     sys.modules["discord"] = discord
     sys.modules["discord.abc"] = discord.abc
+    sys.modules["discord.utils"] = utils
 
 from src.kennybot.utils.countdown import ChannelCountdown
 

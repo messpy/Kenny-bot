@@ -3,6 +3,7 @@
 from src.kennybot.features.spam import (
     EveryoneCrossChannelViolation,
     EveryoneMentionEvent,
+    EveryoneMentionViolation,
     SpamGuard,
     SpamPolicy,
     UserViolationLevel,
@@ -11,6 +12,7 @@ from src.kennybot.features.spam import (
 __all__ = [
     "EveryoneCrossChannelViolation",
     "EveryoneMentionEvent",
+    "EveryoneMentionViolation",
     "SpamGuard",
     "SpamPolicy",
     "UserViolationLevel",

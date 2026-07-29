@@ -5,7 +5,10 @@ from discord.ext import commands
 
 
 class PingCog(commands.Cog):
-    """Ping コマンド例"""
+    """Ping コマンド"""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
 
     @commands.command(name="ping")
     async def ping(self, ctx: commands.Context):

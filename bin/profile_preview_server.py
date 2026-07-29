@@ -16,6 +16,7 @@ if str(sys_root) not in sys.path:
     sys.path.insert(0, str(sys_root))
 
 from src.kennybot.features.search import build_profile_preview_response, parse_json_payload
+from src.kennybot.utils.text import sanitize_user_visible_error
 
 
 logger = logging.getLogger(__name__)
@@ -42,11 +43,12 @@ def dispatch_profile_preview_request(
     try:
         payload = parse_json_payload(raw_body)
     except json.JSONDecodeError as exc:
-        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_json", "detail": str(exc)}
+        return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_json", "detail": sanitize_user_visible_error(exc)}
     try:
         response = build_profile_preview_response(root=root, payload=payload, ai_client=ai_client)
     except Exception as exc:  # pragma: no cover - defensive server boundary
-        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal_error", "detail": str(exc)}
+        logger.exception("Profile preview request failed")
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal_error", "detail": sanitize_user_visible_error(exc)}
     return HTTPStatus.OK, {"ok": True, **response}
 
 

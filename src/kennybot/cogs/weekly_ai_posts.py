@@ -12,6 +12,7 @@ import discord
 from discord.ext import commands
 
 from src.kennybot.utils.paths import RUNTIME_STATE_DIR
+from src.kennybot.utils.reactions import get_reaction_emoji
 from src.kennybot.utils.runtime_settings import get_settings
 
 
@@ -114,10 +115,10 @@ def _reaction_emojis(item: dict[str, Any]) -> list[str]:
     if not isinstance(reactions, dict) or not bool(reactions.get("enabled", False)):
         return []
     emojis = [
-        str(reactions.get("unknown_emoji") or "✋"),
-        str(reactions.get("known_emoji") or "👀"),
-        str(reactions.get("learned_emoji") or "✅"),
-        str(reactions.get("issue_emoji") or "⚠️"),
+        str(reactions.get("unknown_emoji") or get_reaction_emoji("weekly_today_language.unknown")),
+        str(reactions.get("known_emoji") or get_reaction_emoji("weekly_today_language.known")),
+        str(reactions.get("learned_emoji") or get_reaction_emoji("weekly_today_language.learned")),
+        str(reactions.get("issue_emoji") or get_reaction_emoji("weekly_today_language.issue")),
     ]
     return [emoji for emoji in emojis if emoji.strip()]
 

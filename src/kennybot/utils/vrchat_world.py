@@ -1,23 +1,34 @@
 from __future__ import annotations
 
-import importlib.util
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
+from vrchatapi.api import worlds_api
 
-@lru_cache(maxsize=1)
-def _load_vrchat_staff_bot_class() -> type[Any]:
-    module_path = Path(__file__).resolve().parents[2] / "api" / "vrchat" / "getVrcWorld.py"
-    spec = importlib.util.spec_from_file_location("kennybot_vrchat_world", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"VRChat module could not be loaded: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    staff_bot = getattr(module, "VRChatStaffBot", None)
-    if staff_bot is None:
-        raise RuntimeError("VRChatStaffBot が見つかりませんでした。")
-    return staff_bot
+from src.kennybot.utils.vrchat_user import authenticated_vrchat_api_client
+
+
+def _get_field(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        if name in item:
+            return item[name]
+        parts = name.split("_")
+        camel_name = parts[0] + "".join(part.capitalize() for part in parts[1:])
+        return item.get(camel_name, default)
+    return getattr(item, name, default)
+
+
+def _format_tags(tags: Any) -> str:
+    if not isinstance(tags, list):
+        return "-"
+    visible_tags = [
+        str(tag)
+        for tag in tags
+        if isinstance(tag, str)
+        and tag
+        and not tag.startswith("admin_")
+        and not tag.startswith("system_")
+    ]
+    return ", ".join(visible_tags[:12]) if visible_tags else "-"
 
 
 def search_vrchat_worlds(
@@ -25,34 +36,56 @@ def search_vrchat_worlds(
     count: int,
     author: str | None = None,
     tag: str | None = None,
-) -> tuple[Any, list[dict[str, Any]]]:
-    staff_bot_class = _load_vrchat_staff_bot_class()
-    client = staff_bot_class()
-    if not client.login():
-        raise RuntimeError(
-            "VRChat API のログインに失敗しました。api/vrchat 側の既存認証情報を確認してください。"
-        )
-    results = client.search_worlds(keyword, n=count, author=author, tag=tag)
-    if results is None:
-        raise RuntimeError("VRChat API の検索に失敗しました。")
-    return client, list(results)
+    *,
+    totp_code: str | None = None,
+    email_code: str | None = None,
+) -> tuple[None, list[Any]]:
+    search_keyword = (keyword or "").strip()
+    if not search_keyword:
+        raise ValueError("検索キーワードを指定してください。")
+
+    limit = max(1, min(int(count), 10))
+    request_count = min(100, max(limit, limit * 5 if author else limit))
+    params: dict[str, Any] = {
+        "search": search_keyword,
+        "n": request_count,
+    }
+    tag_value = (tag or "").strip()
+    if tag_value:
+        params["tag"] = tag_value
+
+    with authenticated_vrchat_api_client(totp_code=totp_code, email_code=email_code) as api_client:
+        worlds = list(worlds_api.WorldsApi(api_client).search_worlds(**params) or [])
+
+    author_query = (author or "").strip().lower()
+    if author_query:
+        worlds = [
+            world
+            for world in worlds
+            if author_query in str(_get_field(world, "author_name", "") or "").lower()
+        ]
+    return None, worlds[:limit]
 
 
 def format_vrchat_world_lines(
     formatter: Any,
-    worlds: list[dict[str, Any]],
+    worlds: list[Any],
 ) -> list[str]:
     lines: list[str] = []
     for index, world in enumerate(worlds, start=1):
-        name = str(world.get("name") or "unknown")
-        author = str(world.get("authorName") or "unknown")
-        capacity = int(world.get("capacity") or 0)
-        occupants = int(world.get("occupants") or 0)
-        world_id = str(world.get("id") or "-")
-        tags = formatter.format_tags(world.get("tags", []))
-        unity_packages = world.get("unityPackages", [])
+        name = str(_get_field(world, "name", "unknown") or "unknown")
+        author = str(_get_field(world, "author_name", "unknown") or "unknown")
+        capacity = int(_get_field(world, "capacity", 0) or 0)
+        occupants = int(_get_field(world, "occupants", 0) or 0)
+        world_id = str(_get_field(world, "id", "-") or "-")
+        tags = _format_tags(_get_field(world, "tags", []))
+        unity_packages = _get_field(world, "unity_packages", []) or []
         is_android = any(
-            isinstance(package, dict) and package.get("platform") == "android"
+            (
+                isinstance(package, dict)
+                and package.get("platform") == "android"
+            )
+            or str(getattr(package, "platform", "") or "") == "android"
             for package in unity_packages
         )
         lines.extend(
@@ -70,7 +103,7 @@ def format_vrchat_world_lines(
 
 def format_vrchat_world_text(
     formatter: Any,
-    worlds: list[dict[str, Any]],
+    worlds: list[Any],
     *,
     max_len: int = 8000,
 ) -> str:

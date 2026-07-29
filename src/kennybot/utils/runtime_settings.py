@@ -22,6 +22,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
                 "chat": "gpt-oss:120b",
                 "summary": "gpt-oss:120b",
                 "embedding": "embeddinggemma",
+                "fallback": ["qwen3.5:122b"],
             },
             "timeout_sec": 180,
         },
@@ -52,6 +53,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "cooldown_seconds": 12,
             "block_invite_and_mass_mention": True,
         },
+        "weekly_ai_posts": {
+            "enabled": False,
+            "poll_seconds": 60,
+            "items": [],
+        },
+        "image_generation": {
+            "enabled": True,
+            "provider": "gemini",
+            "model": "gemini-2.5-flash-image",
+            "size": "1024x1024",
+        },
         "security": {
             "ai_max_concurrency": 2,
             "ai_channel_cooldown_seconds": 4,
@@ -77,16 +89,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "max_minutes": 90,
             "audio_max_total_mb": 0,
             "audio_max_user_mb": 0,
-            "transcription_provider": "google",
+            "transcription_provider": "google_web",
             "google_language_code": "ja-JP",
             "google_chunk_seconds": 20,
             "google_timeout_sec": 90,
             "google_model": "",
             "whisper_model": "base",
+            "realtime_whisper_model": "tiny",
             "realtime_translation_enabled": True,
             "translation_target_language": "ja",
-            "realtime_translation_interval_sec": 20,
+            "realtime_translation_interval_sec": 15,
             "realtime_translation_min_audio_bytes": 24000,
+            "recording_backend": "internal",
         },
         "voice": {
             "log_private_channels": False,
@@ -94,6 +108,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "logging": {
             "event_channel_id": 0,
             "event_channel_name": "kennybot-log",
+        },
+        "admin": {
+            "authoritative_correction_user_ids": [387651883847909376],
         },
         "keyword_reactions": {
             "いいね": "👍",
@@ -104,6 +121,48 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "おはよう": "☀",
             "おやすみ": "🌙",
             "天使": "て、て、て、天使の羽👼",
+        },
+        "reactions": {
+            "ai_review": "🤔",
+            "weekly_today_language": {
+                "unknown": "✋",
+                "known": "👀",
+                "learned": "✅",
+                "issue": "⚠️",
+            },
+            "mod_reset": "🔄",
+            "mod_list": "📋",
+            "vc": {
+                "join": "✅",
+                "mute_on": "🔇",
+                "mute_off": "🎤",
+                "deaf_on": "🙉",
+                "deaf_off": "🙊",
+            },
+            "group_match": {
+                "join": "🤝",
+                "start": "▶️",
+            },
+            "minutes": {
+                "summary": "⏯️",
+                "stop": "⏹️",
+                "playback": "🎶",
+                "realtime": "▶️",
+            },
+            "timer": {
+                "restart": "🔁",
+            },
+            "game": {
+                "join": "🎮",
+                "start": "▶️",
+            },
+            "wordwolf": {
+                "end": "⏹️",
+                "repeat": "🔁",
+            },
+            "werewolf": {
+                "votes": ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"],
+            },
         },
         "reaction_roles": {
             "bindings": {},

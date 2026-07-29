@@ -5,7 +5,7 @@ Discord で使える AI アシスタント Bot です。
 ## 基本的な使い方
 
 Bot をメンションするか、Bot のメッセージにリプライすると、AI が応答します。
-DM でも同样的に応答できます。
+DM でも同様に応答できます。
 
 ## できること
 
@@ -24,13 +24,20 @@ DM でも同样的に応答できます。
 | コマンド | 説明 |
 |---------|------|
 | `/help` | この Bot の機能とコマンド一覧を表示 |
+| `/ping` | Bot の応答速度を確認 |
 | `/bot_info` | Bot の状態を確認 |
 | `/summarize_recent` | このチャンネルの直近メッセージを要約 |
-| `/minutes_start` | 議事録モードを開始（VC 参加者） |
-| `/minutes_stop` | 議事録を停止して要約を作成 |
+| `/config` | 設定の表示・更新 |
+| `/model_list` | 利用可能なモデル一覧を表示 |
+| `/model_change` | Bot が使うモデルを切り替え |
+| `/minutes` | 議事録の開始・停止・状態表示 |
+| `/tts` | 読み上げの開始・停止・話者変更 |
+| `/modpanel` | スパム管理パネルを作成 |
+| `/birthday` | action で add/list/remove を切り替え、通知時刻も設定 |
 | `/game` | 人狼・あいうえおバトル等のミニゲームを開始 |
 | `/timer` | タイマーを開始 |
 | `/vrchat_world` | VRChat のワールドを検索 |
+| `/vrc_user` | VRChat ユーザーURLからプロフィールを取得 |
 
 ### ゲーム
 
@@ -39,7 +46,64 @@ DM でも同样的に応答できます。
 
 ### 議事録
 
-VC 参加中に `/minutes_start` で録音開始。文字起こしと要約が自動でチャンネルに投稿されます。
+VC 参加中に `/minutes` で録音開始。`action` で開始・停止・状態表示を切り替えます。
+
+### 誕生日
+
+`/birthday action:add` で登録するときに `notify_time:HH:MM` を指定できます。未指定なら 12:00 です。
+
+### リアクション設定
+
+固定リアクションは `config/bot_settings.yaml` の `reactions` で設定します。
+
+```yaml
+reactions:
+  ai_review: 🤔
+  weekly_today_language:
+    unknown: ✋
+    known: 👀
+    learned: ✅
+    issue: ⚠️
+  mod_reset: 🔄
+  mod_list: 📋
+  vc:
+    join: ✅
+    mute_on: 🔇
+    mute_off: 🎤
+    deaf_on: 🙉
+    deaf_off: 🙊
+  group_match:
+    join: 🤝
+    start: ▶️
+  minutes:
+    summary: ⏯️
+    stop: ⏹️
+    playback: 🎶
+    realtime: ▶️
+  timer:
+    restart: 🔁
+  game:
+    join: 🎮
+    start: ▶️
+  wordwolf:
+    end: ⏹️
+    repeat: 🔁
+  werewolf:
+    votes:
+      - 1️⃣
+      - 2️⃣
+      - 3️⃣
+      - 4️⃣
+      - 5️⃣
+      - 6️⃣
+      - 7️⃣
+      - 8️⃣
+      - 9️⃣
+      - 🔟
+```
+
+キーワード自動リアクションは既存互換のため、従来どおり `keyword_reactions` を維持します。
+既存設定を壊さないよう、Bot は `keyword_reactions` を読み、必要な場合だけ `reactions.keyword` の値で上書きします。
 
 ### ローカル検証
 
