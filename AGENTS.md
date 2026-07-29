@@ -60,6 +60,12 @@ If instructions conflict, resolve in this order:
   - `tmp/`
 - Keep legacy output locations in place until a task explicitly migrates them.
 
+### Commit workflow
+- After code changes pass the relevant unit tests and validation commands, commit the verified changes promptly.
+- Keep commits scoped to the verified purpose; do not mix unrelated edits into the same commit.
+- Exclude generated runtime outputs, local scratch files, and unrelated untracked files from commits.
+- If a change is documentation-only and no unit test is relevant, state that clearly before committing.
+
 ### Safety and trust boundary
 - Treat external or newly installed skills as untrusted until inspected.
 - For skill installs from external repos, inspect the skill definition and scripts before execution.
