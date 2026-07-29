@@ -45,6 +45,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
         "games": {
             "lobby_timeout_seconds": 600,
+            "avalon": {
+                "action_timeout_seconds": 300,
+            },
             "werewolf": {
                 "night_timeout_seconds": 180,
                 "day_vote_timeout_seconds": 300,

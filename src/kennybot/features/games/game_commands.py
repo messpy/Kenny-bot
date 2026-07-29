@@ -75,6 +75,32 @@ class WerewolfState:
 
 
 @dataclass
+class AvalonState:
+    guild_id: int
+    channel_id: int
+    host_user_id: int
+    participant_user_ids: list[int]
+    roles: dict[int, str]
+    good_user_ids: set[int]
+    evil_user_ids: set[int]
+    leader_index: int = 0
+    quest_no: int = 1
+    successes: int = 0
+    failures: int = 0
+    proposal_no: int = 1
+    phase: str = "team_select"
+    team_size: int = 0
+    team_selection_message_id: int | None = None
+    selected_team_user_ids: set[int] | None = None
+    vote_message_ids: dict[int, int] | None = None
+    pending_votes: dict[int, bool] | None = None
+    quest_message_ids: dict[int, int] | None = None
+    pending_quest_cards: dict[int, bool] | None = None
+    assassin_message_id: int | None = None
+    assassin_user_id: int | None = None
+
+
+@dataclass
 class WordWolfSessionState:
     guild_id: int
     channel_id: int
@@ -112,6 +138,17 @@ class GameCommands(commands.Cog):
 
     WORDWOLF_PAIRS_PATH = Path("data") / "wordwolf_pairs.json"
     WEREWOLF_DEBUG_NAMES = ["田中", "佐藤", "鈴木"]
+    AVALON_TEAM_SIZES = {
+        5: [2, 3, 2, 3, 3],
+        6: [2, 3, 4, 3, 4],
+        7: [2, 3, 3, 4, 4],
+        8: [3, 4, 4, 5, 5],
+        9: [3, 4, 4, 5, 5],
+        10: [3, 4, 4, 5, 5],
+    }
+    AVALON_EVIL_COUNTS = {5: 2, 6: 2, 7: 3, 8: 3, 9: 3, 10: 4}
+    AVALON_APPROVE_EMOJI = "✅"
+    AVALON_REJECT_EMOJI = "❌"
     AIUEO_ROWS = [
         "あいうえお",
         "かきくけこ",
@@ -131,6 +168,8 @@ class GameCommands(commands.Cog):
         self._aiueo_states: dict[int, AiueoBattleState] = {}
         self._werewolf_states: dict[int, WerewolfState] = {}
         self._werewolf_timeout_tasks: dict[int, asyncio.Task[None]] = {}
+        self._avalon_states: dict[int, AvalonState] = {}
+        self._avalon_timeout_tasks: dict[int, asyncio.Task[None]] = {}
         self._wordwolf_sessions: dict[int, WordWolfSessionState] = {}
         self._game_lobbies: dict[int, GameLobbyState] = {}
         self._recent_wordwolf_pairs: list[tuple[str, str]] = []
@@ -156,6 +195,10 @@ class GameCommands(commands.Cog):
     def WEREWOLF_EMOJIS(self) -> list[str]:
         return get_reaction_emojis("werewolf.votes")
 
+    @property
+    def AVALON_EMOJIS(self) -> list[str]:
+        return self.WEREWOLF_EMOJIS
+
     @app_commands.command(name=GAME_META.name, description=GAME_META.description)
     @app_commands.checks.cooldown(1, 20.0)
     @app_commands.describe(
@@ -176,6 +219,7 @@ class GameCommands(commands.Cog):
             app_commands.Choice(name="配布: 数字", value="number"),
             app_commands.Choice(name="配布: 単語", value="words"),
             app_commands.Choice(name="ワードウルフ", value="wordwolf"),
+            app_commands.Choice(name="Avalon", value="avalon"),
             app_commands.Choice(name="人狼役職配布", value="werewolf"),
             app_commands.Choice(name="あいうえおバトル", value="aiueo_battle"),
         ],
@@ -241,6 +285,12 @@ class GameCommands(commands.Cog):
                 ephemeral=True,
             )
             return
+        if mode.value == "avalon" and interaction.guild.id in self._avalon_states:
+            await interaction.response.send_message(
+                "このサーバーではAvalonが進行中です。終了後に再実行してください。",
+                ephemeral=True,
+            )
+            return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -294,6 +344,8 @@ class GameCommands(commands.Cog):
             min_players = 1 if debug_enabled else max(3, requested_minority + 2)
         elif mode.value == "werewolf":
             min_players = 1 if debug_enabled else self._minimum_werewolf_players(werewolf_role_options)
+        elif mode.value == "avalon":
+            min_players = 5
         if len(participants) < min_players:
             await interaction.followup.send(
                 f"参加者が不足しています。`{mode.name}` は最低 {min_players} 人必要です。",
@@ -327,6 +379,15 @@ class GameCommands(commands.Cog):
                 debug_enabled=debug_enabled,
             )
             title = "ワードウルフ配布をDM送信しました"
+        elif mode.value == "avalon":
+            if len(participants) > 10:
+                await interaction.followup.send(
+                    "Avalonは5〜10人で開始してください。",
+                    ephemeral=True,
+                )
+                return
+            results = await self._run_avalon(interaction, participants)
+            title = "Avalon役職をDM送信しました"
         else:
             if debug_enabled:
                 await self._run_werewolf_debug(interaction, werewolf_role_options)
@@ -754,6 +815,340 @@ class GameCommands(commands.Cog):
                 )
             out.append(await self._safe_dm(m, "\n".join(lines)))
         return out
+
+    async def _run_avalon(
+        self,
+        interaction: discord.Interaction,
+        members: list[discord.Member],
+    ) -> list[DMResult]:
+        assert interaction.guild and isinstance(interaction.channel, discord.TextChannel)
+        out: list[DMResult] = []
+        active_members: list[discord.Member] = []
+        for member in members:
+            result = await self._safe_dm(member, "🎮 Avalonの参加確認です。役職DMを送ります。")
+            if result.success:
+                active_members.append(member)
+            else:
+                out.append(result)
+        if len(active_members) not in self.AVALON_TEAM_SIZES:
+            await interaction.channel.send("❌ AvalonはDMを受け取れる参加者が5〜10人必要です。")
+            return out
+
+        role_map = self._build_avalon_roles([member.id for member in active_members])
+        started_members: list[discord.Member] = []
+        for member in active_members:
+            result = await self._safe_dm(member, self._build_avalon_role_dm_text(member.id, role_map))
+            out.append(result)
+            if result.success:
+                started_members.append(member)
+
+        if len(started_members) not in self.AVALON_TEAM_SIZES:
+            await interaction.channel.send("❌ 役職DMの送信に失敗したため、Avalonを開始できませんでした。")
+            return out
+
+        if len(started_members) != len(active_members):
+            role_map = self._build_avalon_roles([member.id for member in started_members])
+            for member in started_members:
+                await self._safe_dm(member, "🔁 参加者数調整により、Avalonの役職を再配布します。\n" + self._build_avalon_role_dm_text(member.id, role_map))
+
+        await self._start_avalon_state(interaction, started_members, role_map)
+        return out
+
+    def _build_avalon_roles(self, user_ids: list[int]) -> dict[int, str]:
+        n = len(user_ids)
+        if n not in self.AVALON_TEAM_SIZES:
+            raise ValueError("Avalonは5〜10人で開始してください。")
+        evil_count = self.AVALON_EVIL_COUNTS[n]
+        roles = ["Merlin", *(["Loyal Servant"] * (n - evil_count - 1)), "Assassin", *(["Minion"] * (evil_count - 1))]
+        random.shuffle(roles)
+        return {uid: role for uid, role in zip(user_ids, roles)}
+
+    def _avalon_team_size(self, player_count: int, quest_no: int) -> int:
+        return self.AVALON_TEAM_SIZES[player_count][quest_no - 1]
+
+    def _avalon_fail_threshold(self, player_count: int, quest_no: int) -> int:
+        return 2 if player_count >= 7 and quest_no == 4 else 1
+
+    def _build_avalon_role_dm_text(self, user_id: int, role_map: dict[int, str]) -> str:
+        role = role_map[user_id]
+        evil_ids = {uid for uid, user_role in role_map.items() if user_role in {"Assassin", "Minion"}}
+        lines = [f"🛡️ Avalon 役職: **{role}**"]
+        if role == "Merlin":
+            visible_evil = [f"<@{uid}>" for uid in evil_ids]
+            lines.append("あなたはMerlinです。邪悪陣営を知っていますが、正体を悟られると最後に暗殺されます。")
+            lines.append("邪悪陣営: " + ", ".join(visible_evil))
+        elif role in {"Assassin", "Minion"}:
+            fellows = [f"<@{uid}>" for uid in evil_ids if uid != user_id]
+            lines.append("あなたは邪悪陣営です。クエストを3回失敗させるか、最後にMerlinを暗殺すると勝利です。")
+            if fellows:
+                lines.append("仲間: " + ", ".join(fellows))
+            if role == "Assassin":
+                lines.append("善陣営がクエストを3回成功させた場合、あなたがMerlinを選んで暗殺します。")
+        else:
+            lines.append("あなたは善陣営です。クエストを3回成功させ、Merlinを守ってください。")
+        return "\n".join(lines)
+
+    async def _start_avalon_state(
+        self,
+        interaction: discord.Interaction,
+        members: list[discord.Member],
+        role_map: dict[int, str],
+    ) -> None:
+        assert interaction.guild and isinstance(interaction.channel, discord.TextChannel)
+        evil_ids = {uid for uid, role in role_map.items() if role in {"Assassin", "Minion"}}
+        state = AvalonState(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            host_user_id=interaction.user.id,
+            participant_user_ids=[member.id for member in members],
+            roles=role_map,
+            good_user_ids={member.id for member in members if member.id not in evil_ids},
+            evil_user_ids=evil_ids,
+        )
+        self._avalon_states[interaction.guild.id] = state
+        await interaction.channel.send(
+            "🛡️ **Avalon開始**\n"
+            "リーダーがクエスト参加者を選び、全員の承認投票後にクエストカードをDMリアクションで出します。\n"
+            "善陣営はクエスト3成功で暗殺フェーズへ進み、AssassinがMerlinを当てると邪悪陣営の逆転勝利です。"
+        )
+        await self._begin_avalon_proposal(interaction.guild, state)
+
+    async def _begin_avalon_proposal(self, guild: discord.Guild, state: AvalonState) -> None:
+        if state.successes >= 3:
+            await self._start_avalon_assassination(guild, state)
+            return
+        if state.failures >= 3:
+            await self._announce_avalon_end(guild, state, "クエストが3回失敗したため、邪悪陣営の勝ちです。")
+            return
+        if state.proposal_no > 5:
+            await self._announce_avalon_end(guild, state, "チーム案が5回連続で否決されたため、邪悪陣営の勝ちです。")
+            return
+
+        channel = guild.get_channel(state.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        state.phase = "team_select"
+        state.team_size = self._avalon_team_size(len(state.participant_user_ids), state.quest_no)
+        state.selected_team_user_ids = set()
+        state.vote_message_ids = {}
+        state.pending_votes = {}
+        state.quest_message_ids = {}
+        state.pending_quest_cards = {}
+        state.assassin_message_id = None
+        leader_uid = state.participant_user_ids[state.leader_index % len(state.participant_user_ids)]
+        lines = [
+            f"🛡️ **Avalon Quest {state.quest_no} / チーム案 {state.proposal_no}/5**",
+            f"成功 {state.successes} / 失敗 {state.failures}",
+            f"リーダー: <@{leader_uid}>",
+            f"クエスト参加人数: {state.team_size}人",
+            "",
+            "リーダーは参加させる人の番号リアクションを選んでください。",
+        ]
+        for idx, uid in enumerate(state.participant_user_ids):
+            member = guild.get_member(uid)
+            name = member.display_name if member else str(uid)
+            lines.append(f"{self.AVALON_EMOJIS[idx]} {name}")
+        msg = await channel.send("\n".join(lines))
+        for idx in range(len(state.participant_user_ids)):
+            await msg.add_reaction(self.AVALON_EMOJIS[idx])
+        state.team_selection_message_id = msg.id
+        self._schedule_avalon_timeout(guild, state)
+
+    async def _start_avalon_team_vote(self, guild: discord.Guild, state: AvalonState) -> None:
+        channel = guild.get_channel(state.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        team_ids = list(state.selected_team_user_ids or set())
+        if len(team_ids) != state.team_size:
+            return
+        state.phase = "team_vote"
+        state.vote_message_ids = {}
+        state.pending_votes = {}
+        names = [guild.get_member(uid).mention if guild.get_member(uid) else f"<@{uid}>" for uid in team_ids]
+        await channel.send(
+            f"🗳️ チーム案: {', '.join(names)}\n"
+            f"参加者全員に承認投票DMを送りました。{self.AVALON_APPROVE_EMOJI}=承認 / {self.AVALON_REJECT_EMOJI}=否決"
+        )
+        for uid in state.participant_user_ids:
+            member = guild.get_member(uid)
+            if member is None:
+                continue
+            try:
+                dm = member.dm_channel or await member.create_dm()
+                msg = await dm.send(
+                    f"Avalon Quest {state.quest_no} チーム案を承認しますか？\n"
+                    f"チーム: {', '.join(names)}\n"
+                    f"{self.AVALON_APPROVE_EMOJI}=承認 / {self.AVALON_REJECT_EMOJI}=否決"
+                )
+                await msg.add_reaction(self.AVALON_APPROVE_EMOJI)
+                await msg.add_reaction(self.AVALON_REJECT_EMOJI)
+                state.vote_message_ids[msg.id] = uid
+            except Exception:
+                continue
+        if not state.vote_message_ids:
+            await channel.send("投票DMを送れなかったため、このチーム案は否決扱いにします。")
+            await self._reject_avalon_team(guild, state)
+            return
+        self._schedule_avalon_timeout(guild, state)
+
+    async def _resolve_avalon_team_vote(self, guild: discord.Guild, state: AvalonState) -> None:
+        assert state.pending_votes is not None
+        delivered_count = len(set((state.vote_message_ids or {}).values()))
+        approvals = sum(1 for approved in state.pending_votes.values() if approved)
+        channel = guild.get_channel(state.channel_id)
+        if approvals > len(state.participant_user_ids) // 2:
+            if isinstance(channel, discord.TextChannel):
+                await channel.send(f"✅ チーム案は承認されました。承認 {approvals}/{delivered_count}")
+            state.proposal_no = 1
+            await self._start_avalon_quest(guild, state)
+            return
+        if isinstance(channel, discord.TextChannel):
+            await channel.send(f"❌ チーム案は否決されました。承認 {approvals}/{delivered_count}")
+        await self._reject_avalon_team(guild, state)
+
+    async def _reject_avalon_team(self, guild: discord.Guild, state: AvalonState) -> None:
+        self._cancel_avalon_timeout(guild.id)
+        state.proposal_no += 1
+        state.leader_index = (state.leader_index + 1) % len(state.participant_user_ids)
+        await self._begin_avalon_proposal(guild, state)
+
+    async def _start_avalon_quest(self, guild: discord.Guild, state: AvalonState) -> None:
+        channel = guild.get_channel(state.channel_id)
+        team_ids = list(state.selected_team_user_ids or set())
+        state.phase = "quest"
+        state.quest_message_ids = {}
+        state.pending_quest_cards = {}
+        for uid in team_ids:
+            member = guild.get_member(uid)
+            if member is None:
+                continue
+            try:
+                dm = member.dm_channel or await member.create_dm()
+                if uid in state.evil_user_ids:
+                    body = f"Quest {state.quest_no} のカードを選んでください。\n{self.AVALON_APPROVE_EMOJI}=成功 / {self.AVALON_REJECT_EMOJI}=失敗"
+                else:
+                    body = f"Quest {state.quest_no} のカードを選んでください。善陣営は成功のみ出せます。\n{self.AVALON_APPROVE_EMOJI}=成功"
+                msg = await dm.send(body)
+                await msg.add_reaction(self.AVALON_APPROVE_EMOJI)
+                if uid in state.evil_user_ids:
+                    await msg.add_reaction(self.AVALON_REJECT_EMOJI)
+                state.quest_message_ids[msg.id] = uid
+            except Exception:
+                continue
+        if not state.quest_message_ids:
+            if isinstance(channel, discord.TextChannel):
+                await channel.send("クエストDMを送れなかったため、未提出は成功扱いで処理します。")
+            await self._resolve_avalon_quest(guild, state)
+            return
+        self._schedule_avalon_timeout(guild, state)
+
+    async def _resolve_avalon_quest(self, guild: discord.Guild, state: AvalonState) -> None:
+        assert state.pending_quest_cards is not None
+        channel = guild.get_channel(state.channel_id)
+        team_ids = set(state.selected_team_user_ids or set())
+        submitted = set(state.pending_quest_cards)
+        for missing_uid in team_ids - submitted:
+            state.pending_quest_cards[missing_uid] = True
+        fail_cards = sum(1 for success in state.pending_quest_cards.values() if not success)
+        threshold = self._avalon_fail_threshold(len(state.participant_user_ids), state.quest_no)
+        if fail_cards >= threshold:
+            state.failures += 1
+            result = "失敗"
+        else:
+            state.successes += 1
+            result = "成功"
+        if isinstance(channel, discord.TextChannel):
+            threshold_text = "2枚以上で失敗" if threshold == 2 else "1枚以上で失敗"
+            await channel.send(
+                f"🏰 Quest {state.quest_no} は **{result}** しました。"
+                f"失敗カード {fail_cards} 枚（{threshold_text}）\n"
+                f"現在: 成功 {state.successes} / 失敗 {state.failures}"
+            )
+        state.quest_no += 1
+        state.leader_index = (state.leader_index + 1) % len(state.participant_user_ids)
+        await self._begin_avalon_proposal(guild, state)
+
+    async def _start_avalon_assassination(self, guild: discord.Guild, state: AvalonState) -> None:
+        channel = guild.get_channel(state.channel_id)
+        assassin_uid = next((uid for uid, role in state.roles.items() if role == "Assassin"), None)
+        if assassin_uid is None:
+            await self._announce_avalon_end(guild, state, "Assassinが存在しないため、善陣営の勝ちです。")
+            return
+        assassin = guild.get_member(assassin_uid)
+        if assassin is None:
+            await self._announce_avalon_end(guild, state, "Assassinが不在のため、善陣営の勝ちです。")
+            return
+        state.phase = "assassination"
+        state.assassin_user_id = assassin_uid
+        candidates = [uid for uid in state.participant_user_ids if uid not in state.evil_user_ids]
+        lines = ["🗡️ 善陣営がクエストを3回成功させました。Merlinだと思う相手を選んでください。"]
+        for idx, uid in enumerate(candidates):
+            member = guild.get_member(uid)
+            name = member.display_name if member else str(uid)
+            lines.append(f"{self.AVALON_EMOJIS[idx]} {name}")
+        try:
+            dm = assassin.dm_channel or await assassin.create_dm()
+            msg = await dm.send("\n".join(lines))
+            for idx in range(len(candidates)):
+                await msg.add_reaction(self.AVALON_EMOJIS[idx])
+            state.assassin_message_id = msg.id
+            if isinstance(channel, discord.TextChannel):
+                await channel.send("🗡️ AssassinにMerlin暗殺DMを送りました。")
+            self._schedule_avalon_timeout(guild, state)
+        except Exception:
+            await self._announce_avalon_end(guild, state, "AssassinへDMを送れなかったため、善陣営の勝ちです。")
+
+    async def _announce_avalon_end(self, guild: discord.Guild, state: AvalonState, text: str) -> None:
+        self._cancel_avalon_timeout(guild.id)
+        state.phase = "ended"
+        channel = guild.get_channel(state.channel_id)
+        if isinstance(channel, discord.TextChannel):
+            lines = [f"🏁 {text}", "役職公開:"]
+            for uid in state.participant_user_ids:
+                member = guild.get_member(uid)
+                name = member.display_name if member else str(uid)
+                lines.append(f"- {name}: {state.roles.get(uid, '不明')}")
+            await channel.send("\n".join(lines))
+        self._avalon_states.pop(guild.id, None)
+
+    def _avalon_timeout_seconds(self, guild_id: int) -> int:
+        return max(30, int(_settings.get("games.avalon.action_timeout_seconds", 300, guild_id=guild_id)))
+
+    def _cancel_avalon_timeout(self, guild_id: int) -> None:
+        task = self._avalon_timeout_tasks.pop(guild_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_avalon_timeout(self, guild: discord.Guild, state: AvalonState) -> None:
+        self._cancel_avalon_timeout(guild.id)
+        phase = state.phase
+
+        async def runner() -> None:
+            try:
+                await asyncio.sleep(self._avalon_timeout_seconds(guild.id))
+                current = asyncio.current_task()
+                if self._avalon_timeout_tasks.get(guild.id) is current:
+                    self._avalon_timeout_tasks.pop(guild.id, None)
+                await self._resolve_avalon_timeout(guild, state, phase)
+            except asyncio.CancelledError:
+                return
+
+        self._avalon_timeout_tasks[guild.id] = asyncio.create_task(runner())
+
+    async def _resolve_avalon_timeout(self, guild: discord.Guild, state: AvalonState, phase: str) -> None:
+        if self._avalon_states.get(guild.id) is not state or state.phase != phase:
+            return
+        channel = guild.get_channel(state.channel_id)
+        if isinstance(channel, discord.TextChannel):
+            await channel.send("⏱️ Avalonの制限時間になったため、自動処理します。")
+        if phase == "team_select":
+            await self._reject_avalon_team(guild, state)
+        elif phase == "team_vote":
+            await self._resolve_avalon_team_vote(guild, state)
+        elif phase == "quest":
+            await self._resolve_avalon_quest(guild, state)
+        elif phase == "assassination":
+            await self._announce_avalon_end(guild, state, "暗殺が時間切れになったため、善陣営の勝ちです。")
 
     async def _run_werewolf(
         self,
@@ -1514,6 +1909,94 @@ class GameCommands(commands.Cog):
                 if ng:
                     notice += "\nDM失敗: " + ", ".join(ng[:5])
                 await channel.send(notice, delete_after=15)
+                return
+
+        for guild_id, state in list(self._avalon_states.items()):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+
+            if (
+                state.phase == "team_select"
+                and payload.message_id == state.team_selection_message_id
+            ):
+                leader_uid = state.participant_user_ids[state.leader_index % len(state.participant_user_ids)]
+                if payload.user_id != leader_uid:
+                    return
+                target_uid = None
+                for idx, uid in enumerate(state.participant_user_ids):
+                    if idx < len(self.AVALON_EMOJIS) and self.AVALON_EMOJIS[idx] == emoji:
+                        target_uid = uid
+                        break
+                if target_uid is None:
+                    return
+                selected = state.selected_team_user_ids or set()
+                if target_uid in selected:
+                    return
+                selected.add(target_uid)
+                state.selected_team_user_ids = selected
+                member = guild.get_member(leader_uid)
+                try:
+                    if member:
+                        dm = member.dm_channel or await member.create_dm()
+                        await dm.send(f"✅ チーム候補に <@{target_uid}> を追加しました。{len(selected)}/{state.team_size}")
+                except Exception:
+                    pass
+                if len(selected) >= state.team_size:
+                    self._cancel_avalon_timeout(guild.id)
+                    await self._start_avalon_team_vote(guild, state)
+                return
+
+            voter_uid = (state.vote_message_ids or {}).get(payload.message_id)
+            if voter_uid is not None:
+                if state.phase != "team_vote" or payload.user_id != voter_uid:
+                    return
+                if emoji not in {self.AVALON_APPROVE_EMOJI, self.AVALON_REJECT_EMOJI}:
+                    return
+                pending_votes = state.pending_votes or {}
+                pending_votes[voter_uid] = emoji == self.AVALON_APPROVE_EMOJI
+                state.pending_votes = pending_votes
+                delivered_count = len(set((state.vote_message_ids or {}).values()))
+                if len(pending_votes) >= delivered_count:
+                    self._cancel_avalon_timeout(guild.id)
+                    await self._resolve_avalon_team_vote(guild, state)
+                return
+
+            quest_user_id = (state.quest_message_ids or {}).get(payload.message_id)
+            if quest_user_id is not None:
+                if state.phase != "quest" or payload.user_id != quest_user_id:
+                    return
+                if emoji not in {self.AVALON_APPROVE_EMOJI, self.AVALON_REJECT_EMOJI}:
+                    return
+                if quest_user_id in state.good_user_ids and emoji == self.AVALON_REJECT_EMOJI:
+                    return
+                pending_cards = state.pending_quest_cards or {}
+                pending_cards[quest_user_id] = emoji == self.AVALON_APPROVE_EMOJI
+                state.pending_quest_cards = pending_cards
+                delivered_count = len(set((state.quest_message_ids or {}).values()))
+                if len(pending_cards) >= delivered_count:
+                    self._cancel_avalon_timeout(guild.id)
+                    await self._resolve_avalon_quest(guild, state)
+                return
+
+            if (
+                state.phase == "assassination"
+                and payload.message_id == state.assassin_message_id
+            ):
+                if payload.user_id != state.assassin_user_id:
+                    return
+                candidates = [uid for uid in state.participant_user_ids if uid not in state.evil_user_ids]
+                target_uid = None
+                for idx, uid in enumerate(candidates):
+                    if idx < len(self.AVALON_EMOJIS) and self.AVALON_EMOJIS[idx] == emoji:
+                        target_uid = uid
+                        break
+                if target_uid is None:
+                    return
+                if state.roles.get(target_uid) == "Merlin":
+                    await self._announce_avalon_end(guild, state, "AssassinがMerlinを暗殺したため、邪悪陣営の勝ちです。")
+                else:
+                    await self._announce_avalon_end(guild, state, "AssassinがMerlinを外したため、善陣営の勝ちです。")
                 return
 
         if emoji not in self.WEREWOLF_EMOJIS:
