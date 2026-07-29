@@ -9,7 +9,6 @@ from typing import Any, Iterator, Optional, get_args, get_origin
 from urllib.parse import urlparse
 
 import requests
-
 from src.kennybot.utils.config import get_app_config
 from src.kennybot.utils.runtime_settings import get_settings
 
@@ -324,17 +323,7 @@ class OllamaClientService:
             status_code = getattr(err.response, "status_code", None)
             if status_code == 429:
                 models = get_app_config().ai_models()
-                fallback_models: list[str] = []
-                for candidate in (
-                    _OLLAMA_FALLBACK_MODEL,
-                    models.chat.strip(),
-                    models.summary.strip(),
-                    models.default.strip(),
-                ):
-                    if not candidate or self._is_gemini_model(candidate):
-                        continue
-                    if candidate not in fallback_models:
-                        fallback_models.append(candidate)
+                fallback_models = self._ollama_fallback_models(models=models)
                 logger.warning(
                     "Gemini rate limited for model %s; falling back to Ollama models %s",
                     model,
@@ -470,17 +459,37 @@ class OllamaClientService:
 
     def _configured_fallback_models(self, primary_model: str) -> list[str]:
         models = get_app_config().ai_models()
+        candidates = self._ollama_fallback_models(models=models)
+        if not candidates:
+            candidates = [
+                value
+                for value in (
+                    models.chat.strip(),
+                    models.summary.strip(),
+                    models.default.strip(),
+                )
+                if value and not self._is_gemini_model(value)
+            ]
+        return [
+            candidate
+            for candidate in candidates
+            if candidate and candidate != primary_model
+        ]
+
+    def _ollama_fallback_models(self, *, models: object | None = None) -> list[str]:
+        if models is None:
+            models = get_app_config().ai_models()
         candidates: list[str] = []
+        configured = getattr(models, "fallback", ()) or ()
         for candidate in (
             _OLLAMA_FALLBACK_MODEL,
-            models.chat.strip(),
-            models.summary.strip(),
-            models.default.strip(),
+            *configured,
         ):
-            if not candidate or candidate == primary_model:
+            model = str(candidate or "").strip()
+            if not model or self._is_gemini_model(model):
                 continue
-            if candidate not in candidates:
-                candidates.append(candidate)
+            if model not in candidates:
+                candidates.append(model)
         return candidates
 
     def _candidate_models(

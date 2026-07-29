@@ -16,6 +16,7 @@ class AIModelConfig:
     chat: str
     summary: str
     embedding: str
+    fallback: tuple[str, ...]
     timeout_sec: int
 
 
@@ -53,6 +54,22 @@ class AppConfig:
                 return value
         return default
 
+    def _model_tuple(self, value) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            items = value.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            items = value
+        else:
+            items = (value,)
+        out: list[str] = []
+        for item in items:
+            model = str(item or "").strip()
+            if model and model not in out:
+                out.append(model)
+        return tuple(out)
+
     def ai_models(self, *, guild_id: int | None = None) -> AIModelConfig:
         return AIModelConfig(
             default=str(
@@ -84,6 +101,14 @@ class AppConfig:
                     "ai.models.embedding",
                     "ollama.model_embedding",
                     default="embeddinggemma",
+                    guild_id=guild_id,
+                )
+            ),
+            fallback=self._model_tuple(
+                self._get_first(
+                    "ai.models.fallback",
+                    "ai.models.fallbacks",
+                    default=(),
                     guild_id=guild_id,
                 )
             ),
