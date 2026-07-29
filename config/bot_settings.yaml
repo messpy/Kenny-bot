@@ -6,7 +6,7 @@ global:
       summary: gemini-2.5-flash
       embedding: embeddinggemma
       fallback:
-      - qwen3.5:122b
+      - gpt-oss:120b-cloud
     timeout_sec: 180
   chat:
     history_lines: 100

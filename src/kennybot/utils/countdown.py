@@ -107,9 +107,15 @@ class ChannelCountdown:
                 await asyncio.sleep(step)
                 remain = timer.remaining_seconds()
                 if remain > 0:
-                    await msg.edit(content=f"{prefix}⏳ 残り {remain} 秒", allowed_mentions=discord.AllowedMentions.none())
+                    try:
+                        await msg.edit(content=f"{prefix}⏳ 残り {remain} 秒", allowed_mentions=discord.AllowedMentions.none())
+                    except discord.NotFound:
+                        return
                 elif done_text:
-                    await msg.edit(content=f"{prefix}{done_text}", allowed_mentions=discord.AllowedMentions.none())
+                    try:
+                        await msg.edit(content=f"{prefix}{done_text}", allowed_mentions=discord.AllowedMentions.none())
+                    except discord.NotFound:
+                        return
                     if on_done is not None:
                         out = on_done(msg)
                         if hasattr(out, "__await__"):
@@ -158,7 +164,13 @@ class ChannelCountdown:
                     self._messages[key] = msg
                 else:
                     current_msg = msg
-                    await msg.edit(content=f"{prefix}{text}", allowed_mentions=discord.AllowedMentions.none())
+                    try:
+                        await msg.edit(content=f"{prefix}{text}", allowed_mentions=discord.AllowedMentions.none())
+                    except discord.NotFound:
+                        if self._messages.get(key) is msg:
+                            self._messages.pop(key, None)
+                        current_msg = None
+                        return
         except asyncio.CancelledError:
             cancelled = True
             if send_task is not None:

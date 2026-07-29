@@ -22,7 +22,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
                 "chat": "gpt-oss:120b",
                 "summary": "gpt-oss:120b",
                 "embedding": "embeddinggemma",
-                "fallback": ["qwen3.5:122b"],
+                "fallback": ["gpt-oss:120b-cloud"],
             },
             "timeout_sec": 180,
         },

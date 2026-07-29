@@ -330,9 +330,7 @@ class OllamaClientService:
                     ", ".join(fallback_models),
                 )
                 last_error: Exception | None = None
-                fallback_clients = [self.client]
-                if self._local_fallback_client is not None:
-                    fallback_clients.append(self._local_fallback_client)
+                fallback_clients = self._gemini_rate_limit_fallback_clients()
                 for fallback_client in fallback_clients:
                     for fallback_model in fallback_models:
                         try:
@@ -433,6 +431,16 @@ class OllamaClientService:
         text = (getattr(err, "error", "") or str(err)).lower()
         return "unauthorized" in text or getattr(err, "status_code", None) == 401
 
+    def _gemini_rate_limit_fallback_clients(self) -> list[Client]:
+        clients: list[Client] = []
+        local_client = getattr(self, "_local_fallback_client", None)
+        if local_client is not None:
+            clients.append(local_client)
+        primary_client = getattr(self, "client", None)
+        if primary_client is not None and primary_client not in clients:
+            clients.append(primary_client)
+        return clients
+
     def _ensure_model_available(self, model: str) -> None:
         if model in self._ensured_models:
             return
@@ -454,7 +462,13 @@ class OllamaClientService:
     def _normalize_local_fallback_model(self, model: str) -> str:
         value = (model or "").strip()
         if value.endswith("-cloud"):
-            return value[: -len("-cloud")]
+            available_models = set(self._available_local_fallback_models())
+            if value in available_models:
+                return value
+            stripped_value = value[: -len("-cloud")]
+            if stripped_value in available_models:
+                return stripped_value
+            return stripped_value
         return value
 
     def _configured_fallback_models(self, primary_model: str) -> list[str]:
@@ -490,7 +504,40 @@ class OllamaClientService:
                 continue
             if model not in candidates:
                 candidates.append(model)
+        for model in self._available_local_fallback_models():
+            if model not in candidates:
+                candidates.append(model)
         return candidates
+
+    def _available_local_fallback_models(self) -> list[str]:
+        client = getattr(self, "_local_fallback_client", None)
+        config = getattr(self, "config", None)
+        if client is None and config is not None and config._is_local_host():
+            client = getattr(self, "client", None)
+        if client is None:
+            return []
+        try:
+            response = client.list()
+        except Exception:
+            return []
+        if isinstance(response, dict):
+            models = response.get("models", [])
+        else:
+            models = getattr(response, "models", []) or []
+        names: list[str] = []
+        for item in models:
+            if isinstance(item, dict):
+                name = str(item.get("model") or item.get("name") or "").strip()
+            else:
+                name = str(getattr(item, "model", "") or getattr(item, "name", "") or "").strip()
+            if not name or self._is_gemini_model(name) or "embed" in name.lower():
+                continue
+            if name not in names:
+                names.append(name)
+        preferred_prefixes = ("gpt-oss", "qwen", "gemma", "llama", "mistral", "LiquidAI/")
+        preferred = [name for name in names if name.startswith(preferred_prefixes)]
+        others = [name for name in names if name not in preferred]
+        return preferred + others
 
     def _candidate_models(
         self,

@@ -34,6 +34,7 @@ if "discord" not in sys.modules:
             return None
 
     discord.AllowedMentions = _AllowedMentions
+    discord.NotFound = type("NotFound", (Exception,), {})
     discord.abc = _DiscordSubmodule("discord.abc")
     discord.abc.__path__ = []
     discord.abc.Messageable = object
@@ -45,18 +46,23 @@ if "discord" not in sys.modules:
     sys.modules["discord.abc"] = discord.abc
     sys.modules["discord.utils"] = utils
 
+sys.modules["discord"].NotFound = type("NotFound", (Exception,), {})
+
 from src.kennybot.utils.countdown import ChannelCountdown
 
 
 class _FakeMessage:
-    def __init__(self) -> None:
+    def __init__(self, *, raise_not_found_on_edit: bool = False) -> None:
         self.deleted = False
         self.edits: list[str] = []
+        self.raise_not_found_on_edit = raise_not_found_on_edit
 
     async def delete(self) -> None:
         self.deleted = True
 
     async def edit(self, *, content: str, allowed_mentions=None) -> None:
+        if self.raise_not_found_on_edit:
+            raise sys.modules["discord"].NotFound()
         self.edits.append(content)
 
 
@@ -69,6 +75,14 @@ class _SlowSendChannel:
     async def send(self, content: str, allowed_mentions=None) -> _FakeMessage:
         self.send_started.set()
         await self.release_send.wait()
+        return self.message
+
+
+class _ImmediateSendChannel:
+    def __init__(self, message: _FakeMessage) -> None:
+        self.message = message
+
+    async def send(self, content: str, allowed_mentions=None) -> _FakeMessage:
         return self.message
 
 
@@ -103,6 +117,25 @@ class CountdownTests(unittest.TestCase):
 
             self.assertTrue(channel.message.deleted)
             self.assertIsNone(countdown.get_message("progress"))
+
+        asyncio.run(scenario())
+
+    def test_countup_stops_when_progress_message_was_deleted(self) -> None:
+        async def scenario() -> None:
+            countdown = ChannelCountdown()
+            message = _FakeMessage(raise_not_found_on_edit=True)
+            channel = _ImmediateSendChannel(message)
+
+            await countdown.start_countup(
+                key="progress",
+                channel=channel,
+                text_factory=lambda elapsed: f"tick {elapsed}",
+                initial_delay_seconds=0,
+            )
+            await asyncio.sleep(2.2)
+
+            self.assertIsNone(countdown.get_message("progress"))
+            self.assertNotIn("progress", countdown._tasks)
 
         asyncio.run(scenario())
 
