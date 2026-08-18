@@ -96,6 +96,7 @@ COMMAND_CATEGORY_ORDER: tuple[str, ...] = (
     "議事録",
     "ロール",
     "モデレーション",
+    "管理",
     "予定",
     "読み上げ",
     "ゲーム・ユーティリティ",
@@ -171,6 +172,11 @@ SLASH_COMMANDS: dict[str, SlashCommandMeta] = {
         name="modpanel",
         description="スパム管理パネルを作成",
         category="モデレーション",
+    ),
+    "admin_send": SlashCommandMeta(
+        name="admin_send",
+        description="管理チャンネルから指定サーバーのチャンネルへ投稿",
+        category="管理",
     ),
     "birthday": SlashCommandMeta(
         name="birthday",

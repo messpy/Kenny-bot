@@ -331,6 +331,84 @@ class PingCommandTests(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_awaited_once()
         self.assertIn("成功 1 / 失敗 0", channel.send.await_args.args[0])
 
+    def test_parse_admin_send_reactions_combines_preset_and_custom(self) -> None:
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+
+        reactions = cog._parse_admin_send_reactions("yes_no", "👍,✅ ✅")
+
+        self.assertEqual(reactions, ["👍", "👎", "✅"])
+
+    async def test_admin_send_requires_management_channel(self) -> None:
+        bot = SimpleNamespace(latency=0.1)
+        cog = SlashCommands(bot)
+        response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response,
+            channel_id=999,
+            user=SimpleNamespace(id=2, guild_permissions=SimpleNamespace(administrator=True)),
+        )
+
+        with patch.object(cog, "_management_channel_ids", return_value={123}):
+            await SlashCommands.admin_send.callback(
+                cog,
+                interaction,
+                "111111111111111111",
+                "222222222222222222",
+                "hello",
+            )
+
+        response.send_message.assert_awaited_once()
+        self.assertIn("管理チャンネル", response.send_message.await_args.args[0])
+        response.defer.assert_not_awaited()
+
+    async def test_admin_send_posts_to_target_channel_with_reactions(self) -> None:
+        sent_message = SimpleNamespace(id=333333333333333333, add_reaction=AsyncMock())
+        target_channel = SimpleNamespace(
+            id=222222222222222222,
+            name="notice",
+            mention="<#222222222222222222>",
+            send=AsyncMock(return_value=sent_message),
+        )
+        target_guild = SimpleNamespace(
+            id=111111111111111111,
+            name="Target",
+            get_channel_or_thread=Mock(return_value=target_channel),
+        )
+        target_channel.guild = target_guild
+        bot = SimpleNamespace(
+            latency=0.1,
+            get_guild=Mock(return_value=target_guild),
+        )
+        cog = SlashCommands(bot)
+        response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
+        followup = SimpleNamespace(send=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response,
+            followup=followup,
+            channel_id=123,
+            user=SimpleNamespace(id=2, guild_permissions=SimpleNamespace(administrator=True)),
+        )
+
+        with patch.object(cog, "_management_channel_ids", return_value={123}):
+            await SlashCommands.admin_send.callback(
+                cog,
+                interaction,
+                "111111111111111111",
+                "222222222222222222",
+                "hello",
+                SimpleNamespace(value="yes_no"),
+                "✅",
+            )
+
+        response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        target_channel.send.assert_awaited_once_with("hello")
+        sent_message.add_reaction.assert_any_await("👍")
+        sent_message.add_reaction.assert_any_await("👎")
+        sent_message.add_reaction.assert_any_await("✅")
+        followup.send.assert_awaited_once()
+        self.assertIn("送信しました", followup.send.await_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

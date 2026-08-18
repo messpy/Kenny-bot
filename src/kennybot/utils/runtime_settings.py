@@ -121,6 +121,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
         "admin": {
             "authoritative_correction_user_ids": [387651883847909376],
+            "management_channel_ids": [],
         },
         "keyword_reactions": {
             "いいね": "👍",

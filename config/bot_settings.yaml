@@ -153,6 +153,8 @@ global:
   admin:
     authoritative_correction_user_ids:
     - 387651883847909376
+    management_channel_ids:
+    - 1005826751391342663
   keyword_reactions:
     いいね: 👍
     ミュ: 🐈

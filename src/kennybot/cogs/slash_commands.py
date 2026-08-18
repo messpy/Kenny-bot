@@ -68,6 +68,7 @@ GROUP_MATCH_META = get_slash_command_meta("group_match")
 MOD_PANEL_META = get_slash_command_meta("modpanel")
 VRCHAT_WORLD_META = get_slash_command_meta("vrchat_world")
 VRC_USER_META = get_slash_command_meta("vrc_user")
+ADMIN_SEND_META = get_slash_command_meta("admin_send")
 
 
 @dataclass
@@ -262,6 +263,7 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="議事録文字起こしプロバイダ", value="meeting.transcription_provider"),
         app_commands.Choice(name="Google STT 言語コード", value="meeting.google_language_code"),
         app_commands.Choice(name="管理者訂正ユーザーID一覧", value="admin.authoritative_correction_user_ids"),
+        app_commands.Choice(name="管理コマンド許可チャンネルID一覧", value="admin.management_channel_ids"),
         app_commands.Choice(name="同時実行数", value="security.ai_max_concurrency"),
         app_commands.Choice(name="チャンネル間隔秒", value="security.ai_channel_cooldown_seconds"),
         app_commands.Choice(name="入力最大文字数", value="security.max_user_message_chars"),
@@ -302,6 +304,7 @@ class SlashCommands(commands.Cog):
     }
     _INT_LIST_KEYS = {
         "admin.authoritative_correction_user_ids",
+        "admin.management_channel_ids",
     }
     _BOOL_KEYS = {
         "kenny_chat.block_invite_and_mass_mention",
@@ -330,6 +333,126 @@ class SlashCommands(commands.Cog):
         app_commands.Choice(name="summary", value="summary"),
         app_commands.Choice(name="embedding", value="embedding"),
     ]
+    _ADMIN_SEND_REACTION_PRESET_CHOICES = [
+        app_commands.Choice(name="なし", value="none"),
+        app_commands.Choice(name="確認: ✅", value="confirm"),
+        app_commands.Choice(name="賛否: 👍 👎", value="yes_no"),
+        app_commands.Choice(name="今日の言語: ✋ 👀 ✅ ⚠️", value="today_language"),
+        app_commands.Choice(name="参加/開始: 🎮 ▶️", value="game"),
+        app_commands.Choice(name="議事録: ⏯️ ⏹️ 🎶 ▶️", value="minutes"),
+    ]
+
+    def _management_channel_ids(self) -> set[int]:
+        ids = set(self._cfg_int_list("admin.management_channel_ids"))
+        event_channel_id = _settings.get("logging.event_channel_id", 0)
+        try:
+            if int(event_channel_id):
+                ids.add(int(event_channel_id))
+        except Exception:
+            pass
+        return ids
+
+    async def _ensure_management_channel_admin(self, interaction: discord.Interaction) -> bool:
+        if not await self._ensure_admin_like(interaction):
+            return False
+        channel_id = int(getattr(interaction, "channel_id", 0) or 0)
+        allowed_channel_ids = self._management_channel_ids()
+        if channel_id and channel_id in allowed_channel_ids:
+            return True
+        if not allowed_channel_ids:
+            await interaction.response.send_message(
+                "`admin.management_channel_ids` または `logging.event_channel_id` を設定してください。",
+                ephemeral=True,
+            )
+            return False
+        allowed = ", ".join(str(value) for value in sorted(allowed_channel_ids))
+        await interaction.response.send_message(
+            f"このコマンドは管理チャンネルでのみ実行できます。許可チャンネルID: `{allowed}`",
+            ephemeral=True,
+        )
+        return False
+
+    @staticmethod
+    def _parse_discord_id(label: str, raw: str) -> int:
+        text = str(raw or "").strip()
+        match = re.fullmatch(r"<?#?(\d{15,25})>?", text)
+        if not match:
+            raise ValueError(f"{label} は Discord ID で指定してください。")
+        return int(match.group(1))
+
+    def _admin_send_preset_reactions(self, preset: str, *, guild_id: int | None = None) -> list[str]:
+        key = (preset or "none").strip().lower()
+        if key in {"", "none"}:
+            return []
+        if key == "confirm":
+            return [get_reaction_emoji("vc.join", guild_id=guild_id)]
+        if key == "yes_no":
+            return ["👍", "👎"]
+        if key == "today_language":
+            return [
+                get_reaction_emoji("weekly_today_language.unknown", guild_id=guild_id),
+                get_reaction_emoji("weekly_today_language.known", guild_id=guild_id),
+                get_reaction_emoji("weekly_today_language.learned", guild_id=guild_id),
+                get_reaction_emoji("weekly_today_language.issue", guild_id=guild_id),
+            ]
+        if key == "game":
+            return [
+                get_reaction_emoji("game.join", guild_id=guild_id),
+                get_reaction_emoji("game.start", guild_id=guild_id),
+            ]
+        if key == "minutes":
+            return [
+                get_reaction_emoji("minutes.summary", guild_id=guild_id),
+                get_reaction_emoji("minutes.stop", guild_id=guild_id),
+                get_reaction_emoji("minutes.playback", guild_id=guild_id),
+                get_reaction_emoji("minutes.realtime", guild_id=guild_id),
+            ]
+        return []
+
+    def _parse_admin_send_reactions(
+        self,
+        preset: str | None,
+        custom_reactions: str | None,
+        *,
+        guild_id: int | None = None,
+    ) -> list[str]:
+        reactions = self._admin_send_preset_reactions(preset or "none", guild_id=guild_id)
+        for item in re.split(r"[\s,]+", str(custom_reactions or "").strip()):
+            emoji = item.strip()
+            if emoji:
+                reactions.append(emoji)
+        out: list[str] = []
+        seen: set[str] = set()
+        for emoji in reactions:
+            aliases = reaction_aliases(emoji)
+            if aliases & seen:
+                continue
+            seen.update(aliases)
+            out.append(emoji)
+        return out[:20]
+
+    async def _resolve_admin_send_channel(self, guild_id: int, channel_id: int):
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            raise ValueError("Bot が対象サーバーに参加していません。")
+
+        channel = None
+        get_channel_or_thread = getattr(guild, "get_channel_or_thread", None)
+        if callable(get_channel_or_thread):
+            channel = get_channel_or_thread(channel_id)
+        if channel is None and hasattr(guild, "get_channel"):
+            channel = guild.get_channel(channel_id)
+        if channel is None and hasattr(self.bot, "get_channel"):
+            channel = self.bot.get_channel(channel_id)
+        if channel is None and hasattr(self.bot, "fetch_channel"):
+            channel = await self.bot.fetch_channel(channel_id)
+
+        channel_guild = getattr(channel, "guild", guild)
+        if channel is None or int(getattr(channel_guild, "id", 0) or 0) != guild_id:
+            raise ValueError("対象チャンネルが対象サーバー内に見つかりません。")
+        if not hasattr(channel, "send"):
+            raise ValueError("対象チャンネルにはメッセージを送信できません。")
+        return guild, channel
 
     def _autocomplete_config_keys(self, current: str) -> list[app_commands.Choice[str]]:
         query = (current or "").strip().lower()
@@ -1904,6 +2027,87 @@ class SlashCommands(commands.Cog):
         await msg.add_reaction(get_reaction_emoji("mod_reset"))
         await msg.add_reaction(get_reaction_emoji("mod_list"))
         await interaction.response.send_message("✅ モデレーションパネルを作成しました。", ephemeral=True)
+
+    @app_commands.command(name=ADMIN_SEND_META.name, description=ADMIN_SEND_META.description)
+    @app_commands.checks.cooldown(2, 10.0)
+    @app_commands.describe(
+        guild_id="送信先サーバーID",
+        channel_id="送信先チャンネルID",
+        message="送信する本文",
+        reaction_preset="追加するリアクションのプリセット",
+        reactions="追加リアクション。複数はスペースまたはカンマ区切り",
+    )
+    @app_commands.choices(reaction_preset=_ADMIN_SEND_REACTION_PRESET_CHOICES)
+    async def admin_send(
+        self,
+        interaction: discord.Interaction,
+        guild_id: str,
+        channel_id: str,
+        message: app_commands.Range[str, 1, 2000],
+        reaction_preset: app_commands.Choice[str] | None = None,
+        reactions: str | None = None,
+    ):
+        if not await self._ensure_management_channel_admin(interaction):
+            return
+        try:
+            target_guild_id = self._parse_discord_id("guild_id", guild_id)
+            target_channel_id = self._parse_discord_id("channel_id", channel_id)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            target_guild, target_channel = await self._resolve_admin_send_channel(target_guild_id, target_channel_id)
+        except ValueError as e:
+            await interaction.followup.send(str(e), ephemeral=True)
+            return
+        except (discord.Forbidden, discord.NotFound):
+            await interaction.followup.send("対象チャンネルを取得する権限がありません。", ephemeral=True)
+            return
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                f"対象チャンネルの取得に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
+                ephemeral=True,
+            )
+            return
+
+        reaction_values = self._parse_admin_send_reactions(
+            reaction_preset.value if reaction_preset else None,
+            reactions,
+            guild_id=target_guild_id,
+        )
+        try:
+            sent_message = await target_channel.send(str(message))
+        except (discord.Forbidden, discord.NotFound):
+            await interaction.followup.send("対象チャンネルへ送信する権限がありません。", ephemeral=True)
+            return
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                f"送信に失敗しました: {sanitize_user_visible_error(e, max_chars=180)}",
+                ephemeral=True,
+            )
+            return
+
+        added_reactions: list[str] = []
+        failed_reactions: list[str] = []
+        for emoji in reaction_values:
+            try:
+                await sent_message.add_reaction(emoji)
+                added_reactions.append(emoji)
+            except discord.HTTPException:
+                failed_reactions.append(emoji)
+
+        target_name = getattr(target_channel, "mention", None) or f"#{getattr(target_channel, 'name', target_channel_id)}"
+        lines = [
+            f"送信しました: {target_guild.name} / {target_name}",
+            f"message_id=`{sent_message.id}`",
+        ]
+        if added_reactions:
+            lines.append(f"リアクション追加: {' '.join(added_reactions)}")
+        if failed_reactions:
+            lines.append(f"追加失敗: {' '.join(failed_reactions)}")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name=MINUTES_META.name, description=MINUTES_META.description)
     @app_commands.describe(
