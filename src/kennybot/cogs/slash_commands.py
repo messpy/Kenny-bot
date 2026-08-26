@@ -1699,6 +1699,7 @@ class SlashCommands(commands.Cog):
         if not ((os.getenv("GEMINI_API_KEY") or "").strip() or (os.getenv("GOOGLE_API_KEY") or "").strip()):
             return []
         return [
+            "gemini-3.7-flash",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
             "gemini-2.0-flash",

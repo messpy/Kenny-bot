@@ -107,6 +107,14 @@ def _safe_post_text(value: str, *, max_chars: int = 1900) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+def _recent_post_summary(value: str, *, max_chars: int = 180) -> str:
+    lines = [" ".join(line.split()) for line in (value or "").splitlines()]
+    text = " / ".join(line for line in lines if line).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
 def _reaction_emojis(item: dict[str, Any]) -> list[str]:
     language_section = item.get("today_language")
     if not isinstance(language_section, dict):
@@ -198,8 +206,53 @@ class WeeklyAiPosts(commands.Cog):
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
-    def _build_prompt(self, item: dict[str, Any]) -> str:
+    def _recent_posts_for_prompt(self, item_id: str, *, limit: int) -> list[str]:
+        state_item = self._state.get(item_id)
+        if not isinstance(state_item, dict):
+            return []
+        posts = state_item.get("recent_posts")
+        if not isinstance(posts, list):
+            return []
+        summaries: list[str] = []
+        for entry in reversed(posts):
+            if not isinstance(entry, dict):
+                continue
+            summary = str(entry.get("summary") or "").strip()
+            if summary:
+                summaries.append(summary)
+            if len(summaries) >= limit:
+                break
+        return summaries
+
+    def _remember_sent_post(self, item_id: str, *, marker: str, sent_at: str, text: str, limit: int) -> None:
+        state_item = self._state.setdefault(item_id, {})
+        if not isinstance(state_item, dict):
+            state_item = {}
+            self._state[item_id] = state_item
+        posts = state_item.get("recent_posts")
+        if not isinstance(posts, list):
+            posts = []
+        summary = _recent_post_summary(text)
+        posts.append({"date": marker, "sent_at": sent_at, "summary": summary})
+        state_item["recent_posts"] = posts[-max(1, limit) :]
+
+    def _build_prompt(self, item: dict[str, Any], recent_posts: list[str] | None = None) -> str:
         prompt = str(item.get("prompt") or "").strip()
+        if recent_posts:
+            recent_block = "\n".join(f"- {summary}" for summary in recent_posts)
+            prompt = "\n\n".join(
+                part
+                for part in (
+                    prompt,
+                    (
+                        "重複回避:\n"
+                        "最近投稿した豆知識は以下です。同じ国・地域・文化圏・人物・料理・祭り・語源・"
+                        "出来事など、中心題材が同じネタは避けてください。言い換えだけの再投稿も禁止です。\n"
+                        f"{recent_block}"
+                    ),
+                )
+                if part.strip()
+            )
         language_section = item.get("today_language")
         if isinstance(language_section, dict) and bool(language_section.get("enabled", False)):
             prompt = "\n\n".join(
@@ -226,10 +279,10 @@ class WeeklyAiPosts(commands.Cog):
         ).strip()
         return f"{system_prompt}\n\n{prompt}".strip()
 
-    async def _generate_text(self, item: dict[str, Any]) -> str | None:
+    async def _generate_text(self, item: dict[str, Any], *, recent_posts: list[str] | None = None) -> str | None:
         settings = get_settings()
         model = str(item.get("model") or settings.get("ai.models.chat", "") or "").strip()
-        prompt = self._build_prompt(item)
+        prompt = self._build_prompt(item, recent_posts=recent_posts)
         if not model or not prompt:
             return None
         fallback_models = [
@@ -285,13 +338,21 @@ class WeeklyAiPosts(commands.Cog):
             channel = await self._resolve_channel(channel_id)
             if channel is None:
                 continue
-            self._state[item_id] = {"last_attempt_date": marker, "last_attempt_at": now.isoformat()}
+            state_item = self._state.setdefault(item_id, {})
+            if not isinstance(state_item, dict):
+                state_item = {}
+                self._state[item_id] = state_item
+            state_item["last_attempt_date"] = marker
+            state_item["last_attempt_at"] = now.isoformat()
             self._save_state()
             content_key = self._content_key(item)
+            recent_history_limit = int(settings.get("weekly_ai_posts.recent_history_limit", 12) or 12)
+            recent_history_limit = max(1, min(int(item.get("recent_history_limit") or recent_history_limit), 50))
             if content_key in generated_text_by_key:
                 text = generated_text_by_key[content_key]
             else:
-                text = _safe_post_text(await self._generate_text(item) or "")
+                recent_posts = self._recent_posts_for_prompt(item_id, limit=recent_history_limit)
+                text = _safe_post_text(await self._generate_text(item, recent_posts=recent_posts) or "")
                 if text:
                     generated_text_by_key[content_key] = text
             if not text:
@@ -304,12 +365,21 @@ class WeeklyAiPosts(commands.Cog):
                         await sent.add_reaction(emoji)
                     except Exception:
                         logger.debug("Failed to add weekly AI post reaction: %s", emoji, exc_info=True)
-                self._state[item_id] = {
-                    "last_attempt_date": marker,
-                    "last_attempt_at": now.isoformat(),
-                    "last_sent_date": marker,
-                    "last_sent_at": now.isoformat(),
-                }
+                state_item = self._state.setdefault(item_id, {})
+                if not isinstance(state_item, dict):
+                    state_item = {}
+                    self._state[item_id] = state_item
+                state_item["last_attempt_date"] = marker
+                state_item["last_attempt_at"] = now.isoformat()
+                state_item["last_sent_date"] = marker
+                state_item["last_sent_at"] = now.isoformat()
+                self._remember_sent_post(
+                    item_id,
+                    marker=marker,
+                    sent_at=now.isoformat(),
+                    text=text,
+                    limit=recent_history_limit,
+                )
                 self._save_state()
                 logger.info("Sent weekly AI post: %s channel=%s", item_id, channel_id)
             except Exception:

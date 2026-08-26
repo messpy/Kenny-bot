@@ -76,6 +76,14 @@ if hasattr(discord, "AllowedMentions") and not hasattr(discord.AllowedMentions, 
     discord.AllowedMentions.none = staticmethod(lambda: None)  # type: ignore[attr-defined]
 
 URL_RE = re.compile(r"https?://[^\s)>\"]+")
+DISCORD_MESSAGE_URL_RE = re.compile(
+    r"https?://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/channels/"
+    r"(?P<guild_id>\d{17,20})/(?P<channel_id>\d{17,20})/(?P<message_id>\d{17,20})"
+)
+MESSAGE_ID_REF_RE = re.compile(
+    r"(?:message[_\s-]*id|メッセージ\s*ID|メッセージid)\s*[:：=]?\s*(?P<message_id>\d{17,20})",
+    re.IGNORECASE,
+)
 RAG_HEADER_RE = re.compile(r"^\[([^\]]+)\]")
 IMAGE_GENERATION_RE = re.compile(
     r"(画像|絵|イラスト|picture|image|art).{0,18}(生成|作成|作って|つくって|描いて|書いて|generate|create|draw)"
@@ -2961,6 +2969,190 @@ class MessageLogger(BaseCog):
         blocks = [f"[{item.label}]\n{item.body}" for item in contexts]
         return "\n\n".join(blocks)
 
+    def _extract_discord_message_refs(self, text: str) -> list[dict[str, int | None]]:
+        refs: list[dict[str, int | None]] = []
+        seen: set[tuple[int | None, int | None, int]] = set()
+        text_without_urls = text or ""
+        for match in DISCORD_MESSAGE_URL_RE.finditer(text or ""):
+            guild_id = int(match.group("guild_id"))
+            channel_id = int(match.group("channel_id"))
+            message_id = int(match.group("message_id"))
+            key = (guild_id, channel_id, message_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                }
+            )
+            text_without_urls = text_without_urls.replace(match.group(0), " ")
+        for match in MESSAGE_ID_REF_RE.finditer(text_without_urls):
+            message_id = int(match.group("message_id"))
+            key = (None, None, message_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "guild_id": None,
+                    "channel_id": None,
+                    "message_id": message_id,
+                }
+            )
+        return refs[:5]
+
+    async def _resolve_channel_for_message_ref(
+        self,
+        *,
+        msg: discord.Message,
+        ref: dict[str, int | None],
+    ) -> object | None:
+        if msg.guild is None:
+            return None
+        current_guild_id = int(msg.guild.id)
+        ref_guild_id = ref.get("guild_id")
+        if ref_guild_id is not None and int(ref_guild_id) != current_guild_id:
+            return None
+
+        channel_id = ref.get("channel_id")
+        if channel_id is None:
+            try:
+                row = await asyncio.to_thread(
+                    self._vector_store.find_message_location,
+                    guild_id=current_guild_id,
+                    message_id=int(ref["message_id"] or 0),
+                )
+            except Exception:
+                logger.debug("Failed to lookup message location from vector store", exc_info=True)
+                row = None
+            if row and int(row.get("guild_id") or 0) == current_guild_id:
+                channel_id = int(row.get("channel_id") or 0)
+        if channel_id is None:
+            channel_id = int(getattr(msg.channel, "id", 0) or 0)
+        if not channel_id:
+            return None
+
+        channel = None
+        guild_get_channel = getattr(msg.guild, "get_channel_or_thread", None)
+        if callable(guild_get_channel):
+            channel = guild_get_channel(int(channel_id))
+        if channel is None:
+            guild_get_channel = getattr(msg.guild, "get_channel", None)
+            if callable(guild_get_channel):
+                channel = guild_get_channel(int(channel_id))
+        if channel is None:
+            bot_get_channel = getattr(self.bot, "get_channel", None)
+            if callable(bot_get_channel):
+                channel = bot_get_channel(int(channel_id))
+        if channel is None:
+            bot_fetch_channel = getattr(self.bot, "fetch_channel", None)
+            if callable(bot_fetch_channel):
+                try:
+                    channel = await bot_fetch_channel(int(channel_id))
+                except Exception:
+                    channel = None
+
+        channel_guild_id = int(getattr(getattr(channel, "guild", None), "id", 0) or 0)
+        if channel_guild_id and channel_guild_id != current_guild_id:
+            return None
+        if not hasattr(channel, "fetch_message"):
+            return None
+        return channel
+
+    def _format_referenced_discord_message(self, message: object) -> str:
+        author = getattr(message, "author", None)
+        author_name = (
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or str(getattr(author, "id", "Unknown"))
+        )
+        author_id = int(getattr(author, "id", 0) or 0)
+        channel = getattr(message, "channel", None)
+        channel_name = getattr(channel, "name", None) or str(getattr(channel, "id", "unknown"))
+        channel_id = int(getattr(channel, "id", 0) or 0)
+        created_at = getattr(message, "created_at", None)
+        timestamp = self._format_profile_dt(created_at) if created_at else "不明"
+        content = self._sanitize_for_prompt(
+            str(getattr(message, "content", "") or ""),
+            self._cfg_int("chat.referenced_message_max_chars", 1200),
+        )
+        attachments = []
+        for attachment in getattr(message, "attachments", []) or []:
+            filename = str(getattr(attachment, "filename", "") or "").strip()
+            url = str(getattr(attachment, "url", "") or "").strip()
+            label = filename or url
+            if label:
+                attachments.append(label)
+        if not content and attachments:
+            content = "(本文なし。添付あり)"
+        elif not content:
+            content = "(本文なし)"
+        lines = [
+            f"message_id: {getattr(message, 'id', '')}",
+            f"channel: #{channel_name} ({channel_id})",
+            f"author: {author_name} ({author_id})" if author_id else f"author: {author_name}",
+            f"created_at: {timestamp}",
+            f"content: {content}",
+        ]
+        jump_url = str(getattr(message, "jump_url", "") or "").strip()
+        if jump_url:
+            lines.append(f"url: {jump_url}")
+        if attachments:
+            lines.append(f"attachments: {', '.join(attachments[:4])}")
+        return "\n".join(lines)
+
+    async def _build_referenced_messages_context(
+        self,
+        *,
+        msg: discord.Message,
+        text: str,
+    ) -> tuple[str, list[str], list[str]]:
+        if msg.guild is None:
+            return "", [], []
+        refs = self._extract_discord_message_refs(text)
+        if not refs:
+            return "", [], []
+
+        blocks: list[str] = []
+        references: list[str] = []
+        details: list[str] = []
+        for ref in refs:
+            message_id = int(ref.get("message_id") or 0)
+            if message_id <= 0:
+                continue
+            if ref.get("guild_id") is not None and int(ref["guild_id"] or 0) != int(msg.guild.id):
+                details.append(f"discord_message skipped=other_guild message_id={message_id}")
+                continue
+            channel = await self._resolve_channel_for_message_ref(msg=msg, ref=ref)
+            if channel is None:
+                details.append(f"discord_message unresolved_channel message_id={message_id}")
+                continue
+            try:
+                message = await channel.fetch_message(message_id)
+            except Exception as exc:
+                exc_name = exc.__class__.__name__
+                if exc_name in {"Forbidden", "NotFound"}:
+                    details.append(f"discord_message inaccessible message_id={message_id}")
+                else:
+                    logger.debug("Failed to fetch referenced Discord message", exc_info=True)
+                    details.append(f"discord_message fetch_failed message_id={message_id}")
+                continue
+            message_guild_id = int(getattr(getattr(message, "guild", None), "id", 0) or 0)
+            if message_guild_id and message_guild_id != int(msg.guild.id):
+                details.append(f"discord_message skipped=other_guild message_id={message_id}")
+                continue
+            blocks.append(self._format_referenced_discord_message(message))
+            references.append(f"discord_message:{message_id}")
+            details.append(
+                f"discord_message message_id={message_id} channel_id={getattr(channel, 'id', 0)}"
+            )
+        if not blocks:
+            return "", references, details
+        return "\n\n".join(blocks), references, details
+
     def _get_channel_knowledge(
         self,
         *,
@@ -3317,6 +3509,14 @@ class MessageLogger(BaseCog):
         reason = str(plan.get("reason") or "").strip()
         if reason:
             details.append(f"planner_reason={reason}")
+
+        referenced_messages_context, referenced_message_refs, referenced_message_details = (
+            await self._build_referenced_messages_context(msg=msg, text=text)
+        )
+        if referenced_messages_context:
+            blocks.append(("明示参照されたDiscordメッセージ", referenced_messages_context))
+            references.extend(referenced_message_refs)
+        details.extend(referenced_message_details)
 
         if recent_history:
             blocks.append(("この会話の短い履歴", recent_history))

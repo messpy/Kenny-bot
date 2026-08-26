@@ -23,6 +23,7 @@ _GEMINI_API_BASE = os.getenv(
 ).rstrip("/")
 _OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
 _KNOWN_GEMINI_MODELS = (
+    "gemini-3.7-flash",
     "gemini-2.5-flash",
     "gemini-2.5-pro",
     "gemini-2.0-flash",

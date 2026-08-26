@@ -189,6 +189,29 @@ class MessageVectorStore:
             row = cursor.fetchone()
         return row is not None
 
+    def find_message_location(self, *, guild_id: int, message_id: int) -> dict[str, Any] | None:
+        with closing(self._connect()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                self._sql(
+                    "SELECT guild_id, channel_id, message_id, author_id, author, content, timestamp "
+                    "FROM message_embeddings WHERE guild_id = ? AND message_id = ? LIMIT 1"
+                ),
+                (int(guild_id), int(message_id)),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "guild_id": int(row["guild_id"]),
+            "channel_id": int(row["channel_id"]),
+            "message_id": int(row["message_id"]),
+            "author_id": int(row["author_id"]),
+            "author": str(row["author"]),
+            "content": str(row["content"]),
+            "timestamp": str(row["timestamp"]),
+        }
+
     def semantic_search(
         self,
         *,

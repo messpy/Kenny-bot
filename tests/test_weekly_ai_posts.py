@@ -53,7 +53,15 @@ if "discord" not in sys.modules:
     sys.modules["discord.ext.commands"] = commands
     sys.modules["discord.utils"] = utils
 
-from src.kennybot.cogs.weekly_ai_posts import WeeklyAiPosts, _due_marker, _is_daily_schedule, _parse_hhmm, _parse_weekday, _reaction_emojis, _safe_post_text
+from src.kennybot.cogs.weekly_ai_posts import (
+    WeeklyAiPosts,
+    _due_marker,
+    _is_daily_schedule,
+    _parse_hhmm,
+    _parse_weekday,
+    _reaction_emojis,
+    _safe_post_text,
+)
 
 
 class WeeklyAiPostsTests(unittest.TestCase):
@@ -95,6 +103,37 @@ class WeeklyAiPostsTests(unittest.TestCase):
         self.assertIn("知らなかったよって人は", prompt)
         self.assertIn("知ってた単語や豆知識があれば", prompt)
         self.assertIn("問題や間違いがありそうなら", prompt)
+
+    def test_build_prompt_includes_recent_posts_to_avoid_duplicates(self) -> None:
+        logger = WeeklyAiPosts.__new__(WeeklyAiPosts)
+        prompt = logger._build_prompt(
+            {"prompt": "海外豆知識を出す"},
+            recent_posts=["アイスランドの温泉文化", "メキシコの死者の日"],
+        )
+        self.assertIn("重複回避", prompt)
+        self.assertIn("中心題材が同じネタは避けてください", prompt)
+        self.assertIn("アイスランドの温泉文化", prompt)
+        self.assertIn("メキシコの死者の日", prompt)
+
+    def test_remember_sent_post_preserves_state_and_caps_history(self) -> None:
+        logger = WeeklyAiPosts.__new__(WeeklyAiPosts)
+        logger._state = {
+            "daily-trivia": {
+                "last_sent_date": "2026-07-25",
+                "recent_posts": [{"date": "2026-07-25", "sent_at": "old", "summary": "古い豆知識"}],
+            }
+        }
+        logger._remember_sent_post(
+            "daily-trivia",
+            marker="2026-07-26",
+            sent_at="2026-07-26T09:00:00+09:00",
+            text="新しい豆知識\n詳しい説明",
+            limit=1,
+        )
+        state_item = logger._state["daily-trivia"]
+        self.assertEqual(state_item["last_sent_date"], "2026-07-25")
+        self.assertEqual(len(state_item["recent_posts"]), 1)
+        self.assertEqual(state_item["recent_posts"][0]["summary"], "新しい豆知識 / 詳しい説明")
 
     def test_reaction_emojis_are_configurable(self) -> None:
         self.assertEqual(

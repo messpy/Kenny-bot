@@ -657,6 +657,148 @@ class MessageLoggerSummaryTests(unittest.TestCase):
 
         self.assertEqual(ids, ["101", "102", "103"])
 
+    def test_extract_discord_message_refs_supports_url_and_message_id_label(self) -> None:
+        text = (
+            "これ見て https://discord.com/channels/111111111111111111/"
+            "222222222222222222/333333333333333333 と "
+            "message_id:444444444444444444"
+        )
+
+        refs = self.logger._extract_discord_message_refs(text)
+
+        self.assertEqual(
+            refs,
+            [
+                {
+                    "guild_id": 111111111111111111,
+                    "channel_id": 222222222222222222,
+                    "message_id": 333333333333333333,
+                },
+                {
+                    "guild_id": None,
+                    "channel_id": None,
+                    "message_id": 444444444444444444,
+                },
+            ],
+        )
+
+    def test_extract_discord_message_refs_ignores_unlabeled_numbers(self) -> None:
+        refs = self.logger._extract_discord_message_refs("guild_id:664237144600215581")
+
+        self.assertEqual(refs, [])
+
+    def test_build_referenced_messages_context_fetches_same_guild_url(self) -> None:
+        import asyncio
+
+        guild = SimpleNamespace(id=111111111111111111)
+        author = SimpleNamespace(id=10, display_name="Alice", name="alice")
+        fetched = SimpleNamespace(
+            id=333333333333333333,
+            guild=guild,
+            channel=None,
+            author=author,
+            content="前に話した内容です",
+            created_at=None,
+            jump_url="https://discord.com/channels/111111111111111111/222222222222222222/333333333333333333",
+            attachments=[],
+        )
+        channel = SimpleNamespace(
+            id=222222222222222222,
+            name="general",
+            guild=guild,
+            fetch_message=AsyncMock(return_value=fetched),
+        )
+        fetched.channel = channel
+        guild.get_channel_or_thread = lambda channel_id: channel if channel_id == channel.id else None
+        msg = SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            content=fetched.jump_url,
+        )
+        self.logger.bot = SimpleNamespace(get_channel=lambda _channel_id: None)
+        self.logger._cfg_int = lambda _key, default=0: default
+        self.logger._sanitize_for_prompt = lambda text, _max_len: text
+
+        context, refs, details = asyncio.run(
+            self.logger._build_referenced_messages_context(msg=msg, text=msg.content)
+        )
+
+        self.assertIn("前に話した内容です", context)
+        self.assertIn("channel: #general", context)
+        self.assertEqual(refs, ["discord_message:333333333333333333"])
+        self.assertIn("discord_message message_id=333333333333333333 channel_id=222222222222222222", details)
+
+    def test_build_referenced_messages_context_skips_other_guild_url(self) -> None:
+        import asyncio
+
+        guild = SimpleNamespace(id=111111111111111111)
+        channel = SimpleNamespace(id=222222222222222222, name="general", guild=guild)
+        guild.get_channel_or_thread = lambda _channel_id: channel
+        msg = SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            content=(
+                "https://discord.com/channels/999999999999999999/"
+                "222222222222222222/333333333333333333"
+            ),
+        )
+        self.logger.bot = SimpleNamespace(get_channel=lambda _channel_id: None)
+
+        context, refs, details = asyncio.run(
+            self.logger._build_referenced_messages_context(msg=msg, text=msg.content)
+        )
+
+        self.assertEqual(context, "")
+        self.assertEqual(refs, [])
+        self.assertIn("discord_message skipped=other_guild message_id=333333333333333333", details)
+
+    def test_build_referenced_messages_context_uses_index_for_message_id_label(self) -> None:
+        import asyncio
+
+        guild = SimpleNamespace(id=111111111111111111)
+        author = SimpleNamespace(id=10, display_name="Alice", name="alice")
+        fetched = SimpleNamespace(
+            id=333333333333333333,
+            guild=guild,
+            channel=None,
+            author=author,
+            content="IDだけで参照した本文",
+            created_at=None,
+            jump_url="",
+            attachments=[],
+        )
+        channel = SimpleNamespace(
+            id=222222222222222222,
+            name="general",
+            guild=guild,
+            fetch_message=AsyncMock(return_value=fetched),
+        )
+        fetched.channel = channel
+        guild.get_channel_or_thread = lambda channel_id: channel if channel_id == channel.id else None
+        msg = SimpleNamespace(
+            guild=guild,
+            channel=SimpleNamespace(id=999999999999999999, name="current", guild=guild),
+            content="message_id:333333333333333333 を見て",
+        )
+        self.logger.bot = SimpleNamespace(get_channel=lambda _channel_id: None)
+        self.logger._vector_store = SimpleNamespace(
+            find_message_location=lambda **_kwargs: {
+                "guild_id": guild.id,
+                "channel_id": channel.id,
+                "message_id": fetched.id,
+            }
+        )
+        self.logger._cfg_int = lambda _key, default=0: default
+        self.logger._sanitize_for_prompt = lambda text, _max_len: text
+
+        context, refs, details = asyncio.run(
+            self.logger._build_referenced_messages_context(msg=msg, text=msg.content)
+        )
+
+        self.assertIn("IDだけで参照した本文", context)
+        self.assertEqual(refs, ["discord_message:333333333333333333"])
+        self.assertIn("discord_message message_id=333333333333333333 channel_id=222222222222222222", details)
+
     def test_sanitize_user_visible_answer_rewrites_reference_detail_label(self) -> None:
         text = "参照概要と参照詳細を確認してください。"
 

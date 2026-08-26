@@ -20,6 +20,7 @@ from src.kennybot.cogs.message_logger import MessageLogger
 from src.kennybot.cogs.reaction_roles import ReactionRoles
 from src.kennybot.cogs.slash_commands import SlashCommands
 from src.kennybot.cogs.weekly_ai_posts import WeeklyAiPosts
+from src.kennybot.cogs.flag_quiz import FlagQuiz
 from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.message_logger import log_codex_repair_mode
 from src.kennybot.utils.text import sanitize_user_visible_error
@@ -68,6 +69,7 @@ class MyBot(commands.Bot):
         await self.add_cog(MessageLogger(self))
         await self.add_cog(BirthdayReminders(self))
         await self.add_cog(WeeklyAiPosts(self))
+        await self.add_cog(FlagQuiz(self))
         await self.add_cog(ModPanel(self))
         await self.add_cog(ReactionRoles(self))
         await self.add_cog(SlashCommands(self))

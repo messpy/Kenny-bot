@@ -18,18 +18,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
         "ai": {
             "models": {
-                "default": "gpt-oss:120b",
-                "chat": "gpt-oss:120b",
-                "summary": "gpt-oss:120b",
+                "default": "gemini-3.7-flash",
+                "chat": "gemini-3.7-flash",
+                "summary": "gemini-3.7-flash",
                 "embedding": "embeddinggemma",
                 "fallback": ["gpt-oss:120b-cloud"],
             },
             "timeout_sec": 180,
         },
         "ollama": {
-            "model_default": "gemini-2.5-flash",
-            "model_chat": "gpt-oss:120b",
-            "model_summary": "gpt-oss:120b",
+            "model_default": "gemini-3.7-flash",
+            "model_chat": "gemini-3.7-flash",
+            "model_summary": "gemini-3.7-flash",
             "model_embedding": "embeddinggemma",
             "timeout_sec": 180,
         },
@@ -66,6 +66,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "weekly_ai_posts": {
             "enabled": False,
             "poll_seconds": 60,
+            "recent_history_limit": 12,
             "items": [],
         },
         "image_generation": {
