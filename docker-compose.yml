@@ -56,8 +56,7 @@ services:
       timeout: 5s
       retries: 10
     volumes:
-      - mariadb-data:/var/lib/mysql
+      - /mnt/ssd/kenny-bot/mariadb-data:/var/lib/mysql
 
 volumes:
   ollama-data:
-  mariadb-data:
