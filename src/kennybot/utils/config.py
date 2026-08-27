@@ -76,7 +76,7 @@ class AppConfig:
                 self._get_first(
                     "ai.models.default",
                     "ollama.model_default",
-                    default="gemini-3.7-flash",
+                    default="gemini-3.5-flash",
                     guild_id=guild_id,
                 )
             ),
@@ -84,7 +84,7 @@ class AppConfig:
                 self._get_first(
                     "ai.models.chat",
                     "ollama.model_chat",
-                    default="gemini-3.7-flash",
+                    default="gemini-3.5-flash",
                     guild_id=guild_id,
                 )
             ),
@@ -92,7 +92,7 @@ class AppConfig:
                 self._get_first(
                     "ai.models.summary",
                     "ollama.model_summary",
-                    default="gemini-3.7-flash",
+                    default="gemini-3.5-flash",
                     guild_id=guild_id,
                 )
             ),

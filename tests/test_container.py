@@ -57,10 +57,10 @@ class ContainerTests(TestCase):
 
         runner = ClientTextRunner(FakeClient())  # type: ignore[arg-type]
 
-        result = asyncio.run(runner.run_async("prompt", model="gemini-2.5-flash"))
+        result = asyncio.run(runner.run_async("prompt", model="gemini-3.5-flash"))
 
         self.assertEqual(result, "ok")
-        self.assertEqual(calls, [("gemini-2.5-flash", "prompt")])
+        self.assertEqual(calls, [("gemini-3.5-flash", "prompt")])
 
     def test_mybot_exposes_existing_attributes_from_container(self) -> None:
         container = _fake_container()

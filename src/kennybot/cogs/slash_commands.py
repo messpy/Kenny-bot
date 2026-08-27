@@ -1699,11 +1699,11 @@ class SlashCommands(commands.Cog):
         if not ((os.getenv("GEMINI_API_KEY") or "").strip() or (os.getenv("GOOGLE_API_KEY") or "").strip()):
             return []
         return [
-            "gemini-3.7-flash",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-flash-lite-latest",
+            "gemini-flash-latest",
         ]
 
     def _list_models_for_host(self, host: str | None) -> list[str]:

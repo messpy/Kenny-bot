@@ -137,7 +137,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
                 direct_web_answer,
             )
         )
-        self.logger._current_chat_model_name = lambda: "gemini-2.5-flash"
+        self.logger._current_chat_model_name = lambda: "gemini-3.5-flash"
         self.logger._ai_progress_countdowns = SimpleNamespace(
             start_countup=AsyncMock(),
             stop=AsyncMock(),
@@ -199,7 +199,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.assertEqual(self.logger._resolve_chat_context.await_args.kwargs["text"], "こんにちは、雑談しよ")
         self.logger._run_ollama_chat_with_tools.assert_awaited_once()
         run_kwargs = self.logger._run_ollama_chat_with_tools.await_args.kwargs
-        self.assertEqual(run_kwargs["model"], "gemini-2.5-flash")
+        self.assertEqual(run_kwargs["model"], "gemini-3.5-flash")
         user_prompt = run_kwargs["messages"][1]["content"]
         self.assertIn("ユーザーに見せる最終回答だけ", user_prompt)
         self.assertIn("1〜3文で簡潔", user_prompt)
@@ -209,7 +209,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         send_args = self.logger._send_ai_text_response.await_args
         self.assertEqual(send_args.args[1], "自然な返答です。")
         self.assertEqual(send_args.kwargs["prefix"], "<@1>\n")
-        self.assertEqual(send_args.kwargs["model_name"], "gemini-2.5-flash")
+        self.assertEqual(send_args.kwargs["model_name"], "gemini-3.5-flash")
         self.logger.bot.process_commands.assert_awaited_once_with(msg)
 
     def test_on_message_url_question_keeps_url_in_prompt_without_forcing_search(self) -> None:
@@ -324,7 +324,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         )
         self.logger._format_git_updates = lambda count=4: ""
         self.logger._is_update_query = lambda _text: False
-        self.logger._current_chat_model_name = lambda: "gemini-2.5-flash"
+        self.logger._current_chat_model_name = lambda: "gemini-3.5-flash"
         self.logger._ai_progress_countdowns = SimpleNamespace(
             start_countup=AsyncMock(),
             stop=AsyncMock(),
@@ -1008,7 +1008,7 @@ class MessageLoggerSummaryTests(unittest.TestCase):
         self.logger._sanitize_for_prompt = lambda text, _limit: text.replace("<@999>", "").strip()
         self.logger._answer_channel_profile_query = AsyncMock()
         self.logger._resolve_chat_context = AsyncMock(return_value=("", [], [], [], ""))
-        self.logger._current_chat_model_name = lambda: "gemini-2.5-flash"
+        self.logger._current_chat_model_name = lambda: "gemini-3.5-flash"
         self.logger._cfg_ai_timeout = lambda: 1
         self.logger._ai_progress_countdowns = SimpleNamespace(
             start_countup=AsyncMock(),

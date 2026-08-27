@@ -472,7 +472,7 @@ class FlagQuiz(commands.Cog):
                 str(fallback["quiz_text"]),
             )
             return fallback
-        model = str(getattr(self.bot, "ollama_model", "") or "gemini-3.7-flash")
+        model = str(getattr(self.bot, "ollama_model", "") or "gemini-3.5-flash")
         try:
             raw = await asyncio.to_thread(
                 client.chat_simple,

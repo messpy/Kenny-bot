@@ -236,7 +236,7 @@ def _resolve_model_name(payload: dict[str, Any], *, args: Any | None = None) -> 
     if not model_name and args is not None and hasattr(args, "ollama_model") and getattr(args, "ollama_model"):
         model_name = getattr(args, "ollama_model")
     if not model_name:
-        model_name = OLLAMA_MODEL_DEFAULT or "gemini-3.7-flash"
+        model_name = OLLAMA_MODEL_DEFAULT or "gemini-3.5-flash"
     return str(model_name)
 
 

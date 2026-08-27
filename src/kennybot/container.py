@@ -176,12 +176,12 @@ def build_app_container() -> AppContainer:
     if gemini_api_key:
         gemini_vision_client = GeminiVisionClient(
             api_key=gemini_api_key,
-            model=os.getenv("GEMINI_VISION_MODEL", "gemini-3.7-flash"),
+            model=os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash"),
             fallback_models=tuple(
                 item.strip()
                 for item in os.getenv(
                     "GEMINI_VISION_FALLBACK_MODELS",
-                    "gemini-3.7-flash,gemini-2.5-flash,gemini-flash-latest,gemini-2.0-flash-lite",
+                    "gemini-3.5-flash-lite,gemini-flash-lite-latest,gemini-3.6-flash",
                 ).split(",")
                 if item.strip()
             ),

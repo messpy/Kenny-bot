@@ -123,7 +123,7 @@ Request構造:
 → いきなり自然な一次応答
 
 ■ 推論中
-<@USER_ID> gemini-2.5-flashが4秒推論中
+<@USER_ID> gemini-3.5-flashが4秒推論中
 
 ■ 最終回答
 自然な会話 + 質問で終了

@@ -167,7 +167,7 @@ class WeeklyAiPostsTests(unittest.TestCase):
             "weekday": "日曜",
             "time": "12:00",
             "timezone": "Asia/Tokyo",
-            "model": "gemini-2.5-flash",
+            "model": "gemini-3.5-flash",
             "prompt": "海外豆知識",
             "today_language": {"enabled": True},
         }

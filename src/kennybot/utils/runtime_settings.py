@@ -18,18 +18,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "global": {
         "ai": {
             "models": {
-                "default": "gemini-3.7-flash",
-                "chat": "gemini-3.7-flash",
-                "summary": "gemini-3.7-flash",
+                "default": "gemini-3.5-flash",
+                "chat": "gemini-3.5-flash",
+                "summary": "gemini-3.5-flash",
                 "embedding": "embeddinggemma",
                 "fallback": ["gpt-oss:120b-cloud"],
             },
             "timeout_sec": 180,
         },
         "ollama": {
-            "model_default": "gemini-3.7-flash",
-            "model_chat": "gemini-3.7-flash",
-            "model_summary": "gemini-3.7-flash",
+            "model_default": "gemini-3.5-flash",
+            "model_chat": "gemini-3.5-flash",
+            "model_summary": "gemini-3.5-flash",
             "model_embedding": "embeddinggemma",
             "timeout_sec": 180,
         },
