@@ -84,3 +84,32 @@ class OllamaClientFallbackTest(TestCase):
         model = service._normalize_local_fallback_model("gpt-oss:120b-cloud")
 
         self.assertEqual(model, "gpt-oss:120b-cloud")
+
+    def test_gateway_provider_defaults_to_gemini_for_gemini_model(self) -> None:
+        service = OllamaClientService.__new__(OllamaClientService)
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(service._ai_gateway_provider("gemini-2.5-flash"), "gemini")
+            self.assertEqual(service._ai_gateway_provider("gpt-oss:120b-cloud"), "ollama")
+
+    def test_chat_simple_uses_ai_gateway_when_configured(self) -> None:
+        service = OllamaClientService.__new__(OllamaClientService)
+        service._http = SimpleNamespace(post=self._fake_gateway_post)
+        service._local_fallback_client = None
+        service.config = SimpleNamespace(_is_local_host=lambda: True)
+
+        with patch.dict("os.environ", {"AI_GATEWAY_URL": "http://gateway.test"}, clear=True):
+            result = service.chat_simple("gemini-2.5-flash", "hello")
+
+        self.assertEqual(result, "gateway reply")
+
+    @staticmethod
+    def _fake_gateway_post(*args, **kwargs):
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"success": True, "output_text": "gateway reply"}
+
+        return Response()

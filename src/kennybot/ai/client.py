@@ -103,6 +103,59 @@ class OllamaClientService:
             or ""
         ).strip()
 
+    def _ai_gateway_url(self) -> str:
+        return (
+            os.getenv("KENNYBOT_AI_GATEWAY_URL")
+            or os.getenv("AI_GATEWAY_URL")
+            or ""
+        ).strip().rstrip("/")
+
+    def _ai_gateway_provider(self, model: str) -> str:
+        configured = (
+            os.getenv("KENNYBOT_AI_GATEWAY_PROVIDER")
+            or os.getenv("AI_GATEWAY_DEFAULT_PROVIDER")
+            or ""
+        ).strip().lower()
+        if configured:
+            return configured
+        return "gemini" if self._is_gemini_model(model) else "ollama"
+
+    def _chat_simple_via_ai_gateway(self, *, model: str, prompt: str, timeout_sec: float | None = None) -> str | None:
+        gateway_url = self._ai_gateway_url()
+        if not gateway_url:
+            return None
+        provider = self._ai_gateway_provider(model)
+        token = (
+            os.getenv("KENNYBOT_AI_GATEWAY_BEARER_TOKEN")
+            or os.getenv("AI_GATEWAY_BEARER_TOKEN")
+            or ""
+        ).strip()
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        payload = {
+            "provider": provider,
+            "model": model,
+            "inputs": [{"type": "text", "text": prompt}],
+            "options": {"stream": False, "timeout_sec": timeout_sec or get_app_config().ai_models().timeout_sec},
+            "metadata": {"client": "kennybot", "method": "chat_simple"},
+        }
+        response = self._http.post(
+            f"{gateway_url}/v1/chat",
+            json=payload,
+            headers=headers,
+            timeout=timeout_sec or get_app_config().ai_models().timeout_sec,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or data.get("success") is False:
+            error_payload = data.get("error") if isinstance(data, dict) else None
+            if isinstance(error_payload, dict):
+                raise RuntimeError(error_payload.get("message") or error_payload.get("code") or "AI gateway request failed")
+            raise RuntimeError("AI gateway request failed")
+        content = str(data.get("output_text") or "").strip()
+        return content or None
+
     def _is_gemini_model(self, model: str) -> bool:
         value = (model or "").strip().lower()
         return value.startswith("gemini") or value.startswith("models/gemini")
@@ -872,6 +925,18 @@ class OllamaClientService:
             return last_content
         last_error: Exception | None = None
         for candidate in candidates:
+            if self._ai_gateway_url():
+                try:
+                    gateway_result = self._chat_simple_via_ai_gateway(
+                        model=candidate,
+                        prompt=prompt,
+                        timeout_sec=kwargs.get("timeout_sec"),
+                    )
+                    if gateway_result:
+                        return gateway_result
+                except Exception as err:
+                    last_error = err
+                    logger.warning("chat_simple AI gateway failed with model '%s': %r", candidate, err)
             try:
                 resp = self._chat_with_auto_pull(model=candidate, messages=messages, **kwargs)
                 msg = resp.get("message", {}) if isinstance(resp, dict) else getattr(resp, "message", {}) or {}
