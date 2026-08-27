@@ -29,6 +29,11 @@ if "discord" not in sys.modules:
     discord.VoiceState = object
     discord.Guild = object
     discord.__path__ = []
+    app_commands = types.ModuleType("discord.app_commands")
+    app_commands.Choice = lambda *args, **kwargs: SimpleNamespace(args=args, kwargs=kwargs)
+    app_commands.command = lambda *args, **kwargs: (lambda func: func)
+    app_commands.describe = lambda *args, **kwargs: (lambda func: func)
+    app_commands.choices = lambda *args, **kwargs: (lambda func: func)
     ext = types.ModuleType("discord.ext")
     ext.__path__ = []
     commands = types.ModuleType("discord.ext.commands")
@@ -47,8 +52,10 @@ if "discord" not in sys.modules:
     commands.Bot = object
     ext.commands = commands
     discord.ext = ext
+    discord.app_commands = app_commands
     discord.utils = utils
     sys.modules["discord"] = discord
+    sys.modules["discord.app_commands"] = app_commands
     sys.modules["discord.ext"] = ext
     sys.modules["discord.ext.commands"] = commands
     sys.modules["discord.utils"] = utils
@@ -118,7 +125,7 @@ class VoiceLoggerTests(unittest.TestCase):
 
         send_event_log_mock.assert_awaited_once()
 
-    def test_voice_join_skips_discord_management_log(self) -> None:
+    def test_voice_join_sends_discord_voice_event(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -135,9 +142,9 @@ class VoiceLoggerTests(unittest.TestCase):
             module.send_event_log = original
 
         self.assertEqual(send_event_log_mock.await_args.kwargs["channel_kind"], "voice")
-        self.assertIs(send_event_log_mock.await_args.kwargs["send_discord"], False)
+        self.assertNotIn("send_discord", send_event_log_mock.await_args.kwargs)
 
-    def test_voice_leave_skips_discord_management_log(self) -> None:
+    def test_voice_leave_sends_discord_voice_event(self) -> None:
         member = SimpleNamespace(id=1, mention="<@1>", name="member")
         channel = SimpleNamespace(id=10, name="VC")
         guild = SimpleNamespace(id=100, name="Guild")
@@ -155,7 +162,7 @@ class VoiceLoggerTests(unittest.TestCase):
             module.send_event_log = original
 
         self.assertEqual(send_event_log_mock.await_args.kwargs["channel_kind"], "voice")
-        self.assertIs(send_event_log_mock.await_args.kwargs["send_discord"], False)
+        self.assertNotIn("send_discord", send_event_log_mock.await_args.kwargs)
 
 
 if __name__ == "__main__":
