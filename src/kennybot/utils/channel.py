@@ -12,6 +12,12 @@ from .app_constants import CHANNEL_NAMES
 
 logger = logging.getLogger(__name__)
 
+# 旧構成では単数形 `voice-event` で作られているサーバーがあるため、
+# canonical name (`voice-events`) が見つからない場合だけ互換名も探す。
+CHANNEL_NAME_ALIASES = {
+    "voice": ("voice-event",),
+}
+
 
 def resolve_log_channel(guild: discord.Guild, kind: str) -> Optional[discord.TextChannel]:
     """
@@ -33,6 +39,16 @@ def resolve_log_channel(guild: discord.Guild, kind: str) -> Optional[discord.Tex
         return None
 
     ch = get_discord_obj(guild.text_channels, name=channel_name)
+    if ch is None:
+        for alias in CHANNEL_NAME_ALIASES.get(kind, ()):
+            ch = get_discord_obj(guild.text_channels, name=alias)
+            if ch is not None:
+                logger.info(
+                    "log channel(kind=%s) resolved using compatibility name=%s",
+                    kind,
+                    alias,
+                )
+                break
     if isinstance(ch, discord.TextChannel):
         return ch
 
