@@ -138,7 +138,7 @@ global:
     realtime_translation_min_audio_bytes: 24000
     recording_backend: internal
   voice:
-    log_private_channels: false
+    log_private_channels: true
     assistant_enabled_on_tts_join: true
     assistant_reply_cooldown_sec: 2.0
     assistant_min_chars: 2
