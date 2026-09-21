@@ -25,17 +25,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
                 "fallback": ["gpt-oss:120b-cloud"],
             },
             "timeout_sec": 180,
-            "decision": {
-                "mode": "disabled",
-                "provider": "jev",
-                "timeout_ms": 1500,
-                "max_concurrency": 2,
-                "max_inflight": 2,
-                "circuit_breaker_failure_threshold": 5,
-                "circuit_breaker_open_seconds": 30,
-                "decision_schema_version": "jev-shadow-v1",
-                "max_text_chars": 1200,
-            },
         },
         "ollama": {
             "model_default": "gemini-3.5-flash",

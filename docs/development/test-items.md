@@ -48,8 +48,6 @@ This checklist covers the duplicate mention reply fix, the shared message claim 
 | M-005 | Tool API HTTP mock | Run `python3 -m unittest tests.test_tool_api tests.test_tool_planner` | Local tool API routes return JSON successfully; planner input validation still passes |
 | M-006 | Profile preview API mock | Run `python3 -m unittest tests.test_profile_preview tests.test_profile_preview_api` | Mocked AI/HTTP fallback returns normalized profile responses without internal labels |
 | M-007 | Voice logger mock routing | Run `python3 -m unittest tests.test_voice_logger` | Duplicate leave suppression and Discord admin-log suppression both stay intact |
-| M-008 | Decision shadow unit tests | Run `./.venv/bin/python -m unittest tests.test_decision_shadow.JevProviderTests` | Jev payload shape and probability validation pass without network access |
-| M-009 | Decision production parity | Run the decision shadow parity fixtures | `disabled` and `shadow` have identical production side-effect traces; only Jev/metrics traces differ |
 
 ## Operational Checks
 

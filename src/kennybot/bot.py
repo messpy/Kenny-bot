@@ -124,16 +124,6 @@ class MyBot(commands.Bot):
             self._tree_synced = True
         logger.info("=== Bot Ready as %s ===", self.user)
 
-    async def close(self):
-        message_logger = self.get_cog("MessageLogger")
-        shutdown = getattr(message_logger, "shutdown", None)
-        if callable(shutdown):
-            try:
-                await shutdown()
-            except Exception:
-                logger.exception("Failed to shut down decision shadow runner")
-        await super().close()
-
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         logger.exception("Unhandled app command error", exc_info=error)
         safe_error = sanitize_user_visible_error(error, max_chars=1000)

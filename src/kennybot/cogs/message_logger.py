@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import io
 import logging
-import os
 import re
 import subprocess
 import time
@@ -36,12 +35,7 @@ from src.kennybot.utils.event_logger import send_event_log
 from src.kennybot.utils.countdown import ChannelCountdown
 from src.kennybot.utils.message_vector_store import MessageVectorStore
 from src.kennybot.utils.command_catalog import COMMAND_CATEGORY_ORDER, HELP_SECTIONS, SLASH_COMMANDS
-from src.kennybot.utils.paths import (
-    DECISION_METRICS_LOG,
-    MESSAGE_VECTOR_SQLITE_PATH,
-    ROOT_DIR,
-    RUNTIME_STATE_DIR,
-)
+from src.kennybot.utils.paths import MESSAGE_VECTOR_SQLITE_PATH, ROOT_DIR, RUNTIME_STATE_DIR
 from src.kennybot.utils.message_logger import (
     log_user_message,
     log_ai_output,
@@ -74,9 +68,6 @@ from src.kennybot.utils.tool_planner import (
 from src.kennybot.utils.time import JST, now_jst
 from src.kennybot.features.moderation import ModActions
 from src.kennybot.features.spam import EveryoneMentionViolation, SpamGuard
-from src.kennybot.ai.decision import DecisionContext, DecisionShadowRunner
-from src.kennybot.ai.decision.metrics import DecisionMetricsStore
-from src.kennybot.ai.decision.providers.jev import build_jev_provider
 
 
 logger = logging.getLogger(__name__)
@@ -219,122 +210,6 @@ class MessageLogger(BaseCog):
         self._message_claims = MessageClaimStore(
             self.root / RUNTIME_STATE_DIR / "message_claims"
         )
-        self._decision_shadow_runner: DecisionShadowRunner | None = None
-        self._init_decision_shadow_runner()
-
-    def _init_decision_shadow_runner(self) -> None:
-        mode = str(_settings.get("ai.decision.mode", "disabled") or "disabled").strip().lower()
-        if mode not in {"disabled", "shadow"}:
-            logger.warning("Unsupported ai.decision.mode=%s; using disabled", mode)
-            mode = "disabled"
-        if mode == "disabled":
-            return
-
-        def _int(path: str, default: int) -> int:
-            try:
-                return int(_settings.get(path, default))
-            except Exception:
-                return default
-
-        def _float(path: str, default: float) -> float:
-            try:
-                return float(_settings.get(path, default))
-            except Exception:
-                return default
-
-        timeout_seconds = max(0.1, _float("ai.decision.timeout_ms", 1500) / 1000)
-        max_text_chars = _int("ai.decision.max_text_chars", 1200)
-        schema_version = str(
-            _settings.get("ai.decision.decision_schema_version", "jev-shadow-v1")
-            or "jev-shadow-v1"
-        )
-        contract_confirmed = os.getenv("JEV_API_CONTRACT_CONFIRMED", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        provider = (
-            build_jev_provider(
-                timeout_seconds=timeout_seconds,
-                max_text_chars=max_text_chars,
-                schema_version=schema_version,
-            )
-            if contract_confirmed
-            else None
-        )
-        no_key = provider is None
-        unavailable_reason = None
-        if not contract_confirmed:
-            no_key = False
-            unavailable_reason = "api_contract_unconfirmed"
-            logger.warning(
-                "Jev shadow mode is enabled but JEV_API_CONTRACT_CONFIRMED is not set; "
-                "evaluations will be skipped"
-            )
-        elif no_key:
-            logger.warning(
-                "Jev shadow mode is enabled but JEV_API_KEY is not configured; "
-                "evaluations will be skipped"
-            )
-
-        self._decision_shadow_runner = DecisionShadowRunner(
-            provider=provider,
-            no_key=no_key,
-            unavailable_reason=unavailable_reason,
-            metrics=DecisionMetricsStore(DECISION_METRICS_LOG),
-            timeout_seconds=timeout_seconds,
-            max_concurrency=_int("ai.decision.max_concurrency", 2),
-            max_inflight=_int("ai.decision.max_inflight", 2),
-            circuit_breaker_failure_threshold=_int(
-                "ai.decision.circuit_breaker_failure_threshold", 5
-            ),
-            circuit_breaker_open_seconds=_float(
-                "ai.decision.circuit_breaker_open_seconds", 30
-            ),
-            schema_version=schema_version,
-        )
-
-    def _shadow_eligible(self, msg: discord.Message) -> bool:
-        """Pure eligibility guard; it must not touch production state."""
-        if getattr(self, "_decision_shadow_runner", None) is None:
-            return False
-        if self.bot.user and getattr(msg.author, "id", 0) == self.bot.user.id:
-            return False
-        if bool(getattr(msg.author, "bot", False)):
-            return False
-        if getattr(msg, "webhook_id", None) is not None:
-            return False
-        return True
-
-    def _build_shadow_context(self, msg: discord.Message) -> DecisionContext:
-        max_chars = self._cfg_int("ai.decision.max_text_chars", 1200)
-        text = self._sanitize_for_prompt(normalize_user_text(msg.content or ""), max_chars)
-        attachment_types: list[str] = []
-        for attachment in getattr(msg, "attachments", []) or []:
-            content_type = str(getattr(attachment, "content_type", "") or "").strip().lower()
-            attachment_types.append(content_type or "unknown")
-        return DecisionContext(
-            text=text[:max_chars],
-            has_reply=bool(getattr(msg, "reference", None)),
-            has_mentions=bool(
-                getattr(msg, "mentions", None) or getattr(msg, "role_mentions", None)
-            ),
-            is_dm=getattr(msg, "guild", None) is None,
-            attachment_types=tuple(attachment_types[:16]),
-        )
-
-    def _submit_shadow(self, msg: discord.Message) -> None:
-        if not self._shadow_eligible(msg):
-            return
-        try:
-            self._decision_shadow_runner.submit(self._build_shadow_context(msg))  # type: ignore[union-attr]
-        except Exception:
-            logger.exception("Failed to submit Jev shadow evaluation")
-
-    async def shutdown(self) -> None:
-        runner = getattr(self, "_decision_shadow_runner", None)
-        if runner is not None:
-            await runner.shutdown()
 
     def _image_attachments(self, msg: discord.Message) -> list[discord.Attachment]:
         attachments = []
@@ -5505,10 +5380,6 @@ class MessageLogger(BaseCog):
         if not self._claim_message_once(message_id):
             logger.info("Skipped duplicate message handling for message_id=%s", message_id)
             return
-
-        # Observational only: eligibility is checked before context construction,
-        # and production handling continues without waiting for Jev.
-        self._submit_shadow(msg)
 
         # DM は AI 会話のみ許可
         if msg.guild is None:
