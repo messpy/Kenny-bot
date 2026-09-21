@@ -499,6 +499,15 @@ Planner はこのカタログから必要な情報源を選び、実行層はそ
 - worktree 作成失敗、`codex` 実行失敗、結果ファイル欠落は通常会話エラーと分けて管理ログへ送る
 - `Codexモード=あり` の管理ログは、少なくとも job ID と branch 名を追跡できる状態を目標とする
 
+### 11.4 Jev Shadow Decision Layer
+
+- `src/kennybot/ai/decision/` は observational なDecision評価専用であり、production routingを変更しない
+- `ai.decision.mode` は `disabled`（既定）または `shadow` のみ。`active` routingは実装しない
+- Shadow有効時は最小化した本文/stateを外部Jev providerへ送信するため、明示的なopt-inが必要
+- 実API呼び出しには`JEV_API_KEY`に加えて、確認済みschemaを明示する`JEV_API_CONTRACT_CONFIRMED=true`が必要
+- Jev由来のWeb検索、LiveInfo、RAG、Vector Store、Codex、Discord送信は禁止
+- Decision metricsは通常のDiscordイベントログと分離し、Discord識別子・本文を保存しない
+
 ## 12. 既知の設計上の状態
 
 - `src/kennybot/` への移行は進行中で、互換ラッパーが残っている
